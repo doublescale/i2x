@@ -169,21 +169,28 @@ int main(int argc, char** argv)
       if(glx_configs && glx_config_count > 0)
       {
         GLXFBConfig glx_config = glx_configs[0];
-        XFree(glx_configs);
 
 #if 0
         printf("%d GLX configs available.\n", glx_config_count);
+        for(i32 i = 0;
+            i < glx_config_count;
+            ++i)
         {
+          printf("\n%d:\n", i);
           int tmp;
-          glXGetFBConfigAttrib(display, glx_config, GLX_DEPTH_SIZE, &tmp);
-          printf("GLX_DEPTH_SIZE: %d\n", tmp);
-          glXGetFBConfigAttrib(display, glx_config, GLX_SAMPLE_BUFFERS, &tmp);
-          printf("GLX_SAMPLE_BUFFERS: %d\n", tmp);
-          glXGetFBConfigAttrib(display, glx_config, GLX_SAMPLES, &tmp);
-          printf("GLX_SAMPLES: %d\n", tmp);
+#define PRATTR(x) glXGetFBConfigAttrib(display, glx_configs[i], x, &tmp); printf("  " #x ": %d\n", tmp);
+          PRATTR(GLX_DOUBLEBUFFER);
+          PRATTR(GLX_RED_SIZE);
+          PRATTR(GLX_GREEN_SIZE);
+          PRATTR(GLX_BLUE_SIZE);
+          PRATTR(GLX_DEPTH_SIZE);
+          PRATTR(GLX_SAMPLE_BUFFERS);
+          PRATTR(GLX_SAMPLES);
+#undef PRATTR
         }
 #endif
 
+        XFree(glx_configs);
         GLXContext glx_context = glXCreateNewContext(display, glx_config, GLX_RGBA_TYPE, 0, True);
         if(!glXIsDirect(display, glx_context))
         {
@@ -251,6 +258,8 @@ int main(int argc, char** argv)
         b32 alpha_blend = true;
         b32 extra_magnification = false;
         b32 clear_bg = true;
+        b32 srgb_framebuffer = false;
+        b32 srgb_texture = false;
         b32 extra_toggles[10] = {0};
 
         while(!quitting)
@@ -269,6 +278,7 @@ int main(int argc, char** argv)
                 u32 keycode = event.xkey.keycode;
                 KeySym keysym = 0;
                 keysym = XLookupKeysym(&event.xkey, 0);
+                b32 shift_held = (event.xkey.state & 0x01);
 
                 printf("state %#x keycode %u keysym %#lx (%s) %s\n",
                     event.xkey.state, keycode, keysym, XKeysymToString(keysym),
@@ -293,6 +303,14 @@ int main(int argc, char** argv)
                 else if(keysym == 'm')
                 {
                   bflip(extra_magnification);
+                }
+                else if(keysym == 's')
+                {
+                  bflip(srgb_framebuffer);
+                }
+                else if(keysym == 'd')
+                {
+                  bflip(srgb_texture);
                 }
                 else if(keysym == 't')
                 {
@@ -415,6 +433,15 @@ int main(int argc, char** argv)
           }
 #endif
 
+          if(srgb_framebuffer)
+          {
+            glEnable(GL_FRAMEBUFFER_SRGB);
+          }
+          else
+          {
+            glDisable(GL_FRAMEBUFFER_SRGB);
+          }
+
           glViewport(0, 0, win_w, win_h);
           if(clear_bg)
           {
@@ -422,7 +449,12 @@ int main(int argc, char** argv)
           }
           else
           {
-            glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
+            r32 gray = 0.5f;
+            if(srgb_framebuffer)
+            {
+              gray = powf(gray, 2.2f);
+            }
+            glClearColor(gray, gray, gray, 1.0f);
           }
           glClear(GL_COLOR_BUFFER_BIT);
 
@@ -438,16 +470,22 @@ int main(int argc, char** argv)
             glLoadMatrixf(matrix);
           }
 
+#if 0
+          glMatrixMode(GL_MODELVIEW);
+          glLoadIdentity();
+          glRotatef(30.0f, 0, 0, 1);
+#endif
+
           u8 texels[] = {
-            50, 50, 50, 255,
+            1, 1, 1, 255,
             255, 0, 0, 255,
             0, 255, 0, 255,
             0, 0, 255, 255,
-            150, 150, 150, 255,
+            2, 2, 2, 255,
             255, 255, 0, 255,
             0, 255, 255, 255,
             255, 0, 255, 255,
-            255, 255, 255, 255,
+            128, 128, 128, 255,
           };
           i32 tex_w = 3;
           i32 tex_h = 3;
@@ -463,9 +501,12 @@ int main(int argc, char** argv)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 #endif
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
-            glGenerateMipmap(GL_TEXTURE_2D);
+            // glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+            // glGenerateMipmap(GL_TEXTURE_2D);
           }
+
+          glTexImage2D(GL_TEXTURE_2D, 0, srgb_texture ? GL_SRGB_ALPHA : GL_RGBA, tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+          glGenerateMipmap(GL_TEXTURE_2D);
 
           glEnable(GL_TEXTURE_2D);
 
@@ -506,8 +547,8 @@ int main(int argc, char** argv)
           r32 u1 = 1.0f;
           r32 v1 = 1.0f;
 
-          r32 mag = 0.6f + 0.5f * sinf(0.01f * TAU * fmodf(time, 50));
-          if(extra_magnification) { mag *= 4; }
+          r32 mag = 4.0f;
+          if(extra_magnification) { mag *= 32; }
 
           r32 x0 = 2 + 1.0f * fmodf(time, 50);
           r32 x1 = x0 + mag * tex_w;
