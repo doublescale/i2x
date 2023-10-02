@@ -45,72 +45,11 @@ static const u32 replacement_character_codepoint = 0xFFFD;
 
 static void (*glXSwapIntervalEXT)(Display *dpy, GLXDrawable drawable, int interval);
 
-typedef struct
+internal u64 get_nanoseconds()
 {
-} ui_state_t;
-
-internal u32 decode_utf8(u8** start, u8* end)
-{
-  u8 c = **start;
-  u32 codepoint = 0;
-  i32 extra_byte_count = 0;
-  if(c & 0x80)
-  {
-    if((c & 0xE0) == 0xC0)
-    {
-      codepoint = (c & 0x1F);
-      extra_byte_count = 1;
-    }
-    else if((c & 0xF0) == 0xE0)
-    {
-      codepoint = (c & 0x0F);
-      extra_byte_count = 2;
-    }
-    else if((c & 0xF8) == 0xF0)
-    {
-      codepoint = (c & 0x07);
-      extra_byte_count = 3;
-    }
-    else
-    {
-      // Invalid non-continuation byte.
-      codepoint = replacement_character_codepoint;
-    }
-
-    if(*start + extra_byte_count < end)
-    {
-      b32 invalid_continuation = false;
-      for(i32 extra_byte_idx = 0;
-          extra_byte_idx < extra_byte_count;
-          ++extra_byte_idx)
-      {
-        ++*start;
-        c = **start;
-        invalid_continuation = !is_utf8_continuation_byte(c);
-        if(invalid_continuation)
-        {
-          // Expected continuation byte, but didn't get it.
-          --*start;
-          codepoint = replacement_character_codepoint;
-          break;
-        }
-        codepoint = (codepoint << 6) | (c & 0x3F);
-      }
-    }
-    else
-    {
-      // Expected more bytes.
-      codepoint = replacement_character_codepoint;
-    }
-  }
-  else
-  {
-    // ASCII.
-    codepoint = (u32)c;
-  }
-  ++*start;
-
-  return codepoint;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_nsec + 1000000000 * ts.tv_sec;
 }
 
 int main(int argc, char** argv)
@@ -159,8 +98,8 @@ int main(int argc, char** argv)
         GLX_GREEN_SIZE,     8,
         GLX_BLUE_SIZE,      8,
         // GLX_DEPTH_SIZE,    16,
-        // GLX_SAMPLE_BUFFERS, 0,
-        // GLX_SAMPLES,        0, // 4,
+        // GLX_SAMPLE_BUFFERS, 1,
+        // GLX_SAMPLES,        4,
         0
       };
       int glx_config_count = 0;
@@ -228,9 +167,11 @@ int main(int argc, char** argv)
         XFree(visual_info);
         GLXWindow glx_window = glXCreateWindow(display, glx_config, window, 0);
 
+        b32 vsync = true;
+
         // TODO: Check if GLX_EXT_swap_control is in the extensions string first.
         // Enable VSync.
-        glXSwapIntervalEXT(display, glx_window, 1);
+        glXSwapIntervalEXT(display, glx_window, vsync);
 
         XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace,
             (unsigned char*)WINDOW_TITLE, sizeof(WINDOW_TITLE) - 1);
@@ -251,7 +192,14 @@ int main(int argc, char** argv)
         i32 win_w = WINDOW_INIT_W;
         i32 win_h = WINDOW_INIT_H;
         GLuint texture_id = 0;
+
         r32 time = 0;
+        u32 frames_since_last_print = 0;
+        u64 nsecs_last_print = get_nanoseconds();
+        u64 nsecs_last_frame = nsecs_last_print;
+        i64 nsecs_min = I64_MAX;
+        i64 nsecs_max = I64_MIN;
+
         b32 quitting = false;
         b32 border_sampling = true;
         b32 linear_sampling = true;
@@ -264,6 +212,8 @@ int main(int argc, char** argv)
 
         while(!quitting)
         {
+          b32 texture_needs_update = false;
+
           while(XPending(display))
           {
             XEvent event;
@@ -280,9 +230,11 @@ int main(int argc, char** argv)
                 keysym = XLookupKeysym(&event.xkey, 0);
                 b32 shift_held = (event.xkey.state & 0x01);
 
+#if 0
                 printf("state %#x keycode %u keysym %#lx (%s) %s\n",
                     event.xkey.state, keycode, keysym, XKeysymToString(keysym),
                     went_down ? "Pressed" : "Released");
+#endif
 
                 if(keysym == XK_Escape)
                 {
@@ -299,6 +251,7 @@ int main(int argc, char** argv)
                 else if(keysym == 'l')
                 {
                   bflip(linear_sampling);
+                  texture_needs_update = true;
                 }
                 else if(keysym == 'm')
                 {
@@ -307,14 +260,30 @@ int main(int argc, char** argv)
                 else if(keysym == 's')
                 {
                   bflip(srgb_framebuffer);
+
+                  if(srgb_framebuffer)
+                  {
+                    glEnable(GL_FRAMEBUFFER_SRGB);
+                  }
+                  else
+                  {
+                    glDisable(GL_FRAMEBUFFER_SRGB);
+                  }
                 }
                 else if(keysym == 'd')
                 {
                   bflip(srgb_texture);
+                  texture_needs_update = true;
                 }
                 else if(keysym == 't')
                 {
                   bflip(alpha_blend);
+                }
+                else if(keysym == 'v')
+                {
+                  bflip(vsync);
+
+                  glXSwapIntervalEXT(display, glx_window, (int)vsync);
                 }
                 else if(keysym >= '0' && keysym <= '9')
                 {
@@ -331,8 +300,10 @@ int main(int argc, char** argv)
                 b32 went_down = (event.type == ButtonPress);
                 u32 button = event.xbutton.button;
 
+#if 0
                 printf("state %#x button %u %s\n",
                     event.xbutton.state, button, went_down ? "Pressed" : "Released");
+#endif
 
                 if(button == 1)
                 {
@@ -433,14 +404,6 @@ int main(int argc, char** argv)
           }
 #endif
 
-          if(srgb_framebuffer)
-          {
-            glEnable(GL_FRAMEBUFFER_SRGB);
-          }
-          else
-          {
-            glDisable(GL_FRAMEBUFFER_SRGB);
-          }
 
           glViewport(0, 0, win_w, win_h);
           if(clear_bg)
@@ -492,6 +455,7 @@ int main(int argc, char** argv)
 
           if(!texture_id)
           {
+            texture_needs_update = true;
             glGenTextures(1, &texture_id);
             glBindTexture(GL_TEXTURE_2D, texture_id);
 #if 0
@@ -501,34 +465,27 @@ int main(int argc, char** argv)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 #endif
-            // glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
-            // glGenerateMipmap(GL_TEXTURE_2D);
           }
 
-          glTexImage2D(GL_TEXTURE_2D, 0, srgb_texture ? GL_SRGB_ALPHA : GL_RGBA, tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
-          glGenerateMipmap(GL_TEXTURE_2D);
-
-          glEnable(GL_TEXTURE_2D);
-
-          if(linear_sampling)
+          if(texture_needs_update)
           {
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-#if 0
-            // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-#else
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                extra_toggles[1]
-                ? GL_LINEAR
-                : extra_toggles[2] ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
-#endif
-          }
-          else
-          {
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            if(linear_sampling)
+            {
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                  extra_toggles[1]
+                  ? GL_LINEAR
+                  : extra_toggles[2] ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
+            }
+            else
+            {
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            }
+            glTexImage2D(GL_TEXTURE_2D, 0,
+                srgb_texture ? GL_SRGB_ALPHA : GL_RGBA,
+                tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+            glGenerateMipmap(GL_TEXTURE_2D);
           }
 
           if(alpha_blend)
@@ -541,6 +498,8 @@ int main(int argc, char** argv)
           {
             glDisable(GL_BLEND);
           }
+
+          glEnable(GL_TEXTURE_2D);
 
           r32 u0 = 0.0f;
           r32 v0 = 0.0f;
@@ -578,9 +537,32 @@ int main(int argc, char** argv)
           glEnd();
 
           glXSwapBuffers(display, glx_window);
+
+          u64 nsecs_now = get_nanoseconds();
+          i64 nsecs = nsecs_now - nsecs_last_frame;
+          nsecs_last_frame = nsecs_now;
+#if 1
+          ++frames_since_last_print;
+          nsecs_min = min(nsecs_min, nsecs);
+          nsecs_max = max(nsecs_max, nsecs);
+          r32 secs_since_last_print = 1e-9f * (r32)(nsecs_now - nsecs_last_print);
+          if(secs_since_last_print >= 0.5f)
+          {
+            printf("avg FPS: %.1f [%.1f - %.1f]\n",
+                (r32)frames_since_last_print / secs_since_last_print,
+                1e9f / (r32)nsecs_max,
+                1e9f / (r32)nsecs_min);
+            frames_since_last_print = 0;
+            nsecs_last_print = nsecs_now;
+            nsecs_min = I64_MAX;
+            nsecs_max = I64_MIN;
+          }
+#endif
+
           if(!extra_toggles[0])
           {
-            time += 1.0f / 60.0f;
+            // time += 1.0f / 60.0f;
+            time += 1e-9f * nsecs;
             if(time >= 1000) { time -= 1000; }
           }
         }
