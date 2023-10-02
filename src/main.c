@@ -30,15 +30,13 @@
 #undef GL_GLEXT_PROTOTYPES
 // #include <GL/glxext.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "lib/stb_image.h"
+
 #include "util.h"
 
-#if 0
 #define WINDOW_INIT_W 800
 #define WINDOW_INIT_H 600
-#else
-#define WINDOW_INIT_W 20
-#define WINDOW_INIT_H 20
-#endif
 #define WINDOW_TITLE "i2x"
 
 static const u32 replacement_character_codepoint = 0xFFFD;
@@ -189,6 +187,32 @@ int main(int argc, char** argv)
           XFreePixmap(display, empty_pixmap);
         }
 
+        i32 img_w = 0;
+        i32 img_h = 0;
+        u8* img_pixels = 0;
+        if(argc > 1)
+        {
+          img_pixels = stbi_load(argv[1], &img_w, &img_h, 0, 4);
+
+#if 0
+          // Premultiply alpha.
+          for(u64 i = 0; i < (u64)img_w * (u64)img_h; ++i)
+          {
+            if(img_pixels[4*i + 3] != 255)
+            {
+              r32 r = img_pixels[4*i + 0] / 255.0f;
+              r32 g = img_pixels[4*i + 1] / 255.0f;
+              r32 b = img_pixels[4*i + 2] / 255.0f;
+              r32 a = img_pixels[4*i + 3] / 255.0f;
+
+              img_pixels[4*i + 0] = 255.0f * a * r;
+              img_pixels[4*i + 1] = 255.0f * a * g;
+              img_pixels[4*i + 2] = 255.0f * a * b;
+            }
+          }
+#endif
+        }
+
         i32 win_w = WINDOW_INIT_W;
         i32 win_h = WINDOW_INIT_H;
         GLuint texture_id = 0;
@@ -204,11 +228,12 @@ int main(int argc, char** argv)
         b32 border_sampling = true;
         b32 linear_sampling = true;
         b32 alpha_blend = true;
-        b32 extra_magnification = false;
         b32 clear_bg = true;
-        b32 srgb_framebuffer = false;
-        b32 srgb_texture = false;
+        b32 srgb = false;
         b32 extra_toggles[10] = {0};
+        r32 zoom = 0;
+        r32 offset_x = 0;
+        r32 offset_y = 0;
 
         while(!quitting)
         {
@@ -228,7 +253,8 @@ int main(int argc, char** argv)
                 u32 keycode = event.xkey.keycode;
                 KeySym keysym = 0;
                 keysym = XLookupKeysym(&event.xkey, 0);
-                b32 shift_held = (event.xkey.state & 0x01);
+                b32 shift_held = (event.xkey.state & 1);
+                b32 ctrl_held = (event.xkey.state & 4);
 
 #if 0
                 printf("state %#x keycode %u keysym %#lx (%s) %s\n",
@@ -253,15 +279,11 @@ int main(int argc, char** argv)
                   bflip(linear_sampling);
                   texture_needs_update = true;
                 }
-                else if(keysym == 'm')
-                {
-                  bflip(extra_magnification);
-                }
                 else if(keysym == 's')
                 {
-                  bflip(srgb_framebuffer);
+                  bflip(srgb);
 
-                  if(srgb_framebuffer)
+                  if(srgb)
                   {
                     glEnable(GL_FRAMEBUFFER_SRGB);
                   }
@@ -269,10 +291,6 @@ int main(int argc, char** argv)
                   {
                     glDisable(GL_FRAMEBUFFER_SRGB);
                   }
-                }
-                else if(keysym == 'd')
-                {
-                  bflip(srgb_texture);
                   texture_needs_update = true;
                 }
                 else if(keysym == 't')
@@ -285,6 +303,24 @@ int main(int argc, char** argv)
 
                   glXSwapIntervalEXT(display, glx_window, (int)vsync);
                 }
+                else if(keysym == 'x')
+                {
+                  zoom = 0;
+                  offset_x = 0;
+                  offset_y = 0;
+                }
+                else if(ctrl_held && keysym == '0')
+                {
+                  zoom = 0;
+                }
+                else if(ctrl_held && keysym == '-')
+                {
+                  zoom -= 0.125f;
+                }
+                else if(ctrl_held && keysym == '=')
+                {
+                  zoom += 0.125f;
+                }
                 else if(keysym >= '0' && keysym <= '9')
                 {
                   bflip(extra_toggles[keysym - '0']);
@@ -295,34 +331,76 @@ int main(int argc, char** argv)
               } break;
 
               case ButtonPress:
-              case ButtonRelease:
+              // case ButtonRelease:
               {
                 b32 went_down = (event.type == ButtonPress);
                 u32 button = event.xbutton.button;
+                b32 ctrl_held = (event.xbutton.state & 4);
+                r32 mouse_x = event.xbutton.x;
+                r32 mouse_y = win_h - event.xbutton.y - 1;
 
 #if 0
                 printf("state %#x button %u %s\n",
                     event.xbutton.state, button, went_down ? "Pressed" : "Released");
 #endif
 
+                r32 win_min_side = min(win_w, win_h);
+                r32 exp_zoom_before = exp2f(zoom);
+                r32 zoom_per_scroll = 0.125f;
+                r32 offset_per_scroll = 0.125f / exp_zoom_before;
+
+                r32 zoom_delta = 0;
+
                 if(button == 1)
                 {
                 }
                 else if(button == 4)
                 {
-                  // game_input.mouse_scroll.y += 1;
+                  if(ctrl_held)
+                  {
+                    zoom_delta = zoom_per_scroll;
+                  }
+                  else
+                  {
+                    offset_y -= offset_per_scroll;
+                  }
                 }
                 else if(button == 5)
                 {
-                  // game_input.mouse_scroll.y -= 1;
+                  if(ctrl_held)
+                  {
+                    zoom_delta = -zoom_per_scroll;
+                  }
+                  else
+                  {
+                    offset_y += offset_per_scroll;
+                  }
                 }
                 else if(button == 6)
                 {
-                  // game_input.mouse_scroll.x -= 1;
+                  if(!ctrl_held)
+                  {
+                    offset_x += offset_per_scroll;
+                  }
                 }
                 else if(button == 7)
                 {
-                  // game_input.mouse_scroll.x += 1;
+                  if(!ctrl_held)
+                  {
+                    offset_x -= offset_per_scroll;
+                  }
+                }
+
+                if(zoom_delta != 0)
+                {
+                  zoom += zoom_delta;
+                  r32 exp_zoom_after = exp2f(zoom);
+
+                  r32 center_mouse_x = mouse_x - 0.5f * win_w;
+                  r32 center_mouse_y = mouse_y - 0.5f * win_h;
+
+                  offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                  offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                 }
               } break;
 
@@ -413,7 +491,7 @@ int main(int argc, char** argv)
           else
           {
             r32 gray = 0.5f;
-            if(srgb_framebuffer)
+            if(srgb)
             {
               gray = powf(gray, 2.2f);
             }
@@ -439,20 +517,6 @@ int main(int argc, char** argv)
           glRotatef(30.0f, 0, 0, 1);
 #endif
 
-          u8 texels[] = {
-            1, 1, 1, 255,
-            255, 0, 0, 255,
-            0, 255, 0, 255,
-            0, 0, 255, 255,
-            2, 2, 2, 255,
-            255, 255, 0, 255,
-            0, 255, 255, 255,
-            255, 0, 255, 255,
-            128, 128, 128, 255,
-          };
-          i32 tex_w = 3;
-          i32 tex_h = 3;
-
           if(!texture_id)
           {
             texture_needs_update = true;
@@ -465,6 +529,28 @@ int main(int argc, char** argv)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 #endif
+          }
+
+          u8 test_texels[] = {
+            1, 1, 1, 255,
+            255, 0, 0, 255,
+            0, 255, 0, 255,
+            0, 0, 255, 255,
+            2, 2, 2, 255,
+            255, 255, 0, 255,
+            0, 255, 255, 255,
+            255, 0, 255, 255,
+            128, 128, 128, 255,
+          };
+          u8* texels = test_texels;
+          i32 tex_w = 3;
+          i32 tex_h = 3;
+
+          if(img_pixels)
+          {
+            texels = img_pixels;
+            tex_w = img_w;
+            tex_h = img_h;
           }
 
           if(texture_needs_update)
@@ -483,7 +569,7 @@ int main(int argc, char** argv)
               glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             }
             glTexImage2D(GL_TEXTURE_2D, 0,
-                srgb_texture ? GL_SRGB_ALPHA : GL_RGBA,
+                srgb ? GL_SRGB_ALPHA : GL_RGBA,
                 tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
             glGenerateMipmap(GL_TEXTURE_2D);
           }
@@ -491,8 +577,8 @@ int main(int argc, char** argv)
           if(alpha_blend)
           {
             glEnable(GL_BLEND);
-            // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            // glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
           }
           else
           {
@@ -506,13 +592,26 @@ int main(int argc, char** argv)
           r32 u1 = 1.0f;
           r32 v1 = 1.0f;
 
-          r32 mag = 4.0f;
-          if(extra_magnification) { mag *= 32; }
+          r32 mag = 1.0f;
+          if(win_w != 0 && win_h != 0)
+          {
+            mag = min((r32)win_w / (r32)tex_w, (r32)win_h / (r32)tex_h);
+          }
+          r32 exp_zoom = exp2f(zoom);
+          mag *= exp_zoom;
 
-          r32 x0 = 2 + 1.0f * fmodf(time, 50);
+          r32 x_padding = 0.5f * (win_w - mag * tex_w);
+          r32 y_padding = 0.5f * (win_h - mag * tex_h);
+          r32 x0 = x_padding;
+          r32 y0 = y_padding;
           r32 x1 = x0 + mag * tex_w;
-          r32 y0 = 2 + 0.1f * fmodf(time, 50);
           r32 y1 = y0 + mag * tex_h;
+
+          r32 win_min_side = min(win_w, win_h);
+          x0 += win_min_side * exp_zoom * offset_x;
+          x1 += win_min_side * exp_zoom * offset_x;
+          y0 += win_min_side * exp_zoom * offset_y;
+          y1 += win_min_side * exp_zoom * offset_y;
 
           if(border_sampling)
           {
@@ -530,32 +629,42 @@ int main(int argc, char** argv)
           }
 
           glBegin(GL_QUADS);
-          glTexCoord2f(u0, v0); glVertex2f(x0, y0);
-          glTexCoord2f(u1, v0); glVertex2f(x1, y0);
-          glTexCoord2f(u1, v1); glVertex2f(x1, y1);
-          glTexCoord2f(u0, v1); glVertex2f(x0, y1);
+          glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+          glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+          glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+          glTexCoord2f(u0, v1); glVertex2f(x0, y0);
           glEnd();
 
           glXSwapBuffers(display, glx_window);
+
+          if(vsync)
+          {
+            // This seems to reduce lag on HP laptop.
+            // TODO: Test on other computers as well.
+            glFinish();
+          }
 
           u64 nsecs_now = get_nanoseconds();
           i64 nsecs = nsecs_now - nsecs_last_frame;
           nsecs_last_frame = nsecs_now;
 #if 1
-          ++frames_since_last_print;
-          nsecs_min = min(nsecs_min, nsecs);
-          nsecs_max = max(nsecs_max, nsecs);
-          r32 secs_since_last_print = 1e-9f * (r32)(nsecs_now - nsecs_last_print);
-          if(secs_since_last_print >= 0.5f)
+          if(!vsync)
           {
-            printf("avg FPS: %.1f [%.1f - %.1f]\n",
-                (r32)frames_since_last_print / secs_since_last_print,
-                1e9f / (r32)nsecs_max,
-                1e9f / (r32)nsecs_min);
-            frames_since_last_print = 0;
-            nsecs_last_print = nsecs_now;
-            nsecs_min = I64_MAX;
-            nsecs_max = I64_MIN;
+            ++frames_since_last_print;
+            nsecs_min = min(nsecs_min, nsecs);
+            nsecs_max = max(nsecs_max, nsecs);
+            r32 secs_since_last_print = 1e-9f * (r32)(nsecs_now - nsecs_last_print);
+            if(secs_since_last_print >= 0.5f)
+            {
+              printf("avg FPS: %.1f [%.1f - %.1f]\n",
+                  (r32)frames_since_last_print / secs_since_last_print,
+                  1e9f / (r32)nsecs_max,
+                  1e9f / (r32)nsecs_min);
+              frames_since_last_print = 0;
+              nsecs_last_print = nsecs_now;
+              nsecs_min = I64_MAX;
+              nsecs_max = I64_MIN;
+            }
           }
 #endif
 

@@ -4,4 +4,10 @@ set -e
 
 mkdir -p bin
 
-clang -g -std=c11 -pthread -lm -lX11 -lGL -lGLX -lXi -lpng -o bin/i2x src/main.c
+extra_opts=''
+
+if [ ${OPTIMIZE:-0} == 1 ]; then
+  extra_opts='-O3'
+fi
+
+clang -g $extra_opts -std=c11 -pthread -I. -lm -lX11 -lGL -lGLX -lXi -lpng -o i2x src/main.c
