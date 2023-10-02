@@ -26,10 +26,14 @@ typedef double r64;
 #define R32_MIN -3.402823466e+38f
 #define R32_MAX  3.402823466e+38f
 
+#define PI  3.141592653589793238462643f
+#define TAU 6.283185307179586476925286f
+
 #define array_count(x) (sizeof(x) / sizeof(x[0]))
 #define min(x, y) ((x) < (y) ? (x) : (y))
 #define max(x, y) ((x) > (y) ? (x) : (y))
 #define clamp(a, b, x) (max((a), min((b), (x))))
+#define bflip(x) (x = !x)
 
 #define malloc_array(count, type) ((type*)malloc((count) * sizeof(type)))
 

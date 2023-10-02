@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -24,14 +25,20 @@
 #include <X11/extensions/XInput2.h>
 
 // https://www.khronos.org/registry/OpenGL/specs/gl/glx1.4.pdf
+#define GL_GLEXT_PROTOTYPES
 #include <GL/glx.h>
-#include <GL/glxext.h>
-#include <GL/gl.h>
+#undef GL_GLEXT_PROTOTYPES
+// #include <GL/glxext.h>
 
 #include "util.h"
 
+#if 0
 #define WINDOW_INIT_W 800
 #define WINDOW_INIT_H 600
+#else
+#define WINDOW_INIT_W 20
+#define WINDOW_INIT_H 20
+#endif
 #define WINDOW_TITLE "i2x"
 
 static const u32 replacement_character_codepoint = 0xFFFD;
@@ -152,8 +159,8 @@ int main(int argc, char** argv)
         GLX_GREEN_SIZE,     8,
         GLX_BLUE_SIZE,      8,
         // GLX_DEPTH_SIZE,    16,
-        GLX_SAMPLE_BUFFERS, 1,
-        GLX_SAMPLES,        1, // 4,
+        // GLX_SAMPLE_BUFFERS, 0,
+        // GLX_SAMPLES,        0, // 4,
         0
       };
       int glx_config_count = 0;
@@ -161,10 +168,21 @@ int main(int argc, char** argv)
           glx_config_attrib_list, &glx_config_count);
       if(glx_configs && glx_config_count > 0)
       {
-        // printf("%d GLX configs available.\n", glx_config_count);
-
         GLXFBConfig glx_config = glx_configs[0];
         XFree(glx_configs);
+
+#if 0
+        printf("%d GLX configs available.\n", glx_config_count);
+        {
+          int tmp;
+          glXGetFBConfigAttrib(display, glx_config, GLX_DEPTH_SIZE, &tmp);
+          printf("GLX_DEPTH_SIZE: %d\n", tmp);
+          glXGetFBConfigAttrib(display, glx_config, GLX_SAMPLE_BUFFERS, &tmp);
+          printf("GLX_SAMPLE_BUFFERS: %d\n", tmp);
+          glXGetFBConfigAttrib(display, glx_config, GLX_SAMPLES, &tmp);
+          printf("GLX_SAMPLES: %d\n", tmp);
+        }
+#endif
 
         GLXContext glx_context = glXCreateNewContext(display, glx_config, GLX_RGBA_TYPE, 0, True);
         if(!glXIsDirect(display, glx_context))
@@ -225,7 +243,15 @@ int main(int argc, char** argv)
 
         i32 win_w = WINDOW_INIT_W;
         i32 win_h = WINDOW_INIT_H;
+        GLuint texture_id = 0;
+        r32 time = 0;
         b32 quitting = false;
+        b32 border_sampling = true;
+        b32 linear_sampling = true;
+        b32 alpha_blend = true;
+        b32 extra_magnification = false;
+        b32 clear_bg = true;
+        b32 extra_toggles[10] = {0};
 
         while(!quitting)
         {
@@ -237,7 +263,7 @@ int main(int argc, char** argv)
             switch(event.type)
             {
               case KeyPress:
-              case KeyRelease:
+              // case KeyRelease:
               {
                 b32 went_down = (event.type == KeyPress);
                 u32 keycode = event.xkey.keycode;
@@ -251,6 +277,30 @@ int main(int argc, char** argv)
                 if(keysym == XK_Escape)
                 {
                   quitting = true;
+                }
+                else if(keysym == 'a')
+                {
+                  bflip(border_sampling);
+                }
+                else if(keysym == 'b')
+                {
+                  bflip(clear_bg);
+                }
+                else if(keysym == 'l')
+                {
+                  bflip(linear_sampling);
+                }
+                else if(keysym == 'm')
+                {
+                  bflip(extra_magnification);
+                }
+                else if(keysym == 't')
+                {
+                  bflip(alpha_blend);
+                }
+                else if(keysym >= '0' && keysym <= '9')
+                {
+                  bflip(extra_toggles[keysym - '0']);
                 }
 
                 // TODO: Look into XmbLookupString for typed text input.
@@ -366,16 +416,132 @@ int main(int argc, char** argv)
 #endif
 
           glViewport(0, 0, win_w, win_h);
-          glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+          if(clear_bg)
+          {
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+          }
+          else
+          {
+            glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
+          }
           glClear(GL_COLOR_BUFFER_BIT);
 
-          glBegin(GL_TRIANGLES);
-          glVertex2f(-0.5f, -0.5f);
-          glVertex2f( 0.5f, -0.5f);
-          glVertex2f( 0.0f,  0.5f);
+          if(win_w != 0 && win_h != 0)
+          {
+            glMatrixMode(GL_PROJECTION);
+            r32 matrix[16] = { // Column-major!
+              2.0f / win_w, 0.0f, 0.0f, 0.0f,
+              0.0f, 2.0f / win_h, 0.0f, 0.0f,
+              0.0f, 0.0f, 1.0f, 0.0f,
+              -1.0f, -1.0f, 0.0f, 1.0f,
+            };
+            glLoadMatrixf(matrix);
+          }
+
+          u8 texels[] = {
+            50, 50, 50, 255,
+            255, 0, 0, 255,
+            0, 255, 0, 255,
+            0, 0, 255, 255,
+            150, 150, 150, 255,
+            255, 255, 0, 255,
+            0, 255, 255, 255,
+            255, 0, 255, 255,
+            255, 255, 255, 255,
+          };
+          i32 tex_w = 3;
+          i32 tex_h = 3;
+
+          if(!texture_id)
+          {
+            glGenTextures(1, &texture_id);
+            glBindTexture(GL_TEXTURE_2D, texture_id);
+#if 0
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+#else
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+#endif
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+            glGenerateMipmap(GL_TEXTURE_2D);
+          }
+
+          glEnable(GL_TEXTURE_2D);
+
+          if(linear_sampling)
+          {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+#if 0
+            // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+#else
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                extra_toggles[1]
+                ? GL_LINEAR
+                : extra_toggles[2] ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
+#endif
+          }
+          else
+          {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+          }
+
+          if(alpha_blend)
+          {
+            glEnable(GL_BLEND);
+            // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+          }
+          else
+          {
+            glDisable(GL_BLEND);
+          }
+
+          r32 u0 = 0.0f;
+          r32 v0 = 0.0f;
+          r32 u1 = 1.0f;
+          r32 v1 = 1.0f;
+
+          r32 mag = 0.6f + 0.5f * sinf(0.01f * TAU * fmodf(time, 50));
+          if(extra_magnification) { mag *= 4; }
+
+          r32 x0 = 2 + 1.0f * fmodf(time, 50);
+          r32 x1 = x0 + mag * tex_w;
+          r32 y0 = 2 + 0.1f * fmodf(time, 50);
+          r32 y1 = y0 + mag * tex_h;
+
+          if(border_sampling)
+          {
+            r32 margin = max(1.0f, mag);
+
+            u0 -= margin / (r32)(mag * tex_w);
+            v0 -= margin / (r32)(mag * tex_h);
+            u1 += margin / (r32)(mag * tex_w);
+            v1 += margin / (r32)(mag * tex_h);
+
+            x0 -= margin;
+            y0 -= margin;
+            x1 += margin;
+            y1 += margin;
+          }
+
+          glBegin(GL_QUADS);
+          glTexCoord2f(u0, v0); glVertex2f(x0, y0);
+          glTexCoord2f(u1, v0); glVertex2f(x1, y0);
+          glTexCoord2f(u1, v1); glVertex2f(x1, y1);
+          glTexCoord2f(u0, v1); glVertex2f(x0, y1);
           glEnd();
 
           glXSwapBuffers(display, glx_window);
+          if(!extra_toggles[0])
+          {
+            time += 1.0f / 60.0f;
+            if(time >= 1000) { time -= 1000; }
+          }
         }
       }
       else
