@@ -1,0 +1,7 @@
+#!/bin/bash
+
+set -e
+
+mkdir -p bin
+
+clang -g -std=c11 -pthread -lm -lX11 -lGL -lGLX -lXi -lpng -o bin/i2x src/main.c
