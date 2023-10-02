@@ -235,6 +235,11 @@ int main(int argc, char** argv)
         r32 offset_x = 0;
         r32 offset_y = 0;
 
+        r32 zoom_start_x = 0;
+        r32 zoom_start_y = 0;
+        r32 prev_mouse_x = 0;
+        r32 prev_mouse_y = 0;
+
         while(!quitting)
         {
           b32 texture_needs_update = false;
@@ -309,15 +314,15 @@ int main(int argc, char** argv)
                   offset_x = 0;
                   offset_y = 0;
                 }
-                else if(ctrl_held && keysym == '0')
+                else if(keysym == '0')
                 {
                   zoom = 0;
                 }
-                else if(ctrl_held && keysym == '-')
+                else if(keysym == '-')
                 {
                   zoom -= 0.125f;
                 }
-                else if(ctrl_held && keysym == '=')
+                else if(keysym == '=')
                 {
                   zoom += 0.125f;
                 }
@@ -351,9 +356,7 @@ int main(int argc, char** argv)
 
                 r32 zoom_delta = 0;
 
-                if(button == 1)
-                {
-                }
+                if(0) {}
                 else if(button == 4)
                 {
                   if(ctrl_held)
@@ -402,31 +405,64 @@ int main(int argc, char** argv)
                   offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                   offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                 }
+
+                zoom_start_x = mouse_x;
+                zoom_start_y = mouse_y;
+                prev_mouse_x = mouse_x;
+                prev_mouse_y = mouse_y;
               } break;
 
               case MotionNotify:
               {
-                // game_input.mouse_pos.x = (r32)event.xmotion.x;
-                // game_input.mouse_pos.y = render_context.frame_size.y - (r32)event.xmotion.y - 1.0f;
+                // printf("%x\n", event.xmotion.state);
+                b32 ctrl_held = (event.xmotion.state & 4);
+                b32 lmb_held = (event.xmotion.state & 0x100);
+                b32 mmb_held = (event.xmotion.state & 0x200);
+
+                if(lmb_held || mmb_held)
+                {
+                  r32 mouse_x = event.xbutton.x;
+                  r32 mouse_y = win_h - event.xbutton.y - 1;
+
+                  r32 delta_x = mouse_x - prev_mouse_x;
+                  r32 delta_y = mouse_y - prev_mouse_y;
+
+                  r32 win_min_side = min(win_w, win_h);
+
+                  if(ctrl_held || mmb_held)
+                  {
+                    r32 exp_zoom_before = exp2f(zoom);
+                    zoom += 4.0f * delta_y / win_min_side;
+                    r32 exp_zoom_after = exp2f(zoom);
+
+                    r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
+                    r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
+
+                    offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                    offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                  }
+                  else
+                  {
+                    r32 exp_zoom = exp2f(zoom);
+
+                    offset_x += delta_x / (exp_zoom * win_min_side);
+                    offset_y += delta_y / (exp_zoom * win_min_side);
+
+                    zoom_start_x = mouse_x;
+                    zoom_start_y = mouse_y;
+                  }
+
+                  prev_mouse_x = mouse_x;
+                  prev_mouse_y = mouse_y;
+                }
               } break;
 
               case FocusIn:
               {
-                // has_focus = true;
               } break;
 
               case FocusOut:
               {
-#if 0
-                for(u32 button_idx = 0;
-                    button_idx < array_count(game_input.buttons);
-                    ++button_idx)
-                {
-                  game_input.buttons[button_idx].ended_down = 0;
-                }
-                game_input.modifiers_held = 0;
-                has_focus = false;
-#endif
               } break;
 
               case ConfigureNotify:
@@ -442,7 +478,7 @@ int main(int argc, char** argv)
 
               case MappingNotify:
               {
-                // write_stderr("Key mapping changed\n");
+                // printf(stderr, "Key mapping changed\n");
                 if(event.xmapping.request == MappingModifier ||
                     event.xmapping.request == MappingKeyboard)
                 {
@@ -668,12 +704,9 @@ int main(int argc, char** argv)
           }
 #endif
 
-          if(!extra_toggles[0])
-          {
-            // time += 1.0f / 60.0f;
-            time += 1e-9f * nsecs;
-            if(time >= 1000) { time -= 1000; }
-          }
+          // time += 1.0f / 60.0f;
+          time += 1e-9f * nsecs;
+          if(time >= 1000) { time -= 1000; }
         }
       }
       else
