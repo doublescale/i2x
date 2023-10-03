@@ -26,8 +26,10 @@
 
 // https://www.khronos.org/registry/OpenGL/specs/gl/glx1.4.pdf
 #define GL_GLEXT_PROTOTYPES
+#define GLX_GLXEXT_PROTOTYPES
 #include <GL/glx.h>
 #undef GL_GLEXT_PROTOTYPES
+#undef GLX_GLXEXT_PROTOTYPES
 // #include <GL/glxext.h>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -41,7 +43,7 @@
 
 static const u32 replacement_character_codepoint = 0xFFFD;
 
-static void (*glXSwapIntervalEXT)(Display *dpy, GLXDrawable drawable, int interval);
+// static void (*glXSwapIntervalEXT)(Display *dpy, GLXDrawable drawable, int interval);
 
 typedef struct
 {
@@ -95,8 +97,8 @@ int main(int argc, char** argv)
       // printf("GLX version: %d.%d\n", glx_major, glx_minor);
       // printf("GLX extensions: %s\n", glXQueryExtensionsString(display, screen_number));
 
-      glXSwapIntervalEXT = (PFNGLXSWAPINTERVALEXTPROC)
-        glXGetProcAddress((const GLubyte*)"glXSwapIntervalEXT");
+      // glXSwapIntervalEXT = (PFNGLXSWAPINTERVALEXTPROC)
+      //   glXGetProcAddress((const GLubyte*)"glXSwapIntervalEXT");
 
       int glx_config_attrib_list[] = {
         GLX_DOUBLEBUFFER,   1,
@@ -261,6 +263,11 @@ int main(int argc, char** argv)
         while(!quitting)
         {
           b32 texture_needs_update = false;
+
+          if(vsync)
+          {
+            glXDelayBeforeSwapNV(display, glx_window, 0.002f);
+          }
 
           while(XPending(display))
           {
@@ -757,7 +764,9 @@ int main(int argc, char** argv)
 #endif
 
           glXSwapBuffers(display, glx_window);
+          // usleep(1000);
 
+#if 0
           if(vsync)
           {
             // glFinish seems to reduce lag on HP laptop.
@@ -771,16 +780,17 @@ int main(int argc, char** argv)
             usleep(12000);
 #else
             i32 usecs_to_sleep = (16000000 - (i32)((i64)get_nanoseconds() - (i64)nsecs_last_frame)) / 1000;
-            usecs_to_sleep = max(10000, usecs_to_sleep);
+            usecs_to_sleep = max(12000, usecs_to_sleep);
             usleep(usecs_to_sleep);
 #endif
           }
+#endif
 
           u64 nsecs_now = get_nanoseconds();
           i64 nsecs = nsecs_now - nsecs_last_frame;
           nsecs_last_frame = nsecs_now;
 #if 1
-          if(!vsync)
+          // if(!vsync)
           {
             ++frames_since_last_print;
             nsecs_min = min(nsecs_min, nsecs);
