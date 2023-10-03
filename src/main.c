@@ -348,11 +348,11 @@ int main(int argc, char** argv)
                 }
                 else if(keysym == '-')
                 {
-                  zoom -= 0.125f;
+                  zoom -= 0.25f;
                 }
                 else if(keysym == '=')
                 {
-                  zoom += 0.125f;
+                  zoom += 0.25f;
                 }
                 else if(keysym >= '0' && keysym <= '9')
                 {
@@ -368,6 +368,7 @@ int main(int argc, char** argv)
               {
                 b32 went_down = (event.type == ButtonPress);
                 u32 button = event.xbutton.button;
+                b32 shift_held = (event.xbutton.state & 1);
                 b32 ctrl_held = (event.xbutton.state & 4);
                 b32 alt_held = (event.xbutton.state & 8);
                 r32 mouse_x = event.xbutton.x;
@@ -380,7 +381,7 @@ int main(int argc, char** argv)
 
                 r32 win_min_side = min(win_w, win_h);
                 r32 exp_zoom_before = exp2f(zoom);
-                r32 zoom_per_scroll = 0.125f;
+                r32 zoom_per_scroll = 0.25f;
                 r32 offset_per_scroll = 0.125f / exp_zoom_before;
 
                 r32 zoom_delta = 0;
@@ -399,7 +400,14 @@ int main(int argc, char** argv)
                   }
                   else
                   {
-                    offset_y -= offset_per_scroll;
+                    if(shift_held)
+                    {
+                      offset_x += offset_per_scroll;
+                    }
+                    else
+                    {
+                      offset_y -= offset_per_scroll;
+                    }
                   }
                 }
                 else if(button == 5)
@@ -415,19 +423,26 @@ int main(int argc, char** argv)
                   }
                   else
                   {
-                    offset_y += offset_per_scroll;
+                    if(shift_held)
+                    {
+                      offset_x -= offset_per_scroll;
+                    }
+                    else
+                    {
+                      offset_y += offset_per_scroll;
+                    }
                   }
                 }
                 else if(button == 6)
                 {
-                  if(!ctrl_held)
+                  if(!ctrl_held && !alt_held)
                   {
                     offset_x += offset_per_scroll;
                   }
                 }
                 else if(button == 7)
                 {
-                  if(!ctrl_held)
+                  if(!ctrl_held && !alt_held)
                   {
                     offset_x -= offset_per_scroll;
                   }
@@ -614,6 +629,7 @@ int main(int argc, char** argv)
           {
             texture_needs_update = true;
             glGenTextures(1, &img->texture_id);
+            glBindTexture(GL_TEXTURE_2D, img->texture_id);
 #if 0
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -622,8 +638,10 @@ int main(int argc, char** argv)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 #endif
           }
-
-          glBindTexture(GL_TEXTURE_2D, img->texture_id);
+          else
+          {
+            glBindTexture(GL_TEXTURE_2D, img->texture_id);
+          }
 
           u8 test_texels[] = {
             1, 1, 1, 255,
@@ -729,13 +747,33 @@ int main(int argc, char** argv)
           glTexCoord2f(u0, v1); glVertex2f(x0, y0);
           glEnd();
 
+#if 0
+          // https://www.khronos.org/opengl/wiki/Sync_Object#Synchronization
+          // This doesn't seem to help; see glFinish below.
+          GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+          if(!fence) { printf("Could not create fence.\n"); }
+          // glFlush();
+          printf("%X\n", glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000));
+#endif
+
           glXSwapBuffers(display, glx_window);
 
           if(vsync)
           {
-            // This seems to reduce lag on HP laptop.
-            // TODO: Test on other computers as well.
+            // glFinish seems to reduce lag on HP laptop.
+            // On desktop, it doesn't help, and brings CPU usage to 100% :/
+            // However, adding a sleep afterwards, does help on desktop!
+            // Still more CPU use than without glFinish, though.
+            // TODO: Wait for as long as necessary for slightly under the screen refresh rate.
+
             glFinish();
+#if 1
+            usleep(12000);
+#else
+            i32 usecs_to_sleep = (16000000 - (i32)((i64)get_nanoseconds() - (i64)nsecs_last_frame)) / 1000;
+            usecs_to_sleep = max(10000, usecs_to_sleep);
+            usleep(usecs_to_sleep);
+#endif
           }
 
           u64 nsecs_now = get_nanoseconds();
