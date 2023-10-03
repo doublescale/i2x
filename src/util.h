@@ -32,6 +32,7 @@ typedef double r64;
 #define TAU 6.283185307179586476925286f
 
 #define array_count(x) (sizeof(x) / sizeof(x[0]))
+#define for_count(i, c) for(u32 i = 0; i < (c); ++i)
 #define min(x, y) ((x) < (y) ? (x) : (y))
 #define max(x, y) ((x) > (y) ? (x) : (y))
 #define clamp(a, b, x) (max((a), min((b), (x))))

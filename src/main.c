@@ -68,8 +68,8 @@ int main(int argc, char** argv)
     Window root_window = RootWindow(display, screen_number);
 
     b32 xi_available = false;
-#if 0
     int xi_opcode = 0;
+#if 1
     {
       int query_event = 0;
       int query_error = 0;
@@ -156,7 +156,7 @@ int main(int argc, char** argv)
           | StructureNotifyMask
           | FocusChangeMask
           ;
-        if(!xi_available)
+        // if(!xi_available)
         {
           window_attributes.event_mask = window_attributes.event_mask
             | ButtonPressMask
@@ -179,6 +179,37 @@ int main(int argc, char** argv)
         // TODO: Check if GLX_EXT_swap_control is in the extensions string first.
         // Enable VSync.
         glXSwapIntervalEXT(display, glx_window, vsync);
+
+        if(xi_available)
+        {
+          XIEventMask evmasks[2];
+          u8 mask1[(XI_LASTEVENT + 7) / 8] = {0};
+          u8 mask2[(XI_LASTEVENT + 7) / 8] = {0};
+
+          // XISetMask(mask1, XI_KeyPress);
+          // XISetMask(mask1, XI_KeyRelease);
+
+          evmasks[0].deviceid = XIAllMasterDevices;
+          evmasks[0].mask_len = sizeof(mask1);
+          evmasks[0].mask = mask1;
+
+          XISetMask(mask2, XI_ButtonPress);
+          XISetMask(mask2, XI_ButtonRelease);
+          XISetMask(mask2, XI_Motion);
+
+          evmasks[1].deviceid = 2;  // 2: Master pointer.
+          evmasks[1].mask_len = sizeof(mask2);
+          evmasks[1].mask = mask2;
+
+          XISelectEvents(display, window, evmasks, 2);
+
+          XIEventMask root_evmask;
+          XISetMask(mask1, XI_RawMotion);
+          root_evmask.deviceid = 2;
+          root_evmask.mask_len = sizeof(mask1);
+          root_evmask.mask = mask1;
+          XISelectEvents(display, root_window, &root_evmask, 1);
+        }
 
         XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace,
             (unsigned char*)PROGRAM_NAME, sizeof(PROGRAM_NAME) - 1);
@@ -253,6 +284,7 @@ int main(int argc, char** argv)
         r32 zoom = 0;
         r32 offset_x = 0;
         r32 offset_y = 0;
+        b32 smooth_scrolling_detected = false;
 
         r32 zoom_start_x = 0;
         r32 zoom_start_y = 0;
@@ -274,283 +306,564 @@ int main(int argc, char** argv)
             XEvent event;
             XNextEvent(display, &event);
 
-            switch(event.type)
+            if(event.xcookie.type == GenericEvent && event.xcookie.extension == xi_opcode)
             {
-              case KeyPress:
-              // case KeyRelease:
+              if(XGetEventData(display, &event.xcookie))
               {
-                b32 went_down = (event.type == KeyPress);
-                u32 keycode = event.xkey.keycode;
-                KeySym keysym = 0;
-                keysym = XLookupKeysym(&event.xkey, 0);
-                b32 shift_held = (event.xkey.state & 1);
-                b32 ctrl_held = (event.xkey.state & 4);
+                // printf("XI event type %d\n", event.xcookie.evtype);
+                switch(event.xcookie.evtype)
+                {
+                  case XI_ButtonPress:
+                  // case XI_ButtonRelease:
+                  case XI_Motion:
+                  {
+                    XIDeviceEvent* devev = (XIDeviceEvent*)event.xcookie.data;
+                    u32 button = devev->detail;
+                    u32 button_mask = devev->buttons.mask_len > 0 ? devev->buttons.mask[0] : 0;
+                    i32 mods = devev->mods.effective;
+                    b32 shift_held = (mods & 1);
+                    b32 ctrl_held = (mods & 4);
+                    b32 alt_held = (mods & 8);
+                    b32 lmb_held = (button_mask & 2);
+                    b32 mmb_held = (button_mask & 4);
+                    b32 rmb_held = (button_mask & 8);
+                    r32 mouse_x = (r32)devev->event_x;
+                    r32 mouse_y = (r32)win_h - (r32)devev->event_y - 1.0f;
 
 #if 0
-                printf("state %#x keycode %u keysym %#lx (%s) %s\n",
-                    event.xkey.state, keycode, keysym, XKeysymToString(keysym),
-                    went_down ? "Pressed" : "Released");
+                    printf("%s %d:%d detail %d flags %d mods %d r %.2f,%.2f e %.2f,%.2f btns %d\n",
+                        event.xcookie.evtype == XI_ButtonPress ? "XI_ButtonPress"
+                        : event.xcookie.evtype == XI_ButtonRelease ? "XI_ButtonRelease" : "XI_Motion",
+                        devev->deviceid, devev->sourceid,
+                        devev->detail, devev->flags,
+                        devev->mods.effective,
+                        devev->root_x, devev->root_y, devev->event_x, devev->event_y,
+                        button_mask);
+                    printf("  valuators: mask_len %d mask 0x", devev->valuators.mask_len);
+                    for_count(i, devev->valuators.mask_len) { printf("%02x", devev->valuators.mask[i]); }
+                    printf("\n");
+                    r64* values = devev->valuators.values;
+                    for_count(i, devev->valuators.mask_len)
+                    {
+                      for_count(b, 8)
+                      {
+                        if(devev->valuators.mask[i] & (1 << b))
+                        {
+                          u32 idx = 8 * i + b;
+                          printf("    %u: %.2f\n", idx, *values);
+                          ++values;
+                        }
+                      }
+                    }
 #endif
 
-                if(keysym == XK_Escape)
-                {
-                  quitting = true;
-                }
-                if(keysym == ' ')
-                {
-                  ++viewing_img_idx;
-                  if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
-                }
-                if(keysym == XK_BackSpace)
-                {
-                  --viewing_img_idx;
-                  if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
-                }
-                else if(keysym == 'a')
-                {
-                  bflip(border_sampling);
-                }
-                else if(keysym == 'b')
-                {
-                  bflip(clear_bg);
-                }
-                else if(keysym == 'l')
-                {
-                  bflip(linear_sampling);
-                  texture_needs_update = true;
-                }
-                else if(keysym == 's')
-                {
-                  bflip(srgb);
+                    r32 win_min_side = min(win_w, win_h);
+                    r32 exp_zoom_before = exp2f(zoom);
+                    r32 zoom_per_scroll = 0.25f;
+                    r32 offset_per_scroll = 0.125f / exp_zoom_before;
+                    r32 zoom_delta = 0;
 
-                  if(srgb)
+                    if(event.xcookie.evtype == XI_ButtonPress)
+                    {
+                      if(alt_held && button == 4)
+                      {
+                        --viewing_img_idx;
+                        if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                      }
+                      if(alt_held && button == 5)
+                      {
+                        ++viewing_img_idx;
+                        if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
+                      }
+                      else if(!smooth_scrolling_detected)
+                      {
+                        if(button == 4)
+                        {
+                          if(ctrl_held)
+                          {
+                            zoom_delta = zoom_per_scroll;
+                          }
+                          else
+                          {
+                            if(shift_held)
+                            {
+                              offset_x += offset_per_scroll;
+                            }
+                            else
+                            {
+                              offset_y -= offset_per_scroll;
+                            }
+                          }
+                        }
+                        else if(button == 5)
+                        {
+                          if(ctrl_held)
+                          {
+                            zoom_delta = -zoom_per_scroll;
+                          }
+                          else
+                          {
+                            if(shift_held)
+                            {
+                              offset_x -= offset_per_scroll;
+                            }
+                            else
+                            {
+                              offset_y += offset_per_scroll;
+                            }
+                          }
+                        }
+                        else if(button == 6)
+                        {
+                          if(!ctrl_held && !alt_held)
+                          {
+                            offset_x += offset_per_scroll;
+                          }
+                        }
+                        else if(button == 7)
+                        {
+                          if(!ctrl_held && !alt_held)
+                          {
+                            offset_x -= offset_per_scroll;
+                          }
+                        }
+
+                        if(zoom_delta != 0)
+                        {
+                          zoom += zoom_delta;
+                          r32 exp_zoom_after = exp2f(zoom);
+
+                          r32 center_mouse_x = mouse_x - 0.5f * win_w;
+                          r32 center_mouse_y = mouse_y - 0.5f * win_h;
+
+                          offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                          offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                        }
+                      }
+
+                      zoom_start_x = mouse_x;
+                      zoom_start_y = mouse_y;
+                    }
+                    else if(event.xcookie.evtype == XI_Motion)
+                    {
+                      if(lmb_held || mmb_held)
+                      {
+                        r32 delta_x = mouse_x - prev_mouse_x;
+                        r32 delta_y = mouse_y - prev_mouse_y;
+
+                        if(ctrl_held || mmb_held)
+                        {
+                          zoom += 4.0f * delta_y / win_min_side;
+                          r32 exp_zoom_after = exp2f(zoom);
+
+                          r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
+                          r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
+
+                          offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                          offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                        }
+                        else
+                        {
+                          r32 exp_zoom = exp2f(zoom);
+
+                          offset_x += delta_x / (exp_zoom * win_min_side);
+                          offset_y += delta_y / (exp_zoom * win_min_side);
+
+                          zoom_start_x = mouse_x;
+                          zoom_start_y = mouse_y;
+                        }
+                      }
+                    }
+                    prev_mouse_x = mouse_x;
+                    prev_mouse_y = mouse_y;
+                  } break;
+
+                  case XI_RawMotion:
                   {
-                    glEnable(GL_FRAMEBUFFER_SRGB);
-                  }
-                  else
-                  {
-                    glDisable(GL_FRAMEBUFFER_SRGB);
-                  }
-                  texture_needs_update = true;
-                }
-                else if(keysym == 't')
-                {
-                  bflip(alpha_blend);
-                }
-                else if(keysym == 'v')
-                {
-                  bflip(vsync);
+                    XIRawEvent* devev = (XIRawEvent*)event.xcookie.data;
 
-                  glXSwapIntervalEXT(display, glx_window, (int)vsync);
-                }
-                else if(keysym == 'x')
-                {
-                  zoom = 0;
-                  offset_x = 0;
-                  offset_y = 0;
-                }
-                else if(keysym == '0')
-                {
-                  zoom = 0;
-                }
-                else if(keysym == '-')
-                {
-                  zoom -= 0.25f;
-                }
-                else if(keysym == '=')
-                {
-                  zoom += 0.25f;
-                }
-                else if(keysym >= '0' && keysym <= '9')
-                {
-                  bflip(extra_toggles[keysym - '0']);
-                }
+                    // TODO: Track from previous events :/
+                    b32 shift_held = 0;
+                    b32 ctrl_held = 0;
+                    b32 alt_held = 0;
+                    b32 lmb_held = 0;
+                    b32 mmb_held = 0;
+                    b32 rmb_held = 0;
+                    r32 mouse_x = (r32)win_w / 2;
+                    r32 mouse_y = (r32)win_h / 2;
 
-                // TODO: Look into XmbLookupString for typed text input.
-                // https://www.x.org/releases/current/doc/libX11/libX11/libX11.html#XmbLookupString
-              } break;
-
-              case ButtonPress:
-              // case ButtonRelease:
-              {
-                b32 went_down = (event.type == ButtonPress);
-                u32 button = event.xbutton.button;
-                b32 shift_held = (event.xbutton.state & 1);
-                b32 ctrl_held = (event.xbutton.state & 4);
-                b32 alt_held = (event.xbutton.state & 8);
-                r32 mouse_x = event.xbutton.x;
-                r32 mouse_y = win_h - event.xbutton.y - 1;
+                    r32 win_min_side = min(win_w, win_h);
+                    r32 exp_zoom_before = exp2f(zoom);
+                    r32 offset_per_scroll = 0.0005f / exp_zoom_before;
+                    r32 zoom_delta = 0;
 
 #if 0
-                printf("state %#x button %u %s\n",
-                    event.xbutton.state, button, went_down ? "Pressed" : "Released");
+                    printf("XI raw motion %d:%d detail %d flags %d\n",
+                        devev->deviceid, devev->sourceid, devev->detail, devev->flags);
+                    printf("  valuators: mask_len %d mask 0x", devev->valuators.mask_len);
+                    for_count(i, devev->valuators.mask_len) { printf("%02x", devev->valuators.mask[i]); }
+                    printf("\n");
+#endif
+                    r64* values = devev->valuators.values;
+                    r64* raw_values = devev->raw_values;
+                    for_count(i, devev->valuators.mask_len)
+                    {
+                      for_count(b, 8)
+                      {
+                        if(devev->valuators.mask[i] & (1 << b))
+                        {
+                          u32 idx = 8 * i + b;
+                          r32 value = (r32)*values;
+#if 0
+                          printf("    %u: %6.2f (raw %.2f)\n", idx, value, *raw_values);
 #endif
 
-                r32 win_min_side = min(win_w, win_h);
-                r32 exp_zoom_before = exp2f(zoom);
-                r32 zoom_per_scroll = 0.25f;
-                r32 offset_per_scroll = 0.125f / exp_zoom_before;
+                          // if(has_focus)
+                          {
+                            // TODO: Find out the correct source IDs.  Maybe using this:
+                            //       http://who-t.blogspot.com/2009/06/xi2-recipies-part-2.html
+                            if(devev->sourceid == 9 || devev->sourceid == 11 || devev->sourceid == 12 || devev->sourceid == 13)
+                            {
+                              if(idx == 0)
+                              {
+                                // game_input.mouse_delta.x += value;
+                              }
+                              else if(idx == 1)
+                              {
+                                // game_input.mouse_delta.y -= value;
+                              }
 
-                r32 zoom_delta = 0;
+                              if(idx == 3)
+                              {
+                                smooth_scrolling_detected = true;
+                                if(ctrl_held)
+                                {
+                                  zoom_delta = value;
+                                }
+                                else if(!alt_held)
+                                {
+                                  if(shift_held)
+                                  {
+                                    offset_x -= offset_per_scroll * value;
+                                  }
+                                  else
+                                  {
+                                    offset_y += offset_per_scroll * value;
+                                  }
+                                }
+                              }
+                              else if(idx == 2)
+                              {
+                                smooth_scrolling_detected = true;
+                                if(!ctrl_held && !alt_held)
+                                {
+                                  offset_x -= offset_per_scroll * value;
+                                }
+                              }
 
-                if(0) {}
-                else if(button == 4)
-                {
-                  if(ctrl_held)
-                  {
-                    zoom_delta = zoom_per_scroll;
-                  }
-                  else if(alt_held)
-                  {
-                    --viewing_img_idx;
-                    if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
-                  }
-                  else
-                  {
-                    if(shift_held)
-                    {
-                      offset_x += offset_per_scroll;
+                              if(zoom_delta != 0)
+                              {
+                                zoom += zoom_delta;
+                                r32 exp_zoom_after = exp2f(zoom);
+
+                                r32 center_mouse_x = mouse_x - 0.5f * win_w;
+                                r32 center_mouse_y = mouse_y - 0.5f * win_h;
+
+                                offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                                offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                              }
+                            }
+                          }
+                          ++values;
+                          ++raw_values;
+                        }
+                      }
                     }
-                    else
-                    {
-                      offset_y -= offset_per_scroll;
-                    }
-                  }
+                  } break;
                 }
-                else if(button == 5)
+                XFreeEventData(display, &event.xcookie);
+              }
+            }
+            else
+            {
+              switch(event.type)
+              {
+                case KeyPress:
+                // case KeyRelease:
                 {
-                  if(ctrl_held)
+                  b32 went_down = (event.type == KeyPress);
+                  u32 keycode = event.xkey.keycode;
+                  KeySym keysym = 0;
+                  keysym = XLookupKeysym(&event.xkey, 0);
+                  b32 shift_held = (event.xkey.state & 1);
+                  b32 ctrl_held = (event.xkey.state & 4);
+
+#if 0
+                  printf("state %#x keycode %u keysym %#lx (%s) %s\n",
+                      event.xkey.state, keycode, keysym, XKeysymToString(keysym),
+                      went_down ? "Pressed" : "Released");
+#endif
+
+                  if(keysym == XK_Escape)
                   {
-                    zoom_delta = -zoom_per_scroll;
+                    quitting = true;
                   }
-                  else if(alt_held)
+                  if(keysym == ' ')
                   {
                     ++viewing_img_idx;
                     if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
                   }
-                  else
+                  if(keysym == XK_BackSpace)
                   {
-                    if(shift_held)
+                    --viewing_img_idx;
+                    if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                  }
+                  else if(keysym == 'a')
+                  {
+                    bflip(border_sampling);
+                  }
+                  else if(keysym == 'b')
+                  {
+                    bflip(clear_bg);
+                  }
+                  else if(keysym == 'l')
+                  {
+                    bflip(linear_sampling);
+                    texture_needs_update = true;
+                  }
+                  else if(keysym == 's')
+                  {
+                    bflip(srgb);
+
+                    if(srgb)
                     {
-                      offset_x -= offset_per_scroll;
+                      glEnable(GL_FRAMEBUFFER_SRGB);
                     }
                     else
                     {
-                      offset_y += offset_per_scroll;
+                      glDisable(GL_FRAMEBUFFER_SRGB);
                     }
+                    texture_needs_update = true;
                   }
-                }
-                else if(button == 6)
-                {
-                  if(!ctrl_held && !alt_held)
+                  else if(keysym == 't')
                   {
-                    offset_x += offset_per_scroll;
+                    bflip(alpha_blend);
                   }
-                }
-                else if(button == 7)
-                {
-                  if(!ctrl_held && !alt_held)
+                  else if(keysym == 'v')
                   {
-                    offset_x -= offset_per_scroll;
+                    bflip(vsync);
+
+                    glXSwapIntervalEXT(display, glx_window, (int)vsync);
                   }
-                }
+                  else if(keysym == 'x')
+                  {
+                    zoom = 0;
+                    offset_x = 0;
+                    offset_y = 0;
+                  }
+                  else if(keysym == '0')
+                  {
+                    zoom = 0;
+                  }
+                  else if(keysym == '-')
+                  {
+                    zoom -= 0.25f;
+                  }
+                  else if(keysym == '=')
+                  {
+                    zoom += 0.25f;
+                  }
+                  else if(keysym >= '0' && keysym <= '9')
+                  {
+                    bflip(extra_toggles[keysym - '0']);
+                  }
 
-                if(zoom_delta != 0)
+                  // TODO: Look into XmbLookupString for typed text input.
+                  // https://www.x.org/releases/current/doc/libX11/libX11/libX11.html#XmbLookupString
+                } break;
+
+                case ButtonPress:
+                // case ButtonRelease:
                 {
-                  zoom += zoom_delta;
-                  r32 exp_zoom_after = exp2f(zoom);
-
-                  r32 center_mouse_x = mouse_x - 0.5f * win_w;
-                  r32 center_mouse_y = mouse_y - 0.5f * win_h;
-
-                  offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                  offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                }
-
-                zoom_start_x = mouse_x;
-                zoom_start_y = mouse_y;
-                prev_mouse_x = mouse_x;
-                prev_mouse_y = mouse_y;
-              } break;
-
-              case MotionNotify:
-              {
-                // printf("%x\n", event.xmotion.state);
-                b32 ctrl_held = (event.xmotion.state & 4);
-                b32 lmb_held = (event.xmotion.state & 0x100);
-                b32 mmb_held = (event.xmotion.state & 0x200);
-
-                if(lmb_held || mmb_held)
-                {
+                  b32 went_down = (event.type == ButtonPress);
+                  u32 button = event.xbutton.button;
+                  b32 shift_held = (event.xbutton.state & 1);
+                  b32 ctrl_held = (event.xbutton.state & 4);
+                  b32 alt_held = (event.xbutton.state & 8);
                   r32 mouse_x = event.xbutton.x;
                   r32 mouse_y = win_h - event.xbutton.y - 1;
 
-                  r32 delta_x = mouse_x - prev_mouse_x;
-                  r32 delta_y = mouse_y - prev_mouse_y;
+#if 0
+                  printf("state %#x button %u %s\n",
+                      event.xbutton.state, button, went_down ? "Pressed" : "Released");
+#endif
 
                   r32 win_min_side = min(win_w, win_h);
+                  r32 exp_zoom_before = exp2f(zoom);
+                  r32 zoom_per_scroll = 0.25f;
+                  r32 offset_per_scroll = 0.125f / exp_zoom_before;
 
-                  if(ctrl_held || mmb_held)
+                  r32 zoom_delta = 0;
+
+                  if(0) {}
+                  else if(button == 4)
                   {
-                    r32 exp_zoom_before = exp2f(zoom);
-                    zoom += 4.0f * delta_y / win_min_side;
+                    if(ctrl_held)
+                    {
+                      zoom_delta = zoom_per_scroll;
+                    }
+                    else if(alt_held)
+                    {
+                      --viewing_img_idx;
+                      if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                    }
+                    else
+                    {
+                      if(shift_held)
+                      {
+                        offset_x += offset_per_scroll;
+                      }
+                      else
+                      {
+                        offset_y -= offset_per_scroll;
+                      }
+                    }
+                  }
+                  else if(button == 5)
+                  {
+                    if(ctrl_held)
+                    {
+                      zoom_delta = -zoom_per_scroll;
+                    }
+                    else if(alt_held)
+                    {
+                      ++viewing_img_idx;
+                      if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
+                    }
+                    else
+                    {
+                      if(shift_held)
+                      {
+                        offset_x -= offset_per_scroll;
+                      }
+                      else
+                      {
+                        offset_y += offset_per_scroll;
+                      }
+                    }
+                  }
+                  else if(button == 6)
+                  {
+                    if(!ctrl_held && !alt_held)
+                    {
+                      offset_x += offset_per_scroll;
+                    }
+                  }
+                  else if(button == 7)
+                  {
+                    if(!ctrl_held && !alt_held)
+                    {
+                      offset_x -= offset_per_scroll;
+                    }
+                  }
+
+                  if(zoom_delta != 0)
+                  {
+                    zoom += zoom_delta;
                     r32 exp_zoom_after = exp2f(zoom);
 
-                    r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
-                    r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
+                    r32 center_mouse_x = mouse_x - 0.5f * win_w;
+                    r32 center_mouse_y = mouse_y - 0.5f * win_h;
 
                     offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                     offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                   }
-                  else
-                  {
-                    r32 exp_zoom = exp2f(zoom);
 
-                    offset_x += delta_x / (exp_zoom * win_min_side);
-                    offset_y += delta_y / (exp_zoom * win_min_side);
-
-                    zoom_start_x = mouse_x;
-                    zoom_start_y = mouse_y;
-                  }
-
+                  zoom_start_x = mouse_x;
+                  zoom_start_y = mouse_y;
                   prev_mouse_x = mouse_x;
                   prev_mouse_y = mouse_y;
-                }
-              } break;
+                } break;
 
-              case FocusIn:
-              {
-              } break;
-
-              case FocusOut:
-              {
-              } break;
-
-              case ConfigureNotify:
-              {
-                win_w = event.xconfigure.width;
-                win_h = event.xconfigure.height;
-              } break;
-
-              case DestroyNotify:
-              {
-                quitting = true;
-              } break;
-
-              case MappingNotify:
-              {
-                // printf(stderr, "Key mapping changed\n");
-                if(event.xmapping.request == MappingModifier ||
-                    event.xmapping.request == MappingKeyboard)
+                case MotionNotify:
                 {
-                  XRefreshKeyboardMapping(&event.xmapping);
-                }
-              } break;
+                  // printf("%x\n", event.xmotion.state);
+                  b32 ctrl_held = (event.xmotion.state & 4);
+                  b32 lmb_held = (event.xmotion.state & 0x100);
+                  b32 mmb_held = (event.xmotion.state & 0x200);
 
-              default:
-              {
-                // printf("Unhandled event type=%u\n", event.type);
-              } break;
+                  if(lmb_held || mmb_held)
+                  {
+                    r32 mouse_x = event.xbutton.x;
+                    r32 mouse_y = win_h - event.xbutton.y - 1;
+
+                    r32 delta_x = mouse_x - prev_mouse_x;
+                    r32 delta_y = mouse_y - prev_mouse_y;
+
+                    r32 win_min_side = min(win_w, win_h);
+
+                    if(ctrl_held || mmb_held)
+                    {
+                      r32 exp_zoom_before = exp2f(zoom);
+                      zoom += 4.0f * delta_y / win_min_side;
+                      r32 exp_zoom_after = exp2f(zoom);
+
+                      r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
+                      r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
+
+                      offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                      offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                    }
+                    else
+                    {
+                      r32 exp_zoom = exp2f(zoom);
+
+                      offset_x += delta_x / (exp_zoom * win_min_side);
+                      offset_y += delta_y / (exp_zoom * win_min_side);
+
+                      zoom_start_x = mouse_x;
+                      zoom_start_y = mouse_y;
+                    }
+
+                    prev_mouse_x = mouse_x;
+                    prev_mouse_y = mouse_y;
+                  }
+                } break;
+
+                case FocusIn:
+                {
+                } break;
+
+                case FocusOut:
+                {
+                } break;
+
+                case ConfigureNotify:
+                {
+                  win_w = event.xconfigure.width;
+                  win_h = event.xconfigure.height;
+                } break;
+
+                case DestroyNotify:
+                {
+                  quitting = true;
+                } break;
+
+                case MappingNotify:
+                {
+                  // printf(stderr, "Key mapping changed\n");
+                  if(event.xmapping.request == MappingModifier ||
+                      event.xmapping.request == MappingKeyboard)
+                  {
+                    XRefreshKeyboardMapping(&event.xmapping);
+                  }
+                } break;
+
+                default:
+                {
+                  // printf("Unhandled event type=%u\n", event.type);
+                } break;
+              }
             }
           }
 
@@ -777,7 +1090,7 @@ int main(int argc, char** argv)
 
             glFinish();
 #if 1
-            usleep(12000);
+            usleep(10000);
 #else
             i32 usecs_to_sleep = (16000000 - (i32)((i64)get_nanoseconds() - (i64)nsecs_last_frame)) / 1000;
             usecs_to_sleep = max(12000, usecs_to_sleep);
@@ -790,7 +1103,7 @@ int main(int argc, char** argv)
           i64 nsecs = nsecs_now - nsecs_last_frame;
           nsecs_last_frame = nsecs_now;
 #if 1
-          // if(!vsync)
+          if(!vsync || extra_toggles[5])
           {
             ++frames_since_last_print;
             nsecs_min = min(nsecs_min, nsecs);
