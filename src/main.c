@@ -40,8 +40,6 @@
 #define WINDOW_INIT_H 600
 #define PROGRAM_NAME "i2x"
 
-static const u32 replacement_character_codepoint = 0xFFFD;
-
 // static void (*glXSwapIntervalEXT)(Display *dpy, GLXDrawable drawable, int interval);
 
 typedef struct
@@ -69,7 +67,7 @@ int main(int argc, char** argv)
 
     b32 xi_available = false;
     int xi_opcode = 0;
-#if 1
+#if 0
     {
       int query_event = 0;
       int query_error = 0;
@@ -290,6 +288,12 @@ int main(int argc, char** argv)
         r32 zoom_start_y = 0;
         r32 prev_mouse_x = 0;
         r32 prev_mouse_y = 0;
+        b32 lmb_held = false;
+        b32 mmb_held = false;
+        b32 rmb_held = false;
+        b32 shift_held = false;
+        b32 ctrl_held = false;
+        b32 alt_held = false;
 
         while(!quitting)
         {
@@ -321,12 +325,12 @@ int main(int argc, char** argv)
                     u32 button = devev->detail;
                     u32 button_mask = devev->buttons.mask_len > 0 ? devev->buttons.mask[0] : 0;
                     i32 mods = devev->mods.effective;
-                    b32 shift_held = (mods & 1);
-                    b32 ctrl_held = (mods & 4);
-                    b32 alt_held = (mods & 8);
-                    b32 lmb_held = (button_mask & 2);
-                    b32 mmb_held = (button_mask & 4);
-                    b32 rmb_held = (button_mask & 8);
+                    shift_held = (mods & 1);
+                    ctrl_held = (mods & 4);
+                    alt_held = (mods & 8);
+                    lmb_held = (button_mask & 2);
+                    mmb_held = (button_mask & 4);
+                    rmb_held = (button_mask & 8);
                     r32 mouse_x = (r32)devev->event_x;
                     r32 mouse_y = (r32)win_h - (r32)devev->event_y - 1.0f;
 
@@ -482,15 +486,8 @@ int main(int argc, char** argv)
                   {
                     XIRawEvent* devev = (XIRawEvent*)event.xcookie.data;
 
-                    // TODO: Track from previous events :/
-                    b32 shift_held = 0;
-                    b32 ctrl_held = 0;
-                    b32 alt_held = 0;
-                    b32 lmb_held = 0;
-                    b32 mmb_held = 0;
-                    b32 rmb_held = 0;
-                    r32 mouse_x = (r32)win_w / 2;
-                    r32 mouse_y = (r32)win_h / 2;
+                    r32 mouse_x = prev_mouse_x;
+                    r32 mouse_y = prev_mouse_y;
 
                     r32 win_min_side = min(win_w, win_h);
                     r32 exp_zoom_before = exp2f(zoom);
@@ -595,8 +592,9 @@ int main(int argc, char** argv)
                   u32 keycode = event.xkey.keycode;
                   KeySym keysym = 0;
                   keysym = XLookupKeysym(&event.xkey, 0);
-                  b32 shift_held = (event.xkey.state & 1);
-                  b32 ctrl_held = (event.xkey.state & 4);
+                  shift_held = (event.xkey.state & 1);
+                  ctrl_held = (event.xkey.state & 4);
+                  alt_held = (event.xkey.state & 8);
 
 #if 0
                   printf("state %#x keycode %u keysym %#lx (%s) %s\n",
@@ -687,9 +685,9 @@ int main(int argc, char** argv)
                 {
                   b32 went_down = (event.type == ButtonPress);
                   u32 button = event.xbutton.button;
-                  b32 shift_held = (event.xbutton.state & 1);
-                  b32 ctrl_held = (event.xbutton.state & 4);
-                  b32 alt_held = (event.xbutton.state & 8);
+                  shift_held = (event.xbutton.state & 1);
+                  ctrl_held = (event.xbutton.state & 4);
+                  alt_held = (event.xbutton.state & 8);
                   r32 mouse_x = event.xbutton.x;
                   r32 mouse_y = win_h - event.xbutton.y - 1;
 
@@ -788,9 +786,11 @@ int main(int argc, char** argv)
                 case MotionNotify:
                 {
                   // printf("%x\n", event.xmotion.state);
-                  b32 ctrl_held = (event.xmotion.state & 4);
-                  b32 lmb_held = (event.xmotion.state & 0x100);
-                  b32 mmb_held = (event.xmotion.state & 0x200);
+                  shift_held = (event.xkey.state & 1);
+                  ctrl_held = (event.xkey.state & 4);
+                  alt_held = (event.xkey.state & 8);
+                  lmb_held = (event.xmotion.state & 0x100);
+                  mmb_held = (event.xmotion.state & 0x200);
 
                   if(lmb_held || mmb_held)
                   {
