@@ -2,12 +2,17 @@
 
 set -e
 
-mkdir -p bin
+mkdir -p obj bin
 
 extra_opts=''
 
-if [ ${OPTIMIZE:-0} == 1 ]; then
+if [ ${OPTIMIZE:-0} -ne 0 ]; then
   extra_opts='-O3'
 fi
 
-clang -g $extra_opts -std=c11 -pthread -I. -lm -lX11 -lGL -lGLX -lXi -lpng -o i2x src/main.c
+if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb_image.o ]; then
+  echo "Building obj/stb_image.o"
+  clang -std=c11 -O3 -DSTB_IMAGE_IMPLEMENTATION -c -o obj/stb_image.o -xc lib/stb_image.h
+fi
+
+clang -g $extra_opts -std=c11 -pthread -I. -lm -lX11 -lGL -lGLX -lXi -lpng -o i2x obj/stb_image.o src/main.c

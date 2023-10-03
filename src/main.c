@@ -32,7 +32,6 @@
 #undef GLX_GLXEXT_PROTOTYPES
 // #include <GL/glxext.h>
 
-#define STB_IMAGE_IMPLEMENTATION
 #include "lib/stb_image.h"
 
 #include "util.h"
@@ -266,6 +265,7 @@ int main(int argc, char** argv)
 
           if(vsync)
           {
+            // TODO: Check for this in GLX extension string before using it.
             glXDelayBeforeSwapNV(display, glx_window, 0.002f);
           }
 
@@ -766,7 +766,7 @@ int main(int argc, char** argv)
           glXSwapBuffers(display, glx_window);
           // usleep(1000);
 
-#if 0
+#if 1
           if(vsync)
           {
             // glFinish seems to reduce lag on HP laptop.
@@ -796,7 +796,7 @@ int main(int argc, char** argv)
             nsecs_min = min(nsecs_min, nsecs);
             nsecs_max = max(nsecs_max, nsecs);
             r32 secs_since_last_print = 1e-9f * (r32)(nsecs_now - nsecs_last_print);
-            if(secs_since_last_print >= 0.5f)
+            if(secs_since_last_print >= 1.0f)
             {
               printf("avg FPS: %.1f [%.1f - %.1f]\n",
                   (r32)frames_since_last_print / secs_since_last_print,
