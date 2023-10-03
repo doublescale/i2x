@@ -537,7 +537,11 @@ int main(int argc, char** argv)
             char txt[256];
             txt[0] = 0;
             char* file_name = argv[viewing_img_idx + 1];
-            i32 txt_len = snprintf(txt, sizeof(txt), "%s - %s", PROGRAM_NAME, file_name);
+            i32 txt_len = snprintf(txt, sizeof(txt), "%s [%d/%d] %dx%d %s",
+                PROGRAM_NAME,
+                viewing_img_idx + 1, img_count,
+                img_entries[viewing_img_idx].w, img_entries[viewing_img_idx].h,
+                file_name);
             XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace,
                 (unsigned char*)txt, txt_len);
 
