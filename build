@@ -15,4 +15,4 @@ if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb_image.o ]; then
   clang -std=c11 -O3 -DSTB_IMAGE_IMPLEMENTATION -c -o obj/stb_image.o -xc lib/stb_image.h
 fi
 
-clang -g $extra_opts -std=c11 -pthread -I. -lm -lX11 -lGL -lGLX -lXi -lpng -o i2x obj/stb_image.o src/main.c
+clang -g $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -lpng -o i2x obj/stb_image.o src/main.c

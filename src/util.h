@@ -35,6 +35,7 @@ typedef double r64;
 #define for_count(i, c) for(u32 i = 0; i < (c); ++i)
 #define min(x, y) ((x) < (y) ? (x) : (y))
 #define max(x, y) ((x) > (y) ? (x) : (y))
+#define absolute(x) ((x) >= 0 ? (x) : -(x))
 #define clamp(a, b, x) (max((a), min((b), (x))))
 #define bflip(x) (x = !x)
 

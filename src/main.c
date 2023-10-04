@@ -57,6 +57,46 @@ internal u64 get_nanoseconds()
   return ts.tv_nsec + 1000000000 * ts.tv_sec;
 }
 
+internal void update_scroll_increments(i32 class_count, XIAnyClassInfo** classes,
+    i32 scroll_increment_count, r32* scroll_increment_by_source_id)
+{
+  // printf("  classes:\n");
+  for(i32 class_idx = 0;
+      class_idx < class_count;
+      ++class_idx)
+  {
+    XIAnyClassInfo* class = classes[class_idx];
+#if 0
+    printf("    type: %d, sourceid: %d\n", class->type, class->sourceid);
+    if(class->type == XIValuatorClass)
+    {
+      XIValuatorClassInfo* valuator_class = (XIValuatorClassInfo*)class;
+      printf("    ValuatorClass\n");
+      printf("      number: %d\n", valuator_class->number);
+      printf("      min: %f\n", valuator_class->min);
+      printf("      max: %f\n", valuator_class->max);
+      printf("      value: %f\n", valuator_class->value);
+    }
+#endif
+    if(class->type == XIScrollClass)
+    {
+      XIScrollClassInfo* scroll_class = (XIScrollClassInfo*)class;
+#if 0
+      printf("    ScrollClass\n");
+      printf("      number: %d\n", scroll_class->number);
+      printf("      scroll_type: %d\n", scroll_class->scroll_type);
+      printf("      increment: %f\n", scroll_class->increment);
+      printf("      flags: %d\n", scroll_class->flags);
+#endif
+
+      if(class->sourceid < scroll_increment_count)
+      {
+        scroll_increment_by_source_id[class->sourceid] = scroll_class->increment;
+      }
+    }
+  }
+}
+
 int main(int argc, char** argv)
 {
   Display* display = XOpenDisplay(0);
@@ -67,16 +107,17 @@ int main(int argc, char** argv)
 
     b32 xi_available = false;
     int xi_opcode = 0;
-#if 0
+#if 1
     {
       int query_event = 0;
       int query_error = 0;
       if(XQueryExtension(display, "XInputExtension", &xi_opcode, &query_event, &query_error))
       {
         int major = 2;
-        int minor = 0;
+        int minor = 1;
         if(XIQueryVersion(display, &major, &minor) == Success)
         {
+          // printf("XInput %d.%d available.\n", major, minor);
           xi_available = true;
         }
       }
@@ -154,7 +195,7 @@ int main(int argc, char** argv)
           | StructureNotifyMask
           | FocusChangeMask
           ;
-        // if(!xi_available)
+        if(!xi_available)
         {
           window_attributes.event_mask = window_attributes.event_mask
             | ButtonPressMask
@@ -194,6 +235,7 @@ int main(int argc, char** argv)
           XISetMask(mask2, XI_ButtonPress);
           XISetMask(mask2, XI_ButtonRelease);
           XISetMask(mask2, XI_Motion);
+          XISetMask(mask2, XI_DeviceChanged);
 
           evmasks[1].deviceid = 2;  // 2: Master pointer.
           evmasks[1].mask_len = sizeof(mask2);
@@ -282,7 +324,12 @@ int main(int argc, char** argv)
         r32 zoom = 0;
         r32 offset_x = 0;
         r32 offset_y = 0;
-        b32 smooth_scrolling_detected = false;
+
+        // TODO: Split these for x/y ?
+        r32 scroll_increment_by_source_id[64];
+        for(i32 i = 0; i < array_count(scroll_increment_by_source_id); ++i) { scroll_increment_by_source_id[i] = 1.0f; }
+        r32 offset_scroll_scale = 0.125f;
+        r32 zoom_scroll_scale = 0.25f;
 
         r32 zoom_start_x = 0;
         r32 zoom_start_y = 0;
@@ -294,6 +341,7 @@ int main(int argc, char** argv)
         b32 shift_held = false;
         b32 ctrl_held = false;
         b32 alt_held = false;
+        b32 has_focus = false;
 
         while(!quitting)
         {
@@ -361,10 +409,14 @@ int main(int argc, char** argv)
                     }
 #endif
 
+                    r32 scroll_increment =
+                      devev->sourceid < array_count(scroll_increment_by_source_id)
+                      ? scroll_increment_by_source_id[devev->sourceid]
+                      : 1.0f;
                     r32 win_min_side = min(win_w, win_h);
                     r32 exp_zoom_before = exp2f(zoom);
-                    r32 zoom_per_scroll = 0.25f;
-                    r32 offset_per_scroll = 0.125f / exp_zoom_before;
+                    r32 zoom_per_scroll = zoom_scroll_scale / scroll_increment;
+                    r32 offset_per_scroll = (offset_scroll_scale / scroll_increment) / exp_zoom_before;
                     r32 zoom_delta = 0;
 
                     if(event.xcookie.evtype == XI_ButtonPress)
@@ -379,7 +431,7 @@ int main(int argc, char** argv)
                         ++viewing_img_idx;
                         if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
                       }
-                      else if(!smooth_scrolling_detected)
+                      else if(!(devev->flags & XIPointerEmulated))
                       {
                         if(button == 4)
                         {
@@ -486,12 +538,15 @@ int main(int argc, char** argv)
                   {
                     XIRawEvent* devev = (XIRawEvent*)event.xcookie.data;
 
+                    r32 scroll_increment =
+                      devev->sourceid < array_count(scroll_increment_by_source_id)
+                      ? scroll_increment_by_source_id[devev->sourceid]
+                      : 1.0f;
                     r32 mouse_x = prev_mouse_x;
                     r32 mouse_y = prev_mouse_y;
-
                     r32 win_min_side = min(win_w, win_h);
                     r32 exp_zoom_before = exp2f(zoom);
-                    r32 offset_per_scroll = 0.0005f / exp_zoom_before;
+                    r32 offset_per_scroll = (offset_scroll_scale / scroll_increment) / exp_zoom_before;
                     r32 zoom_delta = 0;
 
 #if 0
@@ -515,11 +570,11 @@ int main(int argc, char** argv)
                           printf("    %u: %6.2f (raw %.2f)\n", idx, value, *raw_values);
 #endif
 
-                          // if(has_focus)
+                          if(has_focus)
                           {
                             // TODO: Find out the correct source IDs.  Maybe using this:
                             //       http://who-t.blogspot.com/2009/06/xi2-recipies-part-2.html
-                            if(devev->sourceid == 9 || devev->sourceid == 11 || devev->sourceid == 12 || devev->sourceid == 13)
+                            // if(devev->sourceid == 9 || devev->sourceid == 11 || devev->sourceid == 12 || devev->sourceid == 13)
                             {
                               if(idx == 0)
                               {
@@ -532,14 +587,13 @@ int main(int argc, char** argv)
 
                               if(idx == 3)
                               {
-                                smooth_scrolling_detected = true;
-                                if(ctrl_held)
+                                if(!alt_held)
                                 {
-                                  zoom_delta = value;
-                                }
-                                else if(!alt_held)
-                                {
-                                  if(shift_held)
+                                  if(ctrl_held)
+                                  {
+                                    zoom_delta = -(zoom_scroll_scale / scroll_increment) * value;
+                                  }
+                                  else if(shift_held)
                                   {
                                     offset_x -= offset_per_scroll * value;
                                   }
@@ -551,7 +605,6 @@ int main(int argc, char** argv)
                               }
                               else if(idx == 2)
                               {
-                                smooth_scrolling_detected = true;
                                 if(!ctrl_held && !alt_held)
                                 {
                                   offset_x -= offset_per_scroll * value;
@@ -577,21 +630,30 @@ int main(int argc, char** argv)
                       }
                     }
                   } break;
+
+                  case XI_DeviceChanged:
+                  {
+                    XIDeviceChangedEvent* device = (XIDeviceChangedEvent*)event.xcookie.data;
+                    // printf("  deviceid: %d\n", device->deviceid);
+                    // printf("  name: %s\n", device->name);
+                    update_scroll_increments(device->num_classes, device->classes,
+                        array_count(scroll_increment_by_source_id), scroll_increment_by_source_id);
+                  } break;
                 }
                 XFreeEventData(display, &event.xcookie);
               }
             }
             else
             {
+              // printf("Core event type %d\n", event.type);
               switch(event.type)
               {
                 case KeyPress:
-                // case KeyRelease:
+                case KeyRelease:
                 {
                   b32 went_down = (event.type == KeyPress);
                   u32 keycode = event.xkey.keycode;
-                  KeySym keysym = 0;
-                  keysym = XLookupKeysym(&event.xkey, 0);
+                  KeySym keysym = XLookupKeysym(&event.xkey, 0);
                   shift_held = (event.xkey.state & 1);
                   ctrl_held = (event.xkey.state & 4);
                   alt_held = (event.xkey.state & 8);
@@ -602,78 +664,116 @@ int main(int argc, char** argv)
                       went_down ? "Pressed" : "Released");
 #endif
 
-                  if(keysym == XK_Escape)
+                  if(went_down)
                   {
-                    quitting = true;
-                  }
-                  if(keysym == ' ')
-                  {
-                    ++viewing_img_idx;
-                    if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
-                  }
-                  if(keysym == XK_BackSpace)
-                  {
-                    --viewing_img_idx;
-                    if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
-                  }
-                  else if(keysym == 'a')
-                  {
-                    bflip(border_sampling);
-                  }
-                  else if(keysym == 'b')
-                  {
-                    bflip(clear_bg);
-                  }
-                  else if(keysym == 'l')
-                  {
-                    bflip(linear_sampling);
-                    texture_needs_update = true;
-                  }
-                  else if(keysym == 's')
-                  {
-                    bflip(srgb);
-
-                    if(srgb)
+                    if(keysym == XK_Escape)
                     {
-                      glEnable(GL_FRAMEBUFFER_SRGB);
+                      quitting = true;
                     }
-                    else
+                    else if(keysym == XK_Shift_L || keysym == XK_Shift_R)
                     {
-                      glDisable(GL_FRAMEBUFFER_SRGB);
+                      shift_held = true;
                     }
-                    texture_needs_update = true;
-                  }
-                  else if(keysym == 't')
-                  {
-                    bflip(alpha_blend);
-                  }
-                  else if(keysym == 'v')
-                  {
-                    bflip(vsync);
+                    else if(keysym == XK_Control_L || keysym == XK_Control_R)
+                    {
+                      ctrl_held = true;
+                    }
+                    else if(keysym == XK_Alt_L || keysym == XK_Alt_R)
+                    {
+                      alt_held = true;
+                    }
+                    else if(keysym == XK_BackSpace)
+                    {
+                      --viewing_img_idx;
+                      if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                    }
+                    else if(keysym == ' ')
+                    {
+                      ++viewing_img_idx;
+                      if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
+                    }
+                    else if(keysym == XK_Home)
+                    {
+                      viewing_img_idx = 0;
+                    }
+                    else if(keysym == XK_End)
+                    {
+                      viewing_img_idx = img_count - 1;
+                    }
+                    else if(keysym == 'a')
+                    {
+                      bflip(border_sampling);
+                    }
+                    else if(keysym == 'b')
+                    {
+                      bflip(clear_bg);
+                    }
+                    else if(keysym == 'l')
+                    {
+                      bflip(linear_sampling);
+                      texture_needs_update = true;
+                    }
+                    else if(keysym == 's')
+                    {
+                      bflip(srgb);
 
-                    glXSwapIntervalEXT(display, glx_window, (int)vsync);
+                      if(srgb)
+                      {
+                        glEnable(GL_FRAMEBUFFER_SRGB);
+                      }
+                      else
+                      {
+                        glDisable(GL_FRAMEBUFFER_SRGB);
+                      }
+                      texture_needs_update = true;
+                    }
+                    else if(keysym == 't')
+                    {
+                      bflip(alpha_blend);
+                    }
+                    else if(keysym == 'v')
+                    {
+                      bflip(vsync);
+
+                      glXSwapIntervalEXT(display, glx_window, (int)vsync);
+                    }
+                    else if(keysym == 'x')
+                    {
+                      zoom = 0;
+                      offset_x = 0;
+                      offset_y = 0;
+                    }
+                    else if(keysym == '0')
+                    {
+                      zoom = 0;
+                    }
+                    else if(keysym == '-')
+                    {
+                      zoom -= 0.25f;
+                    }
+                    else if(keysym == '=')
+                    {
+                      zoom += 0.25f;
+                    }
+                    else if(keysym >= '0' && keysym <= '9')
+                    {
+                      bflip(extra_toggles[keysym - '0']);
+                    }
                   }
-                  else if(keysym == 'x')
+                  else
                   {
-                    zoom = 0;
-                    offset_x = 0;
-                    offset_y = 0;
-                  }
-                  else if(keysym == '0')
-                  {
-                    zoom = 0;
-                  }
-                  else if(keysym == '-')
-                  {
-                    zoom -= 0.25f;
-                  }
-                  else if(keysym == '=')
-                  {
-                    zoom += 0.25f;
-                  }
-                  else if(keysym >= '0' && keysym <= '9')
-                  {
-                    bflip(extra_toggles[keysym - '0']);
+                    if(keysym == XK_Shift_L || keysym == XK_Shift_R)
+                    {
+                      shift_held = false;
+                    }
+                    else if(keysym == XK_Control_L || keysym == XK_Control_R)
+                    {
+                      ctrl_held = false;
+                    }
+                    else if(keysym == XK_Alt_L || keysym == XK_Alt_R)
+                    {
+                      alt_held = false;
+                    }
                   }
 
                   // TODO: Look into XmbLookupString for typed text input.
@@ -698,22 +798,21 @@ int main(int argc, char** argv)
 
                   r32 win_min_side = min(win_w, win_h);
                   r32 exp_zoom_before = exp2f(zoom);
-                  r32 zoom_per_scroll = 0.25f;
-                  r32 offset_per_scroll = 0.125f / exp_zoom_before;
+                  r32 offset_per_scroll = offset_scroll_scale / exp_zoom_before;
 
                   r32 zoom_delta = 0;
 
                   if(0) {}
                   else if(button == 4)
                   {
-                    if(ctrl_held)
-                    {
-                      zoom_delta = zoom_per_scroll;
-                    }
-                    else if(alt_held)
+                    if(alt_held)
                     {
                       --viewing_img_idx;
                       if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                    }
+                    else if(ctrl_held)
+                    {
+                      zoom_delta = zoom_scroll_scale;
                     }
                     else
                     {
@@ -729,14 +828,14 @@ int main(int argc, char** argv)
                   }
                   else if(button == 5)
                   {
-                    if(ctrl_held)
-                    {
-                      zoom_delta = -zoom_per_scroll;
-                    }
-                    else if(alt_held)
+                    if(alt_held)
                     {
                       ++viewing_img_idx;
                       if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
+                    }
+                    else if(ctrl_held)
+                    {
+                      zoom_delta = -zoom_scroll_scale;
                     }
                     else
                     {
@@ -832,10 +931,27 @@ int main(int argc, char** argv)
 
                 case FocusIn:
                 {
+                  has_focus = true;
+
+                  int device_count = 0;
+                  int master_pointer_device_id = 2;
+                  XIDeviceInfo* device_infos = XIQueryDevice(display, master_pointer_device_id, &device_count);
+                  // printf("\nDevices:\n");
+                  for(i32 device_idx = 0;
+                      device_idx < device_count;
+                      ++device_idx)
+                  {
+                    XIDeviceInfo* device = &device_infos[device_idx];
+                    // printf("  deviceid: %d\n", device->deviceid);
+                    // printf("  name: %s\n", device->name);
+                    update_scroll_increments(device->num_classes, device->classes,
+                        array_count(scroll_increment_by_source_id), scroll_increment_by_source_id);
+                  }
                 } break;
 
                 case FocusOut:
                 {
+                  has_focus = false;
                 } break;
 
                 case ConfigureNotify:
@@ -865,6 +981,8 @@ int main(int argc, char** argv)
                 } break;
               }
             }
+
+            // TODO: Handle mouse-events uniformly here.
           }
 
           if(last_viewing_img_idx != viewing_img_idx)
@@ -1032,18 +1150,27 @@ int main(int argc, char** argv)
           r32 exp_zoom = exp2f(zoom);
           mag *= exp_zoom;
 
-          r32 x_padding = 0.5f * (win_w - mag * tex_w);
-          r32 y_padding = 0.5f * (win_h - mag * tex_h);
-          r32 x0 = x_padding;
-          r32 y0 = y_padding;
-          r32 x1 = x0 + mag * tex_w;
-          r32 y1 = y0 + mag * tex_h;
+          if(absolute(mag - 1.0f) <= 1e-3f)
+          {
+            mag = 1.0f;
+          }
+
+          r32 x0 = 0.5f * (win_w - mag * tex_w);
+          r32 y0 = 0.5f * (win_h - mag * tex_h);
 
           r32 win_min_side = min(win_w, win_h);
           x0 += win_min_side * exp_zoom * offset_x;
-          x1 += win_min_side * exp_zoom * offset_x;
           y0 += win_min_side * exp_zoom * offset_y;
-          y1 += win_min_side * exp_zoom * offset_y;
+
+          if(mag == 1.0f)
+          {
+            // Avoid interpolating pixels when viewing them 1:1.
+            x0 = (r32)(i32)(x0 + 0.5f);
+            y0 = (r32)(i32)(y0 + 0.5f);
+          }
+
+          r32 x1 = x0 + mag * tex_w;
+          r32 y1 = y0 + mag * tex_h;
 
           if(border_sampling)
           {
@@ -1077,7 +1204,6 @@ int main(int argc, char** argv)
 #endif
 
           glXSwapBuffers(display, glx_window);
-          // usleep(1000);
 
 #if 1
           if(vsync)
@@ -1087,15 +1213,10 @@ int main(int argc, char** argv)
             // However, adding a sleep afterwards, does help on desktop!
             // Still more CPU use than without glFinish, though.
             // TODO: Wait for as long as necessary for slightly under the screen refresh rate.
+            // TODO: Only do this if GLX_NV_delay_before_swap is not available.
 
             glFinish();
-#if 1
             usleep(10000);
-#else
-            i32 usecs_to_sleep = (16000000 - (i32)((i64)get_nanoseconds() - (i64)nsecs_last_frame)) / 1000;
-            usecs_to_sleep = max(12000, usecs_to_sleep);
-            usleep(usecs_to_sleep);
-#endif
           }
 #endif
 
