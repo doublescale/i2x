@@ -35,11 +35,21 @@ typedef double r64;
 #define for_count(i, c) for(u32 i = 0; i < (c); ++i)
 #define min(x, y) ((x) < (y) ? (x) : (y))
 #define max(x, y) ((x) > (y) ? (x) : (y))
-#define absolute(x) ((x) >= 0 ? (x) : -(x))
 #define clamp(a, b, x) (max((a), min((b), (x))))
+#define absolute(x) ((x) >= 0 ? (x) : -(x))
 #define bflip(x) (x = !x)
 
 #define malloc_array(count, type) ((type*)malloc((count) * sizeof(type)))
+
+// Modulo, but positive.
+internal i32 i32_wrap_upto(i32 x, i32 y)
+{
+  // TODO: Don't be retarded.
+  while(x < 0) { x += y; }
+  x = x % y;
+
+  return x;
+}
 
 typedef struct
 {

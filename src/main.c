@@ -44,6 +44,7 @@
 
 typedef struct
 {
+  char* path;
   GLuint texture_id;
   i32 w;
   i32 h;
@@ -55,6 +56,11 @@ internal u64 get_nanoseconds()
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return ts.tv_nsec + 1000000000 * ts.tv_sec;
+}
+
+internal void set_title(Display* display, Window window, u8* txt, i32 txt_len)
+{
+  XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace, txt, txt_len);
 }
 
 internal void update_scroll_increments(i32 class_count, XIAnyClassInfo** classes,
@@ -258,11 +264,13 @@ int main(int argc, char** argv)
           XISelectEvents(display, root_window, &root_evmask, 1);
         }
 
-        XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace,
-            (unsigned char*)PROGRAM_NAME, sizeof(PROGRAM_NAME) - 1);
+        set_title(display, window, (unsigned char*)PROGRAM_NAME, sizeof(PROGRAM_NAME) - 1);
         XMapWindow(display, window);
 
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
+
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        // glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         Cursor empty_cursor;
         {
@@ -278,34 +286,82 @@ int main(int argc, char** argv)
         img_entry_t* img_entries = malloc_array(img_count, img_entry_t);
         zero_bytes(img_count * sizeof(img_entry_t), img_entries);
 
-        if(argc > 1)
-        {
-          for(i32 img_idx = 0;
-              img_idx < img_count;
-              ++img_idx)
-          {
-            img_entry_t* img = &img_entries[img_idx];
+        u8 test_texels[] = {
+          1, 1, 1, 255,
+          255, 0, 0, 255,
+          0, 255, 0, 255,
+          0, 0, 255, 255,
+          2, 2, 2, 255,
+          255, 255, 0, 255,
+          0, 255, 255, 255,
+          255, 0, 255, 255,
+          128, 128, 128, 255,
+        };
+        GLuint test_texture_id = 0;
 
-            img->pixels = stbi_load(argv[img_idx + 1], &img->w, &img->h, 0, 4);
+        for(i32 img_idx = 0;
+            img_idx < img_count;
+            ++img_idx)
+        {
+          img_entry_t* img = &img_entries[img_idx];
+
+          if(argc > 1)
+          {
+            img->path = argv[img_idx + 1];
+            img->pixels = stbi_load(img->path, &img->w, &img->h, 0, 4);
+          }
+          else
+          {
+            img->path = "<TEST IMAGE>";
+          }
+
+          if(!img->pixels)
+          {
+            img->pixels = test_texels;
+            img->w = 3;
+            img->h = 3;
+            if(!test_texture_id)
+            {
+              glGenTextures(1, &test_texture_id);
+            }
+            img->texture_id = test_texture_id;
+          }
+          else
+          {
+            glGenTextures(1, &img->texture_id);
+          }
+
+          glBindTexture(GL_TEXTURE_2D, img->texture_id);
+#if 0
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+#else
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+#endif
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+          glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+              img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
+          glGenerateMipmap(GL_TEXTURE_2D);
 
 #if 0
-            // Premultiply alpha.
-            for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
+          // Premultiply alpha.
+          for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
+          {
+            if(img->pixels[4*i + 3] != 255)
             {
-              if(img->pixels[4*i + 3] != 255)
-              {
-                r32 r = img->pixels[4*i + 0] / 255.0f;
-                r32 g = img->pixels[4*i + 1] / 255.0f;
-                r32 b = img->pixels[4*i + 2] / 255.0f;
-                r32 a = img->pixels[4*i + 3] / 255.0f;
+              r32 r = img->pixels[4*i + 0] / 255.0f;
+              r32 g = img->pixels[4*i + 1] / 255.0f;
+              r32 b = img->pixels[4*i + 2] / 255.0f;
+              r32 a = img->pixels[4*i + 3] / 255.0f;
 
-                img->pixels[4*i + 0] = 255.0f * a * r;
-                img->pixels[4*i + 1] = 255.0f * a * g;
-                img->pixels[4*i + 2] = 255.0f * a * b;
-              }
+              img->pixels[4*i + 0] = 255.0f * a * r;
+              img->pixels[4*i + 1] = 255.0f * a * g;
+              img->pixels[4*i + 2] = 255.0f * a * b;
             }
-#endif
           }
+#endif
         }
 
         i32 win_w = WINDOW_INIT_W;
@@ -325,12 +381,17 @@ int main(int argc, char** argv)
         b32 border_sampling = true;
         b32 linear_sampling = true;
         b32 alpha_blend = true;
-        b32 clear_bg = true;
-        b32 srgb = false;
+        b32 bright_bg = false;
         b32 extra_toggles[10] = {0};
         r32 zoom = 0;
         r32 offset_x = 0;
         r32 offset_y = 0;
+        b32 hide_sidebar = false;
+        i32 sidebar_width = 310;
+        r32 sidebar_scroll_rows = 0;
+        r32 thumbnail_w = 150.0f;
+        r32 thumbnail_h = thumbnail_w;
+        i32 hovered_thumbnail_idx = -1;
 
         // TODO: Split these for x/y ?
         //       Actually, just using the constant 120 might be enough.
@@ -357,13 +418,13 @@ int main(int argc, char** argv)
 
         while(!quitting)
         {
-          b32 texture_needs_update = false;
-
           if(vsync)
           {
             // TODO: Check for this in GLX extension string before using it.
             glXDelayBeforeSwapNV(display, glx_window, 0.002f);
           }
+
+          b32 scroll_thumbnail_into_view = false;
 
           while(XPending(display))
           {
@@ -374,6 +435,8 @@ int main(int argc, char** argv)
             i32 scroll_y_ticks = 0;
             r32 scroll_x = 0;
             r32 scroll_y = 0;
+            i32 mouse_btn_went_down = 0;
+            i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
 
             XEvent event;
             XNextEvent(display, &event);
@@ -431,6 +494,7 @@ int main(int argc, char** argv)
 
                     if(event.xcookie.evtype == XI_ButtonPress)
                     {
+                      mouse_btn_went_down = button;
                       if(button == 4)
                       {
                         scroll_y_ticks += 1;
@@ -555,6 +619,9 @@ int main(int argc, char** argv)
                   shift_held = (event.xkey.state & 1);
                   ctrl_held = (event.xkey.state & 4);
                   alt_held = (event.xkey.state & 8);
+                  lmb_held = (event.xkey.state & 0x100);
+                  mmb_held = (event.xkey.state & 0x200);
+                  rmb_held = (event.xkey.state & 0x400);
 
 #if 0
                   printf("state %#x keycode %u keysym %#lx (%s) %s\n",
@@ -580,15 +647,21 @@ int main(int argc, char** argv)
                     {
                       alt_held = true;
                     }
-                    else if(keysym == XK_BackSpace)
+                    else if(keysym == XK_BackSpace || (alt_held && keysym == XK_Left))
                     {
-                      --viewing_img_idx;
-                      if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                      viewing_img_idx -= 1;
                     }
-                    else if(keysym == ' ')
+                    else if(keysym == ' ' || (alt_held && keysym == XK_Right))
                     {
-                      ++viewing_img_idx;
-                      if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
+                      viewing_img_idx += 1;
+                    }
+                    else if(alt_held && keysym == XK_Up)
+                    {
+                      viewing_img_idx -= thumbnail_columns;
+                    }
+                    else if(alt_held && keysym == XK_Down)
+                    {
+                      viewing_img_idx += thumbnail_columns;
                     }
                     else if(keysym == XK_Home)
                     {
@@ -604,26 +677,31 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 'b')
                     {
-                      bflip(clear_bg);
+                      bflip(bright_bg);
+                    }
+                    else if(keysym == 'h')
+                    {
+                      bflip(hide_sidebar);
                     }
                     else if(keysym == 'l')
                     {
                       bflip(linear_sampling);
-                      texture_needs_update = true;
-                    }
-                    else if(keysym == 's')
-                    {
-                      bflip(srgb);
-
-                      if(srgb)
+                      for(i32 img_idx = 0;
+                          img_idx < img_count;
+                          ++img_idx)
                       {
-                        glEnable(GL_FRAMEBUFFER_SRGB);
+                        glBindTexture(GL_TEXTURE_2D, img_entries[img_idx].texture_id);
+                        if(linear_sampling)
+                        {
+                          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+                        }
+                        else
+                        {
+                          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        }
                       }
-                      else
-                      {
-                        glDisable(GL_FRAMEBUFFER_SRGB);
-                      }
-                      texture_needs_update = true;
                     }
                     else if(keysym == 't')
                     {
@@ -699,6 +777,7 @@ int main(int argc, char** argv)
 
                   if(went_down)
                   {
+                    mouse_btn_went_down = button;
                     if(button == 4)
                     {
                       scroll_y_ticks += 1;
@@ -796,7 +875,12 @@ int main(int argc, char** argv)
             }
 
             // Handle mouse events.
-            if(mouse_delta_x || mouse_delta_y || scroll_x || scroll_y || scroll_y_ticks)
+            b32 mouse_in_sidebar = (!hide_sidebar && mouse_x < sidebar_width);
+            if(mouse_in_sidebar && hovered_thumbnail_idx != -1 && (mouse_btn_went_down == 1 || lmb_held))
+            {
+              viewing_img_idx = hovered_thumbnail_idx;
+            }
+            else if(mouse_delta_x || mouse_delta_y || scroll_x || scroll_y || scroll_y_ticks || mouse_btn_went_down)
             {
               r32 win_min_side = min(win_w, win_h);
               r32 exp_zoom_before = exp2f(zoom);
@@ -806,24 +890,47 @@ int main(int argc, char** argv)
               if(alt_held)
               {
                 viewing_img_idx -= scroll_y_ticks;
-                while(viewing_img_idx < 0) { viewing_img_idx += img_count; }
-                viewing_img_idx %= img_count;
               }
 
               if(!alt_held)
               {
-                if(ctrl_held)
+                if(mouse_in_sidebar)
                 {
-                  zoom_delta += zoom_scroll_scale * scroll_y;
-                }
-                else if(shift_held)
-                {
-                  offset_x += offset_per_scroll * scroll_y;
+                  if(ctrl_held)
+                  {
+                    if(scroll_y != 0)
+                    {
+                      thumbnail_w *= exp2f(scroll_y);
+                      thumbnail_h = thumbnail_w;
+                      scroll_thumbnail_into_view = true;
+                    }
+                  }
+                  else if(shift_held)
+                  {
+                  }
+                  else
+                  {
+                    sidebar_scroll_rows -= scroll_y;
+                    sidebar_scroll_rows = clamp(0,
+                        (img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
+                        sidebar_scroll_rows);
+                  }
                 }
                 else
                 {
-                  offset_x -= offset_per_scroll * scroll_x;
-                  offset_y -= offset_per_scroll * scroll_y;
+                  if(ctrl_held)
+                  {
+                    zoom_delta += zoom_scroll_scale * scroll_y;
+                  }
+                  else if(shift_held)
+                  {
+                    offset_x += offset_per_scroll * scroll_y;
+                  }
+                  else
+                  {
+                    offset_x -= offset_per_scroll * scroll_x;
+                    offset_y -= offset_per_scroll * scroll_y;
+                  }
                 }
               }
 
@@ -857,30 +964,49 @@ int main(int argc, char** argv)
                 r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
                 r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
 
+                if(!hide_sidebar)
+                {
+                  center_mouse_x -= 0.5f * (r32)sidebar_width;
+                }
+
                 offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                 offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
               }
-
             }
 
             prev_mouse_x = mouse_x;
             prev_mouse_y = mouse_y;
           }
+          i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
 
+          viewing_img_idx = i32_wrap_upto(viewing_img_idx, img_count);
           if(last_viewing_img_idx != viewing_img_idx)
           {
             char txt[256];
             txt[0] = 0;
-            char* file_name = argv[viewing_img_idx + 1];
             i32 txt_len = snprintf(txt, sizeof(txt), "%s [%d/%d] %dx%d %s",
                 PROGRAM_NAME,
                 viewing_img_idx + 1, img_count,
                 img_entries[viewing_img_idx].w, img_entries[viewing_img_idx].h,
-                file_name);
-            XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace,
-                (unsigned char*)txt, txt_len);
+                img_entries[viewing_img_idx].path);
+            set_title(display, window, (u8*)txt, txt_len);
+
+            scroll_thumbnail_into_view = true;
 
             last_viewing_img_idx = viewing_img_idx;
+          }
+
+          if(scroll_thumbnail_into_view)
+          {
+            i32 thumbnail_row = viewing_img_idx / thumbnail_columns;
+            if((thumbnail_row - sidebar_scroll_rows + 1) * thumbnail_h > win_h)
+            {
+              sidebar_scroll_rows = thumbnail_row + 1 - win_h / thumbnail_h;
+            }
+            if(thumbnail_row - sidebar_scroll_rows < 0)
+            {
+              sidebar_scroll_rows = thumbnail_row;
+            }
           }
 
 #if 0
@@ -908,20 +1034,11 @@ int main(int argc, char** argv)
           }
 #endif
 
-
           glViewport(0, 0, win_w, win_h);
-          if(clear_bg)
+          glDisable(GL_SCISSOR_TEST);
           {
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-          }
-          else
-          {
-            r32 gray = 0.5f;
-            if(srgb)
-            {
-              gray = powf(gray, 2.2f);
-            }
-            glClearColor(gray, gray, gray, 1.0f);
+            r32 bg_gray = bright_bg ? 0.9f : 0.1f;
+            glClearColor(bg_gray, bg_gray, bg_gray, 1.0f);
           }
           glClear(GL_COLOR_BUFFER_BIT);
 
@@ -937,95 +1054,148 @@ int main(int argc, char** argv)
             glLoadMatrixf(matrix);
           }
 
-#if 0
-          glMatrixMode(GL_MODELVIEW);
-          glLoadIdentity();
-          glRotatef(30.0f, 0, 0, 1);
-#endif
-
-          img_entry_t* img = &img_entries[viewing_img_idx];
-
-          if(!img->texture_id)
+          if(!hide_sidebar)
           {
-            texture_needs_update = true;
-            glGenTextures(1, &img->texture_id);
-            glBindTexture(GL_TEXTURE_2D, img->texture_id);
-#if 0
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-#else
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-#endif
-          }
-          else
-          {
-            glBindTexture(GL_TEXTURE_2D, img->texture_id);
-          }
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(0, 0, sidebar_width, win_h);
 
-          u8 test_texels[] = {
-            1, 1, 1, 255,
-            255, 0, 0, 255,
-            0, 255, 0, 255,
-            0, 0, 255, 255,
-            2, 2, 2, 255,
-            255, 255, 0, 255,
-            0, 255, 255, 255,
-            255, 0, 255, 255,
-            128, 128, 128, 255,
-          };
-          u8* texels = test_texels;
-          i32 tex_w = 3;
-          i32 tex_h = 3;
-
-          if(img->pixels)
-          {
-            texels = img->pixels;
-            tex_w = img->w;
-            tex_h = img->h;
-          }
-
-          if(texture_needs_update)
-          {
-            if(linear_sampling)
+            glDisable(GL_BLEND);
+            glDisable(GL_TEXTURE_2D);
+            glBegin(GL_QUADS);
+            if(bright_bg)
             {
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-              // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
+              glColor3f(0.0f, 0.0f, 0.0f);
             }
             else
             {
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+              glColor3f(1.0f, 1.0f, 1.0f);
             }
-            glTexImage2D(GL_TEXTURE_2D, 0,
-                srgb ? GL_SRGB_ALPHA : GL_RGBA,
-                tex_w, tex_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
-            glGenerateMipmap(GL_TEXTURE_2D);
+            glVertex2f(sidebar_width - 2, 0);
+            glVertex2f(sidebar_width - 1, 0);
+            glVertex2f(sidebar_width - 1, win_h);
+            glVertex2f(sidebar_width - 2, win_h);
+            glEnd();
+
+            glScissor(0, 0, sidebar_width - 2, win_h);
+
+            if(alpha_blend)
+            {
+              glEnable(GL_BLEND);
+            }
+            else
+            {
+              glDisable(GL_BLEND);
+            }
+
+            glEnable(GL_TEXTURE_2D);
+            glColor3f(1.0f, 1.0f, 1.0f);
+            hovered_thumbnail_idx = -1;
+            for(i32 img_idx = 0;
+                img_idx < img_count;
+                ++img_idx)
+            {
+              img_entry_t* img = &img_entries[img_idx];
+              if(img->texture_id)
+              {
+                r32 tex_w = img->w;
+                r32 tex_h = img->h;
+
+                glBindTexture(GL_TEXTURE_2D, img->texture_id);
+
+                i32 sidebar_col = img_idx % thumbnail_columns;
+                i32 sidebar_row = img_idx / thumbnail_columns;
+
+                r32 box_x0 = sidebar_col * thumbnail_w;
+                r32 box_y1 = win_h - ((r32)sidebar_row - sidebar_scroll_rows) * thumbnail_h;
+                r32 box_x1 = box_x0 + thumbnail_w;
+                r32 box_y0 = box_y1 - thumbnail_h;
+
+                if(hovered_thumbnail_idx == -1 &&
+                    prev_mouse_x >= box_x0 && prev_mouse_x < box_x1 &&
+                    prev_mouse_y >= box_y0 && prev_mouse_y < box_y1)
+                {
+                  hovered_thumbnail_idx = img_idx;
+                }
+
+                if(img_idx == viewing_img_idx || img_idx == hovered_thumbnail_idx)
+                {
+                  glDisable(GL_TEXTURE_2D);
+
+                  r32 gray = (img_idx == viewing_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
+                  glColor3f(gray, gray, gray);
+
+                  glBegin(GL_QUADS);
+                  glVertex2f(box_x0, box_y0);
+                  glVertex2f(box_x1, box_y0);
+                  glVertex2f(box_x1, box_y1);
+                  glVertex2f(box_x0, box_y1);
+                  glEnd();
+
+                  glEnable(GL_TEXTURE_2D);
+                  glColor3f(1.0f, 1.0f, 1.0f);
+                }
+
+                r32 mag = 1.0f;
+                if(thumbnail_w != 0 && thumbnail_h != 0)
+                {
+                  mag = min((r32)thumbnail_w / (r32)tex_w, (r32)thumbnail_h / (r32)tex_h);
+                }
+                mag *= 0.9f;
+
+                r32 x0 = box_x0;
+                r32 y1 = box_y1;
+
+                x0 += 0.5f * (thumbnail_w - mag * tex_w);
+                y1 -= 0.5f * (thumbnail_h - mag * tex_h);
+
+                r32 x1 = x0 + mag * tex_w;
+                r32 y0 = y1 - mag * tex_h;
+
+                r32 u0 = 0;
+                r32 v0 = 0;
+                r32 u1 = 1;
+                r32 v1 = 1;
+
+                glBegin(GL_QUADS);
+                glTexCoord2f(u0, v1); glVertex2f(x0, y0);
+                glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+                glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+                glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+                glEnd();
+              }
+            }
+
+            glScissor(sidebar_width, 0, win_w - sidebar_width, win_h);
           }
+
+          img_entry_t* img = &img_entries[viewing_img_idx];
+
+          glBindTexture(GL_TEXTURE_2D, img->texture_id);
+
+          r32 tex_w = img->w;
+          r32 tex_h = img->h;
 
           if(alpha_blend)
           {
             glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            // glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
           }
           else
           {
             glDisable(GL_BLEND);
           }
 
-          glEnable(GL_TEXTURE_2D);
-
           r32 u0 = 0.0f;
           r32 v0 = 0.0f;
           r32 u1 = 1.0f;
           r32 v1 = 1.0f;
 
+          r32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
+          r32 image_region_w = (r32)win_w - image_region_x0;
+
           r32 mag = 1.0f;
-          if(win_w != 0 && win_h != 0)
+          if(image_region_w != 0 && win_h != 0)
           {
-            mag = min((r32)win_w / (r32)tex_w, (r32)win_h / (r32)tex_h);
+            mag = min(image_region_w / (r32)tex_w, (r32)win_h / (r32)tex_h);
           }
           r32 exp_zoom = exp2f(zoom);
           mag *= exp_zoom;
@@ -1035,7 +1205,7 @@ int main(int argc, char** argv)
             mag = 1.0f;
           }
 
-          r32 x0 = 0.5f * (win_w - mag * tex_w);
+          r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
           r32 y0 = 0.5f * (win_h - mag * tex_h);
 
           r32 win_min_side = min(win_w, win_h);
@@ -1067,11 +1237,13 @@ int main(int argc, char** argv)
             y1 += margin;
           }
 
+          glEnable(GL_TEXTURE_2D);
+          glColor3f(1.0f, 1.0f, 1.0f);
           glBegin(GL_QUADS);
-          glTexCoord2f(u0, v0); glVertex2f(x0, y1);
-          glTexCoord2f(u1, v0); glVertex2f(x1, y1);
-          glTexCoord2f(u1, v1); glVertex2f(x1, y0);
           glTexCoord2f(u0, v1); glVertex2f(x0, y0);
+          glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+          glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+          glTexCoord2f(u0, v0); glVertex2f(x0, y1);
           glEnd();
 
 #if 0
