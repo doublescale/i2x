@@ -89,9 +89,16 @@ internal void update_scroll_increments(i32 class_count, XIAnyClassInfo** classes
       printf("      flags: %d\n", scroll_class->flags);
 #endif
 
-      if(class->sourceid < scroll_increment_count)
+      if(class->sourceid >= 0 && class->sourceid < scroll_increment_count)
       {
-        scroll_increment_by_source_id[class->sourceid] = scroll_class->increment;
+        if(scroll_increment_by_source_id[class->sourceid] != scroll_class->increment)
+        {
+          printf("Scroll increment for sourceid %d changed from %f to %f.\n",
+              class->sourceid,
+              scroll_increment_by_source_id[class->sourceid],
+              scroll_class->increment);
+          scroll_increment_by_source_id[class->sourceid] = scroll_class->increment;
+        }
       }
     }
   }
@@ -326,8 +333,13 @@ int main(int argc, char** argv)
         r32 offset_y = 0;
 
         // TODO: Split these for x/y ?
+        //       Actually, just using the constant 120 might be enough.
+        //       Check if any device is configured differently, ever.
+        r32 default_scroll_increment = 120.0f;
         r32 scroll_increment_by_source_id[64];
-        for(i32 i = 0; i < array_count(scroll_increment_by_source_id); ++i) { scroll_increment_by_source_id[i] = 1.0f; }
+        for(i32 i = 0; i < array_count(scroll_increment_by_source_id); ++i)
+        { scroll_increment_by_source_id[i] = default_scroll_increment; }
+
         r32 offset_scroll_scale = 0.125f;
         r32 zoom_scroll_scale = 0.25f;
 
@@ -355,6 +367,14 @@ int main(int argc, char** argv)
 
           while(XPending(display))
           {
+            r32 mouse_x = prev_mouse_x;
+            r32 mouse_y = prev_mouse_y;
+            r32 mouse_delta_x = 0;
+            r32 mouse_delta_y = 0;
+            i32 scroll_y_ticks = 0;
+            r32 scroll_x = 0;
+            r32 scroll_y = 0;
+
             XEvent event;
             XNextEvent(display, &event);
 
@@ -366,7 +386,7 @@ int main(int argc, char** argv)
                 switch(event.xcookie.evtype)
                 {
                   case XI_ButtonPress:
-                  // case XI_ButtonRelease:
+                  case XI_ButtonRelease:
                   case XI_Motion:
                   {
                     XIDeviceEvent* devev = (XIDeviceEvent*)event.xcookie.data;
@@ -379,8 +399,8 @@ int main(int argc, char** argv)
                     lmb_held = (button_mask & 2);
                     mmb_held = (button_mask & 4);
                     rmb_held = (button_mask & 8);
-                    r32 mouse_x = (r32)devev->event_x;
-                    r32 mouse_y = (r32)win_h - (r32)devev->event_y - 1.0f;
+                    mouse_x = (r32)devev->event_x;
+                    mouse_y = (r32)win_h - (r32)devev->event_y - 1.0f;
 
 #if 0
                     printf("%s %d:%d detail %d flags %d mods %d r %.2f,%.2f e %.2f,%.2f btns %d\n",
@@ -409,223 +429,102 @@ int main(int argc, char** argv)
                     }
 #endif
 
-                    r32 scroll_increment =
-                      devev->sourceid < array_count(scroll_increment_by_source_id)
-                      ? scroll_increment_by_source_id[devev->sourceid]
-                      : 1.0f;
-                    r32 win_min_side = min(win_w, win_h);
-                    r32 exp_zoom_before = exp2f(zoom);
-                    r32 zoom_per_scroll = zoom_scroll_scale / scroll_increment;
-                    r32 offset_per_scroll = (offset_scroll_scale / scroll_increment) / exp_zoom_before;
-                    r32 zoom_delta = 0;
-
                     if(event.xcookie.evtype == XI_ButtonPress)
                     {
-                      if(alt_held && button == 4)
+                      if(button == 4)
                       {
-                        --viewing_img_idx;
-                        if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                        scroll_y_ticks += 1;
                       }
-                      if(alt_held && button == 5)
+                      else if(button == 5)
                       {
-                        ++viewing_img_idx;
-                        if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
+                        scroll_y_ticks -= 1;
                       }
-                      else if(!(devev->flags & XIPointerEmulated))
+                      if(!(devev->flags & XIPointerEmulated))
                       {
                         if(button == 4)
                         {
-                          if(ctrl_held)
-                          {
-                            zoom_delta = zoom_per_scroll;
-                          }
-                          else
-                          {
-                            if(shift_held)
-                            {
-                              offset_x += offset_per_scroll;
-                            }
-                            else
-                            {
-                              offset_y -= offset_per_scroll;
-                            }
-                          }
+                          scroll_y += 1.0f;
                         }
                         else if(button == 5)
                         {
-                          if(ctrl_held)
-                          {
-                            zoom_delta = -zoom_per_scroll;
-                          }
-                          else
-                          {
-                            if(shift_held)
-                            {
-                              offset_x -= offset_per_scroll;
-                            }
-                            else
-                            {
-                              offset_y += offset_per_scroll;
-                            }
-                          }
+                          scroll_y -= 1.0f;
                         }
                         else if(button == 6)
                         {
-                          if(!ctrl_held && !alt_held)
-                          {
-                            offset_x += offset_per_scroll;
-                          }
+                          scroll_x -= 1.0f;
                         }
                         else if(button == 7)
                         {
-                          if(!ctrl_held && !alt_held)
-                          {
-                            offset_x -= offset_per_scroll;
-                          }
-                        }
-
-                        if(zoom_delta != 0)
-                        {
-                          zoom += zoom_delta;
-                          r32 exp_zoom_after = exp2f(zoom);
-
-                          r32 center_mouse_x = mouse_x - 0.5f * win_w;
-                          r32 center_mouse_y = mouse_y - 0.5f * win_h;
-
-                          offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                          offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                          scroll_x += 1.0f;
                         }
                       }
 
                       zoom_start_x = mouse_x;
                       zoom_start_y = mouse_y;
                     }
-                    else if(event.xcookie.evtype == XI_Motion)
-                    {
-                      if(lmb_held || mmb_held)
-                      {
-                        r32 delta_x = mouse_x - prev_mouse_x;
-                        r32 delta_y = mouse_y - prev_mouse_y;
 
-                        if(ctrl_held || mmb_held)
-                        {
-                          zoom += 4.0f * delta_y / win_min_side;
-                          r32 exp_zoom_after = exp2f(zoom);
-
-                          r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
-                          r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
-
-                          offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                          offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                        }
-                        else
-                        {
-                          r32 exp_zoom = exp2f(zoom);
-
-                          offset_x += delta_x / (exp_zoom * win_min_side);
-                          offset_y += delta_y / (exp_zoom * win_min_side);
-
-                          zoom_start_x = mouse_x;
-                          zoom_start_y = mouse_y;
-                        }
-                      }
-                    }
-                    prev_mouse_x = mouse_x;
-                    prev_mouse_y = mouse_y;
+                    // TODO: This probably needs to happen for absolute pointers, e.g. tablet devices.
+                    // mouse_delta_x += mouse_x - prev_mouse_x;
+                    // mouse_delta_y += mouse_y - prev_mouse_y;
                   } break;
 
                   case XI_RawMotion:
                   {
-                    XIRawEvent* devev = (XIRawEvent*)event.xcookie.data;
-
-                    r32 scroll_increment =
-                      devev->sourceid < array_count(scroll_increment_by_source_id)
-                      ? scroll_increment_by_source_id[devev->sourceid]
-                      : 1.0f;
-                    r32 mouse_x = prev_mouse_x;
-                    r32 mouse_y = prev_mouse_y;
-                    r32 win_min_side = min(win_w, win_h);
-                    r32 exp_zoom_before = exp2f(zoom);
-                    r32 offset_per_scroll = (offset_scroll_scale / scroll_increment) / exp_zoom_before;
-                    r32 zoom_delta = 0;
-
-#if 0
-                    printf("XI raw motion %d:%d detail %d flags %d\n",
-                        devev->deviceid, devev->sourceid, devev->detail, devev->flags);
-                    printf("  valuators: mask_len %d mask 0x", devev->valuators.mask_len);
-                    for_count(i, devev->valuators.mask_len) { printf("%02x", devev->valuators.mask[i]); }
-                    printf("\n");
-#endif
-                    r64* values = devev->valuators.values;
-                    r64* raw_values = devev->raw_values;
-                    for_count(i, devev->valuators.mask_len)
+                    if(has_focus)
                     {
-                      for_count(b, 8)
-                      {
-                        if(devev->valuators.mask[i] & (1 << b))
-                        {
-                          u32 idx = 8 * i + b;
-                          r32 value = (r32)*values;
+                      XIRawEvent* devev = (XIRawEvent*)event.xcookie.data;
+
+                      r32 scroll_increment =
+                        devev->sourceid < array_count(scroll_increment_by_source_id)
+                        ? scroll_increment_by_source_id[devev->sourceid]
+                        : default_scroll_increment;
+
 #if 0
-                          printf("    %u: %6.2f (raw %.2f)\n", idx, value, *raw_values);
+                      printf("XI raw motion %d:%d detail %d flags %d\n",
+                          devev->deviceid, devev->sourceid, devev->detail, devev->flags);
+                      printf("  valuators: mask_len %d mask 0x", devev->valuators.mask_len);
+                      for_count(i, devev->valuators.mask_len) { printf("%02x", devev->valuators.mask[i]); }
+                      printf("\n");
+#endif
+                      r64* values = devev->valuators.values;
+                      r64* raw_values = devev->raw_values;
+                      for_count(i, devev->valuators.mask_len)
+                      {
+                        for_count(b, 8)
+                        {
+                          if(devev->valuators.mask[i] & (1 << b))
+                          {
+                            u32 idx = 8 * i + b;
+                            r32 value = (r32)*values;
+#if 0
+                            printf("    %u: %6.2f (raw %.2f)\n", idx, value, *raw_values);
 #endif
 
-                          if(has_focus)
-                          {
                             // TODO: Find out the correct source IDs.  Maybe using this:
                             //       http://who-t.blogspot.com/2009/06/xi2-recipies-part-2.html
                             // if(devev->sourceid == 9 || devev->sourceid == 11 || devev->sourceid == 12 || devev->sourceid == 13)
                             {
                               if(idx == 0)
                               {
-                                // game_input.mouse_delta.x += value;
+                                mouse_delta_x += value;
                               }
                               else if(idx == 1)
                               {
-                                // game_input.mouse_delta.y -= value;
-                              }
-
-                              if(idx == 3)
-                              {
-                                if(!alt_held)
-                                {
-                                  if(ctrl_held)
-                                  {
-                                    zoom_delta = -(zoom_scroll_scale / scroll_increment) * value;
-                                  }
-                                  else if(shift_held)
-                                  {
-                                    offset_x -= offset_per_scroll * value;
-                                  }
-                                  else
-                                  {
-                                    offset_y += offset_per_scroll * value;
-                                  }
-                                }
+                                mouse_delta_y -= value;
                               }
                               else if(idx == 2)
                               {
-                                if(!ctrl_held && !alt_held)
-                                {
-                                  offset_x -= offset_per_scroll * value;
-                                }
+                                scroll_x += value / scroll_increment;
                               }
-
-                              if(zoom_delta != 0)
+                              else if(idx == 3)
                               {
-                                zoom += zoom_delta;
-                                r32 exp_zoom_after = exp2f(zoom);
-
-                                r32 center_mouse_x = mouse_x - 0.5f * win_w;
-                                r32 center_mouse_y = mouse_y - 0.5f * win_h;
-
-                                offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                                offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                                scroll_y -= value / scroll_increment;
                               }
                             }
+
+                            ++values;
+                            ++raw_values;
                           }
-                          ++values;
-                          ++raw_values;
                         }
                       }
                     }
@@ -634,8 +533,7 @@ int main(int argc, char** argv)
                   case XI_DeviceChanged:
                   {
                     XIDeviceChangedEvent* device = (XIDeviceChangedEvent*)event.xcookie.data;
-                    // printf("  deviceid: %d\n", device->deviceid);
-                    // printf("  name: %s\n", device->name);
+                    // printf("XI Device %d changed\n", device->deviceid);
                     update_scroll_increments(device->num_classes, device->classes,
                         array_count(scroll_increment_by_source_id), scroll_increment_by_source_id);
                   } break;
@@ -781,152 +679,64 @@ int main(int argc, char** argv)
                 } break;
 
                 case ButtonPress:
-                // case ButtonRelease:
+                case ButtonRelease:
                 {
                   b32 went_down = (event.type == ButtonPress);
                   u32 button = event.xbutton.button;
                   shift_held = (event.xbutton.state & 1);
                   ctrl_held = (event.xbutton.state & 4);
                   alt_held = (event.xbutton.state & 8);
-                  r32 mouse_x = event.xbutton.x;
-                  r32 mouse_y = win_h - event.xbutton.y - 1;
+                  lmb_held = (event.xbutton.state & 0x100);
+                  mmb_held = (event.xbutton.state & 0x200);
+                  rmb_held = (event.xbutton.state & 0x400);
+                  mouse_x = event.xbutton.x;
+                  mouse_y = win_h - event.xbutton.y - 1;
 
 #if 0
                   printf("state %#x button %u %s\n",
                       event.xbutton.state, button, went_down ? "Pressed" : "Released");
 #endif
 
-                  r32 win_min_side = min(win_w, win_h);
-                  r32 exp_zoom_before = exp2f(zoom);
-                  r32 offset_per_scroll = offset_scroll_scale / exp_zoom_before;
-
-                  r32 zoom_delta = 0;
-
-                  if(0) {}
-                  else if(button == 4)
+                  if(went_down)
                   {
-                    if(alt_held)
+                    if(button == 4)
                     {
-                      --viewing_img_idx;
-                      if(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                      scroll_y_ticks += 1;
+                      scroll_y += 1.0f;
                     }
-                    else if(ctrl_held)
+                    else if(button == 5)
                     {
-                      zoom_delta = zoom_scroll_scale;
+                      scroll_y_ticks -= 1;
+                      scroll_y -= 1.0f;
                     }
-                    else
+                    else if(button == 6)
                     {
-                      if(shift_held)
-                      {
-                        offset_x += offset_per_scroll;
-                      }
-                      else
-                      {
-                        offset_y -= offset_per_scroll;
-                      }
+                      scroll_x -= 1.0f;
                     }
-                  }
-                  else if(button == 5)
-                  {
-                    if(alt_held)
+                    else if(button == 7)
                     {
-                      ++viewing_img_idx;
-                      if(viewing_img_idx >= img_count) { viewing_img_idx -= img_count; }
+                      scroll_x += 1.0f;
                     }
-                    else if(ctrl_held)
-                    {
-                      zoom_delta = -zoom_scroll_scale;
-                    }
-                    else
-                    {
-                      if(shift_held)
-                      {
-                        offset_x -= offset_per_scroll;
-                      }
-                      else
-                      {
-                        offset_y += offset_per_scroll;
-                      }
-                    }
-                  }
-                  else if(button == 6)
-                  {
-                    if(!ctrl_held && !alt_held)
-                    {
-                      offset_x += offset_per_scroll;
-                    }
-                  }
-                  else if(button == 7)
-                  {
-                    if(!ctrl_held && !alt_held)
-                    {
-                      offset_x -= offset_per_scroll;
-                    }
-                  }
 
-                  if(zoom_delta != 0)
-                  {
-                    zoom += zoom_delta;
-                    r32 exp_zoom_after = exp2f(zoom);
-
-                    r32 center_mouse_x = mouse_x - 0.5f * win_w;
-                    r32 center_mouse_y = mouse_y - 0.5f * win_h;
-
-                    offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                    offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                    zoom_start_x = mouse_x;
+                    zoom_start_y = mouse_y;
                   }
-
-                  zoom_start_x = mouse_x;
-                  zoom_start_y = mouse_y;
-                  prev_mouse_x = mouse_x;
-                  prev_mouse_y = mouse_y;
                 } break;
 
                 case MotionNotify:
                 {
                   // printf("%x\n", event.xmotion.state);
-                  shift_held = (event.xkey.state & 1);
-                  ctrl_held = (event.xkey.state & 4);
-                  alt_held = (event.xkey.state & 8);
+                  shift_held = (event.xmotion.state & 1);
+                  ctrl_held = (event.xmotion.state & 4);
+                  alt_held = (event.xmotion.state & 8);
                   lmb_held = (event.xmotion.state & 0x100);
                   mmb_held = (event.xmotion.state & 0x200);
+                  rmb_held = (event.xmotion.state & 0x400);
+                  mouse_x = event.xbutton.x;
+                  mouse_y = win_h - event.xbutton.y - 1;
 
-                  if(lmb_held || mmb_held)
-                  {
-                    r32 mouse_x = event.xbutton.x;
-                    r32 mouse_y = win_h - event.xbutton.y - 1;
-
-                    r32 delta_x = mouse_x - prev_mouse_x;
-                    r32 delta_y = mouse_y - prev_mouse_y;
-
-                    r32 win_min_side = min(win_w, win_h);
-
-                    if(ctrl_held || mmb_held)
-                    {
-                      r32 exp_zoom_before = exp2f(zoom);
-                      zoom += 4.0f * delta_y / win_min_side;
-                      r32 exp_zoom_after = exp2f(zoom);
-
-                      r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
-                      r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
-
-                      offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                      offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
-                    }
-                    else
-                    {
-                      r32 exp_zoom = exp2f(zoom);
-
-                      offset_x += delta_x / (exp_zoom * win_min_side);
-                      offset_y += delta_y / (exp_zoom * win_min_side);
-
-                      zoom_start_x = mouse_x;
-                      zoom_start_y = mouse_y;
-                    }
-
-                    prev_mouse_x = mouse_x;
-                    prev_mouse_y = mouse_y;
-                  }
+                  mouse_delta_x += mouse_x - prev_mouse_x;
+                  mouse_delta_y += mouse_y - prev_mouse_y;
                 } break;
 
                 case FocusIn:
@@ -958,6 +768,9 @@ int main(int argc, char** argv)
                 {
                   win_w = event.xconfigure.width;
                   win_h = event.xconfigure.height;
+
+                  mouse_x = 0.5f * (r32)win_w;
+                  mouse_y = 0.5f * (r32)win_h;
                 } break;
 
                 case DestroyNotify:
@@ -982,7 +795,76 @@ int main(int argc, char** argv)
               }
             }
 
-            // TODO: Handle mouse-events uniformly here.
+            // Handle mouse events.
+            if(mouse_delta_x || mouse_delta_y || scroll_x || scroll_y || scroll_y_ticks)
+            {
+              r32 win_min_side = min(win_w, win_h);
+              r32 exp_zoom_before = exp2f(zoom);
+              r32 offset_per_scroll = offset_scroll_scale / exp_zoom_before;
+              r32 zoom_delta = 0;
+
+              if(alt_held)
+              {
+                viewing_img_idx -= scroll_y_ticks;
+                while(viewing_img_idx < 0) { viewing_img_idx += img_count; }
+                viewing_img_idx %= img_count;
+              }
+
+              if(!alt_held)
+              {
+                if(ctrl_held)
+                {
+                  zoom_delta += zoom_scroll_scale * scroll_y;
+                }
+                else if(shift_held)
+                {
+                  offset_x += offset_per_scroll * scroll_y;
+                }
+                else
+                {
+                  offset_x -= offset_per_scroll * scroll_x;
+                  offset_y -= offset_per_scroll * scroll_y;
+                }
+              }
+
+              if(zoom_delta != 0.0f)
+              {
+                zoom_start_x = mouse_x;
+                zoom_start_y = mouse_y;
+              }
+
+              if(lmb_held || mmb_held)
+              {
+                if(ctrl_held || mmb_held)
+                {
+                  zoom_delta += 4.0f * mouse_delta_y / win_min_side;
+                }
+                else
+                {
+                  offset_x += mouse_delta_x / (exp_zoom_before * win_min_side);
+                  offset_y += mouse_delta_y / (exp_zoom_before * win_min_side);
+
+                  zoom_start_x = mouse_x;
+                  zoom_start_y = mouse_y;
+                }
+              }
+
+              if(zoom_delta != 0.0f)
+              {
+                zoom += zoom_delta;
+                r32 exp_zoom_after = exp2f(zoom);
+
+                r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
+                r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
+
+                offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+                offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
+              }
+
+            }
+
+            prev_mouse_x = mouse_x;
+            prev_mouse_y = mouse_y;
           }
 
           if(last_viewing_img_idx != viewing_img_idx)
@@ -1108,10 +990,8 @@ int main(int argc, char** argv)
             if(linear_sampling)
             {
               glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                  extra_toggles[1]
-                  ? GL_LINEAR
-                  : extra_toggles[2] ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+              // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
             }
             else
             {
