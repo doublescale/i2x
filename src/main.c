@@ -45,6 +45,7 @@
 typedef struct
 {
   char* path;
+  str_t data;
   GLuint texture_id;
   i32 w;
   i32 h;
@@ -308,7 +309,79 @@ int main(int argc, char** argv)
           if(argc > 1)
           {
             img->path = argv[img_idx + 1];
-            img->pixels = stbi_load(img->path, &img->w, &img->h, 0, 4);
+
+            img->data = read_file(img->path);
+            img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
+                &img->w, &img->h, 0, 4);
+            if(!img->pixels)
+            {
+              // TODO: stbi loading an image from memory seems to fail for BMPs.
+              img->pixels = stbi_load(img->path, &img->w, &img->h, 0, 4);
+              if(img->pixels)
+              {
+                fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path);
+              }
+            }
+
+            // Look for PNG metadata.
+            if(img->data.size >= 16)
+            {
+              u8* ptr = img->data.data;
+              u8* data_end = img->data.data + img->data.size;
+              b32 bad = false;
+
+              bad |= (*ptr++ != 0x89);
+              bad |= (*ptr++ != 'P');
+              bad |= (*ptr++ != 'N');
+              bad |= (*ptr++ != 'G');
+              bad |= (*ptr++ != 0x0d);
+              bad |= (*ptr++ != 0x0a);
+              bad |= (*ptr++ != 0x1a);
+              bad |= (*ptr++ != 0x0a);
+
+              while(!bad)
+              {
+                u32 chunk_size = 0;
+                chunk_size |= *ptr++;
+                chunk_size <<= 8;
+                chunk_size |= *ptr++;
+                chunk_size <<= 8;
+                chunk_size |= *ptr++;
+                chunk_size <<= 8;
+                chunk_size |= *ptr++;
+
+                if(ptr[0] == 't'
+                    && ptr[1] == 'E'
+                    && ptr[2] == 'X'
+                    && ptr[3] == 't')
+                {
+                  if(ptr + 4 + chunk_size <= data_end)
+                  {
+                    i32 key_len = 0;
+                    while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
+                    {
+                      ++key_len;
+                    }
+                    i32 value_len = chunk_size - key_len - 1;
+
+                    str_t key = { ptr + 4, key_len };
+                    str_t value = { ptr + 4 + key_len + 1, value_len };
+                    printf("tEXt: %.*s: %.*s\n",
+                        (int)key.size, key.data,
+                        (int)value.size, value.data
+                        );
+                  }
+                  else
+                  {
+                    bad = true;
+                  }
+                }
+
+                ptr += 4 + chunk_size + 4;
+
+                bad |= (ptr + 8 >= data_end);
+              }
+            }
           }
           else
           {
