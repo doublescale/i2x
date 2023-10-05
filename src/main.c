@@ -211,6 +211,7 @@ int main(int argc, char** argv)
           // | KeymapStateMask
           | StructureNotifyMask
           | FocusChangeMask
+          | ExposureMask
           ;
         if(!xi_available)
         {
@@ -339,6 +340,7 @@ int main(int argc, char** argv)
               u8* data_end = img->data.data + img->data.size;
               b32 bad = false;
 
+              // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
               bad |= (*ptr++ != 0x89);
               bad |= (*ptr++ != 'P');
               bad |= (*ptr++ != 'N');
@@ -350,6 +352,7 @@ int main(int argc, char** argv)
 
               while(!bad)
               {
+                // Convert big-endian to little-endian.
                 u32 chunk_size = 0;
                 chunk_size |= *ptr++;
                 chunk_size <<= 8;
@@ -359,6 +362,7 @@ int main(int argc, char** argv)
                 chunk_size <<= 8;
                 chunk_size |= *ptr++;
 
+                // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
                 if(ptr[0] == 't'
                     && ptr[1] == 'E'
                     && ptr[2] == 'X'
@@ -501,6 +505,7 @@ int main(int argc, char** argv)
         b32 ctrl_held = false;
         b32 alt_held = false;
         b32 has_focus = false;
+        i32 dirty_frames = 1;
 
         while(!quitting)
         {
@@ -513,6 +518,9 @@ int main(int argc, char** argv)
 #endif
 
           b32 scroll_thumbnail_into_view = false;
+          b32 dirty = false;
+
+          if(!vsync) { dirty = true; }
 
           while(XPending(display))
           {
@@ -852,6 +860,8 @@ int main(int argc, char** argv)
                     }
                   }
 
+                  dirty = true;
+
                   // TODO: Look into XmbLookupString for typed text input.
                   // https://www.x.org/releases/current/doc/libX11/libX11/libX11.html#XmbLookupString
                 } break;
@@ -950,6 +960,13 @@ int main(int argc, char** argv)
 
                   mouse_x = 0.5f * (r32)win_w;
                   mouse_y = 0.5f * (r32)win_h;
+
+                  dirty = true;
+                } break;
+
+                case Expose:
+                {
+                  dirty = true;
                 } break;
 
                 case DestroyNotify:
@@ -979,6 +996,8 @@ int main(int argc, char** argv)
             if(mouse_in_sidebar && hovered_thumbnail_idx != -1 && (mouse_btn_went_down == 1 || lmb_held))
             {
               viewing_img_idx = hovered_thumbnail_idx;
+
+              dirty = true;
             }
             else if(mouse_delta_x || mouse_delta_y || scroll_x || scroll_y || scroll_y_ticks || mouse_btn_went_down)
             {
@@ -1076,111 +1095,218 @@ int main(int argc, char** argv)
                 offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                 offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
               }
+
+              dirty = true;
             }
 
             prev_mouse_x = mouse_x;
             prev_mouse_y = mouse_y;
           }
-          i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
 
-          viewing_img_idx = i32_wrap_upto(viewing_img_idx, img_count);
-          if(last_viewing_img_idx != viewing_img_idx)
+          if(dirty)
           {
-            char txt[256];
-            txt[0] = 0;
-            i32 txt_len = snprintf(txt, sizeof(txt), "%s [%d/%d] %dx%d %s",
-                PROGRAM_NAME,
-                viewing_img_idx + 1, img_count,
-                img_entries[viewing_img_idx].w, img_entries[viewing_img_idx].h,
-                img_entries[viewing_img_idx].path.data);
-            set_title(display, window, (u8*)txt, txt_len);
-
-            scroll_thumbnail_into_view = true;
-
-            last_viewing_img_idx = viewing_img_idx;
+            dirty_frames = 5;
           }
 
-          if(scroll_thumbnail_into_view)
+          if(dirty_frames > 0)
           {
-            i32 thumbnail_row = viewing_img_idx / thumbnail_columns;
-            if((thumbnail_row - sidebar_scroll_rows + 1) * thumbnail_h > win_h)
+            --dirty_frames;
+
+            i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
+
+            viewing_img_idx = i32_wrap_upto(viewing_img_idx, img_count);
+            if(last_viewing_img_idx != viewing_img_idx)
             {
-              sidebar_scroll_rows = thumbnail_row + 1 - win_h / thumbnail_h;
+              char txt[256];
+              txt[0] = 0;
+              i32 txt_len = snprintf(txt, sizeof(txt), "%s [%d/%d] %dx%d %s",
+                  PROGRAM_NAME,
+                  viewing_img_idx + 1, img_count,
+                  img_entries[viewing_img_idx].w, img_entries[viewing_img_idx].h,
+                  img_entries[viewing_img_idx].path.data);
+              set_title(display, window, (u8*)txt, txt_len);
+
+              scroll_thumbnail_into_view = true;
+
+              last_viewing_img_idx = viewing_img_idx;
             }
-            if(thumbnail_row - sidebar_scroll_rows < 0)
+
+            if(scroll_thumbnail_into_view)
             {
-              sidebar_scroll_rows = thumbnail_row;
+              i32 thumbnail_row = viewing_img_idx / thumbnail_columns;
+              if((thumbnail_row - sidebar_scroll_rows + 1) * thumbnail_h > win_h)
+              {
+                sidebar_scroll_rows = thumbnail_row + 1 - win_h / thumbnail_h;
+              }
+              if(thumbnail_row - sidebar_scroll_rows < 0)
+              {
+                sidebar_scroll_rows = thumbnail_row;
+              }
             }
-          }
 
 #if 0
-          if(game_memory.grab_mouse && !pointer_grabbed)
-          {
-            XGrabPointer(display, window,
-                true, 0, GrabModeAsync, GrabModeAsync, window, None, CurrentTime);
-            pointer_grabbed = true;
-          }
-          else if(!game_memory.grab_mouse && pointer_grabbed)
-          {
-            XUngrabPointer(display, CurrentTime);
-            pointer_grabbed = false;
-          }
+            if(game_memory.grab_mouse && !pointer_grabbed)
+            {
+              XGrabPointer(display, window,
+                  true, 0, GrabModeAsync, GrabModeAsync, window, None, CurrentTime);
+              pointer_grabbed = true;
+            }
+            else if(!game_memory.grab_mouse && pointer_grabbed)
+            {
+              XUngrabPointer(display, CurrentTime);
+              pointer_grabbed = false;
+            }
 
-          if(should_hide_mouse && !cursor_hidden)
-          {
-            XDefineCursor(display, window, empty_cursor);
-            cursor_hidden = true;
-          }
-          else if(!should_hide_mouse && cursor_hidden)
-          {
-            XUndefineCursor(display, window);
-            cursor_hidden = false;
-          }
+            if(should_hide_mouse && !cursor_hidden)
+            {
+              XDefineCursor(display, window, empty_cursor);
+              cursor_hidden = true;
+            }
+            else if(!should_hide_mouse && cursor_hidden)
+            {
+              XUndefineCursor(display, window);
+              cursor_hidden = false;
+            }
 #endif
 
-          glViewport(0, 0, win_w, win_h);
-          glDisable(GL_SCISSOR_TEST);
-          {
-            r32 bg_gray = bright_bg ? 0.9f : 0.1f;
-            glClearColor(bg_gray, bg_gray, bg_gray, 1.0f);
-          }
-          glClear(GL_COLOR_BUFFER_BIT);
-          glEnable(GL_SCISSOR_TEST);
-
-          if(win_w != 0 && win_h != 0)
-          {
-            glMatrixMode(GL_PROJECTION);
-            r32 matrix[16] = { // Column-major!
-              2.0f / win_w, 0.0f, 0.0f, 0.0f,
-              0.0f, 2.0f / win_h, 0.0f, 0.0f,
-              0.0f, 0.0f, 1.0f, 0.0f,
-              -1.0f, -1.0f, 0.0f, 1.0f,
-            };
-            glLoadMatrixf(matrix);
-          }
-
-          if(!hide_sidebar)
-          {
-            glScissor(0, 0, sidebar_width, win_h);
-
-            glDisable(GL_BLEND);
-            glDisable(GL_TEXTURE_2D);
-            glBegin(GL_QUADS);
-            if(bright_bg)
+            glViewport(0, 0, win_w, win_h);
+            glDisable(GL_SCISSOR_TEST);
             {
-              glColor3f(0.0f, 0.0f, 0.0f);
+              r32 bg_gray = bright_bg ? 0.9f : 0.1f;
+              glClearColor(bg_gray, bg_gray, bg_gray, 1.0f);
             }
-            else
+            glClear(GL_COLOR_BUFFER_BIT);
+            glEnable(GL_SCISSOR_TEST);
+
+            if(win_w != 0 && win_h != 0)
             {
+              glMatrixMode(GL_PROJECTION);
+              r32 matrix[16] = { // Column-major!
+                2.0f / win_w, 0.0f, 0.0f, 0.0f,
+                0.0f, 2.0f / win_h, 0.0f, 0.0f,
+                0.0f, 0.0f, 1.0f, 0.0f,
+                -1.0f, -1.0f, 0.0f, 1.0f,
+              };
+              glLoadMatrixf(matrix);
+            }
+
+            if(!hide_sidebar)
+            {
+              glScissor(0, 0, sidebar_width, win_h);
+
+              glDisable(GL_BLEND);
+              glDisable(GL_TEXTURE_2D);
+              glBegin(GL_QUADS);
+              if(bright_bg)
+              {
+                glColor3f(0.0f, 0.0f, 0.0f);
+              }
+              else
+              {
+                glColor3f(1.0f, 1.0f, 1.0f);
+              }
+              glVertex2f(sidebar_width - 2, 0);
+              glVertex2f(sidebar_width - 1, 0);
+              glVertex2f(sidebar_width - 1, win_h);
+              glVertex2f(sidebar_width - 2, win_h);
+              glEnd();
+
+              glScissor(0, 0, sidebar_width - 2, win_h);
+
+              if(alpha_blend)
+              {
+                glEnable(GL_BLEND);
+              }
+              else
+              {
+                glDisable(GL_BLEND);
+              }
+
+              glEnable(GL_TEXTURE_2D);
               glColor3f(1.0f, 1.0f, 1.0f);
-            }
-            glVertex2f(sidebar_width - 2, 0);
-            glVertex2f(sidebar_width - 1, 0);
-            glVertex2f(sidebar_width - 1, win_h);
-            glVertex2f(sidebar_width - 2, win_h);
-            glEnd();
+              hovered_thumbnail_idx = -1;
+              for(i32 img_idx = 0;
+                  img_idx < img_count;
+                  ++img_idx)
+              {
+                img_entry_t* img = &img_entries[img_idx];
+                if(img->texture_id)
+                {
+                  r32 tex_w = img->w;
+                  r32 tex_h = img->h;
 
-            glScissor(0, 0, sidebar_width - 2, win_h);
+                  glBindTexture(GL_TEXTURE_2D, img->texture_id);
+
+                  i32 sidebar_col = img_idx % thumbnail_columns;
+                  i32 sidebar_row = img_idx / thumbnail_columns;
+
+                  r32 box_x0 = sidebar_col * thumbnail_w;
+                  r32 box_y1 = win_h - ((r32)sidebar_row - sidebar_scroll_rows) * thumbnail_h;
+                  r32 box_x1 = box_x0 + thumbnail_w;
+                  r32 box_y0 = box_y1 - thumbnail_h;
+
+                  if(hovered_thumbnail_idx == -1 &&
+                      prev_mouse_x >= box_x0 && prev_mouse_x < box_x1 &&
+                      prev_mouse_y >= box_y0 && prev_mouse_y < box_y1)
+                  {
+                    hovered_thumbnail_idx = img_idx;
+                  }
+
+                  if(img_idx == viewing_img_idx || img_idx == hovered_thumbnail_idx)
+                  {
+                    glDisable(GL_TEXTURE_2D);
+
+                    r32 gray = (img_idx == viewing_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
+                    glColor3f(gray, gray, gray);
+
+                    glBegin(GL_QUADS);
+                    glVertex2f(box_x0, box_y0);
+                    glVertex2f(box_x1, box_y0);
+                    glVertex2f(box_x1, box_y1);
+                    glVertex2f(box_x0, box_y1);
+                    glEnd();
+
+                    glEnable(GL_TEXTURE_2D);
+                    glColor3f(1.0f, 1.0f, 1.0f);
+                  }
+
+                  r32 mag = 1.0f;
+                  if(thumbnail_w != 0 && thumbnail_h != 0)
+                  {
+                    mag = min((r32)thumbnail_w / (r32)tex_w, (r32)thumbnail_h / (r32)tex_h);
+                  }
+                  mag *= 0.9f;
+
+                  r32 x0 = box_x0;
+                  r32 y1 = box_y1;
+
+                  x0 += 0.5f * (thumbnail_w - mag * tex_w);
+                  y1 -= 0.5f * (thumbnail_h - mag * tex_h);
+
+                  r32 x1 = x0 + mag * tex_w;
+                  r32 y0 = y1 - mag * tex_h;
+
+                  r32 u0 = 0;
+                  r32 v0 = 0;
+                  r32 u1 = 1;
+                  r32 v1 = 1;
+
+                  glBegin(GL_QUADS);
+                  glTexCoord2f(u0, v1); glVertex2f(x0, y0);
+                  glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+                  glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+                  glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+                  glEnd();
+                }
+              }
+            }
+
+            img_entry_t* img = &img_entries[viewing_img_idx];
+
+            glBindTexture(GL_TEXTURE_2D, img->texture_id);
+
+            r32 tex_w = img->w;
+            r32 tex_h = img->h;
 
             if(alpha_blend)
             {
@@ -1191,202 +1317,115 @@ int main(int argc, char** argv)
               glDisable(GL_BLEND);
             }
 
+            r32 u0 = 0.0f;
+            r32 v0 = 0.0f;
+            r32 u1 = 1.0f;
+            r32 v1 = 1.0f;
+
+            i32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
+            i32 image_region_y0 = show_info ? info_height : 0;
+            i32 image_region_w = win_w - image_region_x0;
+            i32 image_region_h = win_h - image_region_y0;
+
+            glScissor(image_region_x0, image_region_y0, image_region_w, image_region_h);
+
+            r32 mag = 1.0f;
+            if(image_region_w != 0 && image_region_h != 0)
+            {
+              mag = min((r32)image_region_w / (r32)tex_w, (r32)image_region_h / (r32)tex_h);
+            }
+            r32 exp_zoom = exp2f(zoom);
+            mag *= exp_zoom;
+
+            if(absolute(mag - 1.0f) <= 1e-3f)
+            {
+              mag = 1.0f;
+            }
+
+            r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
+            r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
+
+            r32 win_min_side = min(win_w, win_h);
+            x0 += win_min_side * exp_zoom * offset_x;
+            y0 += win_min_side * exp_zoom * offset_y;
+
+            if(mag == 1.0f)
+            {
+              // Avoid interpolating pixels when viewing them 1:1.
+              x0 = (r32)(i32)(x0 + 0.5f);
+              y0 = (r32)(i32)(y0 + 0.5f);
+            }
+
+            r32 x1 = x0 + mag * tex_w;
+            r32 y1 = y0 + mag * tex_h;
+
+            if(border_sampling)
+            {
+              r32 margin = max(1.0f, mag);
+
+              u0 -= margin / (r32)(mag * tex_w);
+              v0 -= margin / (r32)(mag * tex_h);
+              u1 += margin / (r32)(mag * tex_w);
+              v1 += margin / (r32)(mag * tex_h);
+
+              x0 -= margin;
+              y0 -= margin;
+              x1 += margin;
+              y1 += margin;
+            }
+
             glEnable(GL_TEXTURE_2D);
             glColor3f(1.0f, 1.0f, 1.0f);
-            hovered_thumbnail_idx = -1;
-            for(i32 img_idx = 0;
-                img_idx < img_count;
-                ++img_idx)
+            glBegin(GL_QUADS);
+            glTexCoord2f(u0, v1); glVertex2f(x0, y0);
+            glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+            glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+            glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+            glEnd();
+
+#if 0
+            // https://www.khronos.org/opengl/wiki/Sync_Object#Synchronization
+            // This doesn't seem to help; see glFinish below.
+            GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            if(!fence) { printf("Could not create fence.\n"); }
+            // glFlush();
+            printf("%X\n", glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000));
+#endif
+
+            glXSwapBuffers(display, glx_window);
+
+            // TODO: Re-enable this once we don't do X11 drawing anymore.
+#if 0
+            if(vsync)
             {
-              img_entry_t* img = &img_entries[img_idx];
-              if(img->texture_id)
-              {
-                r32 tex_w = img->w;
-                r32 tex_h = img->h;
+              // glFinish seems to reduce lag on HP laptop.
+              // On desktop, it doesn't help, and brings CPU usage to 100% :/
+              // However, adding a sleep afterwards, does help on desktop!
+              // Still more CPU use than without glFinish, though.
+              // TODO: Wait for as long as necessary for slightly under the screen refresh rate.
+              // TODO: Only do this if GLX_NV_delay_before_swap is not available.
 
-                glBindTexture(GL_TEXTURE_2D, img->texture_id);
-
-                i32 sidebar_col = img_idx % thumbnail_columns;
-                i32 sidebar_row = img_idx / thumbnail_columns;
-
-                r32 box_x0 = sidebar_col * thumbnail_w;
-                r32 box_y1 = win_h - ((r32)sidebar_row - sidebar_scroll_rows) * thumbnail_h;
-                r32 box_x1 = box_x0 + thumbnail_w;
-                r32 box_y0 = box_y1 - thumbnail_h;
-
-                if(hovered_thumbnail_idx == -1 &&
-                    prev_mouse_x >= box_x0 && prev_mouse_x < box_x1 &&
-                    prev_mouse_y >= box_y0 && prev_mouse_y < box_y1)
-                {
-                  hovered_thumbnail_idx = img_idx;
-                }
-
-                if(img_idx == viewing_img_idx || img_idx == hovered_thumbnail_idx)
-                {
-                  glDisable(GL_TEXTURE_2D);
-
-                  r32 gray = (img_idx == viewing_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
-                  glColor3f(gray, gray, gray);
-
-                  glBegin(GL_QUADS);
-                  glVertex2f(box_x0, box_y0);
-                  glVertex2f(box_x1, box_y0);
-                  glVertex2f(box_x1, box_y1);
-                  glVertex2f(box_x0, box_y1);
-                  glEnd();
-
-                  glEnable(GL_TEXTURE_2D);
-                  glColor3f(1.0f, 1.0f, 1.0f);
-                }
-
-                r32 mag = 1.0f;
-                if(thumbnail_w != 0 && thumbnail_h != 0)
-                {
-                  mag = min((r32)thumbnail_w / (r32)tex_w, (r32)thumbnail_h / (r32)tex_h);
-                }
-                mag *= 0.9f;
-
-                r32 x0 = box_x0;
-                r32 y1 = box_y1;
-
-                x0 += 0.5f * (thumbnail_w - mag * tex_w);
-                y1 -= 0.5f * (thumbnail_h - mag * tex_h);
-
-                r32 x1 = x0 + mag * tex_w;
-                r32 y0 = y1 - mag * tex_h;
-
-                r32 u0 = 0;
-                r32 v0 = 0;
-                r32 u1 = 1;
-                r32 v1 = 1;
-
-                glBegin(GL_QUADS);
-                glTexCoord2f(u0, v1); glVertex2f(x0, y0);
-                glTexCoord2f(u1, v1); glVertex2f(x1, y0);
-                glTexCoord2f(u1, v0); glVertex2f(x1, y1);
-                glTexCoord2f(u0, v0); glVertex2f(x0, y1);
-                glEnd();
-              }
+              glFinish();
+              usleep(10000);
             }
-          }
+#endif
 
-          img_entry_t* img = &img_entries[viewing_img_idx];
-
-          glBindTexture(GL_TEXTURE_2D, img->texture_id);
-
-          r32 tex_w = img->w;
-          r32 tex_h = img->h;
-
-          if(alpha_blend)
-          {
-            glEnable(GL_BLEND);
+            if(show_info)
+            {
+              glXWaitGL();
+              // XSync(display, false);
+              XDrawString(display, window, gc, image_region_x0 + 10, win_h - 10,
+                  (char*)img->generation_parameters.data, img->generation_parameters.size);
+              glXWaitX();
+              // XSync(display, false);
+              // usleep(10000);
+            }
           }
           else
           {
-            glDisable(GL_BLEND);
-          }
-
-          r32 u0 = 0.0f;
-          r32 v0 = 0.0f;
-          r32 u1 = 1.0f;
-          r32 v1 = 1.0f;
-
-          i32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
-          i32 image_region_y0 = show_info ? info_height : 0;
-          i32 image_region_w = win_w - image_region_x0;
-          i32 image_region_h = win_h - image_region_y0;
-
-          glScissor(image_region_x0, image_region_y0, image_region_w, image_region_h);
-
-          r32 mag = 1.0f;
-          if(image_region_w != 0 && image_region_h != 0)
-          {
-            mag = min((r32)image_region_w / (r32)tex_w, (r32)image_region_h / (r32)tex_h);
-          }
-          r32 exp_zoom = exp2f(zoom);
-          mag *= exp_zoom;
-
-          if(absolute(mag - 1.0f) <= 1e-3f)
-          {
-            mag = 1.0f;
-          }
-
-          r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
-          r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
-
-          r32 win_min_side = min(win_w, win_h);
-          x0 += win_min_side * exp_zoom * offset_x;
-          y0 += win_min_side * exp_zoom * offset_y;
-
-          if(mag == 1.0f)
-          {
-            // Avoid interpolating pixels when viewing them 1:1.
-            x0 = (r32)(i32)(x0 + 0.5f);
-            y0 = (r32)(i32)(y0 + 0.5f);
-          }
-
-          r32 x1 = x0 + mag * tex_w;
-          r32 y1 = y0 + mag * tex_h;
-
-          if(border_sampling)
-          {
-            r32 margin = max(1.0f, mag);
-
-            u0 -= margin / (r32)(mag * tex_w);
-            v0 -= margin / (r32)(mag * tex_h);
-            u1 += margin / (r32)(mag * tex_w);
-            v1 += margin / (r32)(mag * tex_h);
-
-            x0 -= margin;
-            y0 -= margin;
-            x1 += margin;
-            y1 += margin;
-          }
-
-          glEnable(GL_TEXTURE_2D);
-          glColor3f(1.0f, 1.0f, 1.0f);
-          glBegin(GL_QUADS);
-          glTexCoord2f(u0, v1); glVertex2f(x0, y0);
-          glTexCoord2f(u1, v1); glVertex2f(x1, y0);
-          glTexCoord2f(u1, v0); glVertex2f(x1, y1);
-          glTexCoord2f(u0, v0); glVertex2f(x0, y1);
-          glEnd();
-
-#if 0
-          // https://www.khronos.org/opengl/wiki/Sync_Object#Synchronization
-          // This doesn't seem to help; see glFinish below.
-          GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-          if(!fence) { printf("Could not create fence.\n"); }
-          // glFlush();
-          printf("%X\n", glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000));
-#endif
-
-          glXSwapBuffers(display, glx_window);
-
-#if 0
-          if(vsync)
-          {
-            // glFinish seems to reduce lag on HP laptop.
-            // On desktop, it doesn't help, and brings CPU usage to 100% :/
-            // However, adding a sleep afterwards, does help on desktop!
-            // Still more CPU use than without glFinish, though.
-            // TODO: Wait for as long as necessary for slightly under the screen refresh rate.
-            // TODO: Only do this if GLX_NV_delay_before_swap is not available.
-
-            glFinish();
-            usleep(10000);
-          }
-#endif
-
-          if(show_info)
-          {
-            glXWaitGL();
-            // XSync(display, false);
-            XDrawString(display, window, gc, image_region_x0 + 10, win_h - 10,
-                (char*)img->generation_parameters.data, img->generation_parameters.size);
-            glXWaitX();
-            // XSync(display, false);
-            // usleep(10000);
+            // Wait for next event.
+            XEvent dummy;
+            XPeekEvent(display, &dummy);
           }
 
           u64 nsecs_now = get_nanoseconds();
