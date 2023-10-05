@@ -44,12 +44,15 @@
 
 typedef struct
 {
-  char* path;
+  str_t path;
   str_t data;
-  GLuint texture_id;
+
+  str_t generation_parameters;
+
   i32 w;
   i32 h;
   u8* pixels;
+  GLuint texture_id;
 } img_entry_t;
 
 internal u64 get_nanoseconds()
@@ -267,11 +270,12 @@ int main(int argc, char** argv)
 
         set_title(display, window, (unsigned char*)PROGRAM_NAME, sizeof(PROGRAM_NAME) - 1);
         XMapWindow(display, window);
+        GC gc = DefaultGC(display, DefaultScreen(display));
 
-        glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
-
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        // glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        // sudo pacman -S terminus-font
+        // xset +fp /usr/share/fonts/misc
+        Font font = XLoadFont(display, "-*-terminus-*-*-*-*-32-*-*-*-*-*-*-*");
+        XSetFont(display, gc, font);
 
         Cursor empty_cursor;
         {
@@ -282,6 +286,11 @@ int main(int argc, char** argv)
               &empty_color, &empty_color, 0, 0);
           XFreePixmap(display, empty_pixmap);
         }
+
+        glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
+
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        // glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         i32 img_count = max(1, argc - 1);
         img_entry_t* img_entries = malloc_array(img_count, img_entry_t);
@@ -308,18 +317,18 @@ int main(int argc, char** argv)
 
           if(argc > 1)
           {
-            img->path = argv[img_idx + 1];
+            img->path = wrap_str(argv[img_idx + 1]);
 
-            img->data = read_file(img->path);
+            img->data = read_file((char*)img->path.data);
             img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
                 &img->w, &img->h, 0, 4);
             if(!img->pixels)
             {
               // TODO: stbi loading an image from memory seems to fail for BMPs.
-              img->pixels = stbi_load(img->path, &img->w, &img->h, 0, 4);
+              img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, 0, 4);
               if(img->pixels)
               {
-                fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path);
+                fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
               }
             }
 
@@ -366,10 +375,12 @@ int main(int argc, char** argv)
 
                     str_t key = { ptr + 4, key_len };
                     str_t value = { ptr + 4 + key_len + 1, value_len };
-                    printf("tEXt: %.*s: %.*s\n",
-                        (int)key.size, key.data,
-                        (int)value.size, value.data
-                        );
+                    // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+                    if(!img->generation_parameters.size)
+                    {
+                      img->generation_parameters = value;
+                    }
                   }
                   else
                   {
@@ -385,7 +396,7 @@ int main(int argc, char** argv)
           }
           else
           {
-            img->path = "<TEST IMAGE>";
+            img->path = str("<TEST IMAGE>");
           }
 
           if(!img->pixels)
@@ -454,7 +465,7 @@ int main(int argc, char** argv)
         b32 border_sampling = true;
         b32 linear_sampling = true;
         b32 alpha_blend = true;
-        b32 bright_bg = false;
+        b32 bright_bg = true;
         b32 extra_toggles[10] = {0};
         r32 zoom = 0;
         r32 offset_x = 0;
@@ -465,6 +476,8 @@ int main(int argc, char** argv)
         r32 thumbnail_w = 150.0f;
         r32 thumbnail_h = thumbnail_w;
         i32 hovered_thumbnail_idx = -1;
+        b32 show_info = true;
+        i32 info_height = 40;
 
         // TODO: Split these for x/y ?
         //       Actually, just using the constant 120 might be enough.
@@ -491,11 +504,13 @@ int main(int argc, char** argv)
 
         while(!quitting)
         {
+#if 1
           if(vsync)
           {
             // TODO: Check for this in GLX extension string before using it.
             glXDelayBeforeSwapNV(display, glx_window, 0.002f);
           }
+#endif
 
           b32 scroll_thumbnail_into_view = false;
 
@@ -751,10 +766,22 @@ int main(int argc, char** argv)
                     else if(keysym == 'b')
                     {
                       bflip(bright_bg);
+                      if(bright_bg)
+                      {
+                        XSetForeground(display, gc, XBlackPixel(display, DefaultScreen(display)));
+                      }
+                      else
+                      {
+                        XSetForeground(display, gc, XWhitePixel(display, DefaultScreen(display)));
+                      }
                     }
                     else if(keysym == 'h')
                     {
                       bflip(hide_sidebar);
+                    }
+                    else if(keysym == 'i')
+                    {
+                      bflip(show_info);
                     }
                     else if(keysym == 'l')
                     {
@@ -1041,6 +1068,10 @@ int main(int argc, char** argv)
                 {
                   center_mouse_x -= 0.5f * (r32)sidebar_width;
                 }
+                if(show_info)
+                {
+                  center_mouse_y -= 0.5f * (r32)info_height;
+                }
 
                 offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                 offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
@@ -1061,7 +1092,7 @@ int main(int argc, char** argv)
                 PROGRAM_NAME,
                 viewing_img_idx + 1, img_count,
                 img_entries[viewing_img_idx].w, img_entries[viewing_img_idx].h,
-                img_entries[viewing_img_idx].path);
+                img_entries[viewing_img_idx].path.data);
             set_title(display, window, (u8*)txt, txt_len);
 
             scroll_thumbnail_into_view = true;
@@ -1114,6 +1145,7 @@ int main(int argc, char** argv)
             glClearColor(bg_gray, bg_gray, bg_gray, 1.0f);
           }
           glClear(GL_COLOR_BUFFER_BIT);
+          glEnable(GL_SCISSOR_TEST);
 
           if(win_w != 0 && win_h != 0)
           {
@@ -1129,7 +1161,6 @@ int main(int argc, char** argv)
 
           if(!hide_sidebar)
           {
-            glEnable(GL_SCISSOR_TEST);
             glScissor(0, 0, sidebar_width, win_h);
 
             glDisable(GL_BLEND);
@@ -1237,8 +1268,6 @@ int main(int argc, char** argv)
                 glEnd();
               }
             }
-
-            glScissor(sidebar_width, 0, win_w - sidebar_width, win_h);
           }
 
           img_entry_t* img = &img_entries[viewing_img_idx];
@@ -1262,13 +1291,17 @@ int main(int argc, char** argv)
           r32 u1 = 1.0f;
           r32 v1 = 1.0f;
 
-          r32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
-          r32 image_region_w = (r32)win_w - image_region_x0;
+          i32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
+          i32 image_region_y0 = show_info ? info_height : 0;
+          i32 image_region_w = win_w - image_region_x0;
+          i32 image_region_h = win_h - image_region_y0;
+
+          glScissor(image_region_x0, image_region_y0, image_region_w, image_region_h);
 
           r32 mag = 1.0f;
-          if(image_region_w != 0 && win_h != 0)
+          if(image_region_w != 0 && image_region_h != 0)
           {
-            mag = min(image_region_w / (r32)tex_w, (r32)win_h / (r32)tex_h);
+            mag = min((r32)image_region_w / (r32)tex_w, (r32)image_region_h / (r32)tex_h);
           }
           r32 exp_zoom = exp2f(zoom);
           mag *= exp_zoom;
@@ -1279,7 +1312,7 @@ int main(int argc, char** argv)
           }
 
           r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
-          r32 y0 = 0.5f * (win_h - mag * tex_h);
+          r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
 
           r32 win_min_side = min(win_w, win_h);
           x0 += win_min_side * exp_zoom * offset_x;
@@ -1330,7 +1363,7 @@ int main(int argc, char** argv)
 
           glXSwapBuffers(display, glx_window);
 
-#if 1
+#if 0
           if(vsync)
           {
             // glFinish seems to reduce lag on HP laptop.
@@ -1344,6 +1377,17 @@ int main(int argc, char** argv)
             usleep(10000);
           }
 #endif
+
+          if(show_info)
+          {
+            glXWaitGL();
+            // XSync(display, false);
+            XDrawString(display, window, gc, image_region_x0 + 10, win_h - 10,
+                (char*)img->generation_parameters.data, img->generation_parameters.size);
+            glXWaitX();
+            // XSync(display, false);
+            // usleep(10000);
+          }
 
           u64 nsecs_now = get_nanoseconds();
           i64 nsecs = nsecs_now - nsecs_last_frame;
