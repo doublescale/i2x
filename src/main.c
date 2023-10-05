@@ -288,6 +288,12 @@ int main(int argc, char** argv)
           XFreePixmap(display, empty_pixmap);
         }
 
+        Atom atom_clipboard = XInternAtom(display, "CLIPBOARD", false);
+        Atom atom_utf8 = XInternAtom(display, "UTF8_STRING", false);
+        Atom atom_uri_list = XInternAtom(display, "text/uri-list", false);
+        Atom atom_cliptarget = XInternAtom(display, "PUT_IT_HERE", false);
+        Atom atom_incr = XInternAtom(display, "INCR", false);
+
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
 
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -727,7 +733,7 @@ int main(int argc, char** argv)
 
                   if(went_down)
                   {
-                    if(keysym == XK_Escape)
+                    if(ctrl_held && keysym == 'q')
                     {
                       quitting = true;
                     }
@@ -815,11 +821,19 @@ int main(int argc, char** argv)
                     {
                       bflip(alpha_blend);
                     }
+                    else if(ctrl_held && keysym == 'v')
+                    {
+                      XConvertSelection(display, atom_clipboard, atom_uri_list, atom_cliptarget, window, CurrentTime);
+                    }
                     else if(keysym == 'v')
                     {
                       bflip(vsync);
 
                       glXSwapIntervalEXT(display, glx_window, (int)vsync);
+                    }
+                    else if(ctrl_held && keysym == 'c')
+                    {
+                      // XSetSelectionOwner(display, 
                     }
                     else if(keysym == 'x')
                     {
@@ -984,6 +998,35 @@ int main(int argc, char** argv)
                   }
                 } break;
 
+                case SelectionNotify:
+                {
+                  if(event.xselection.property != None)
+                  {
+                    Atom type = 0;
+                    int format = 0;
+                    unsigned long item_count = 0;
+                    unsigned long bytes_left = 0;
+                    u8* data;
+                    if(event.xselection.property != atom_cliptarget)
+                    {
+                      printf("Paste: Got other target property!\n");
+                    }
+                    XGetWindowProperty(display, window, event.xselection.property,
+                        0, 256,
+                        false, AnyPropertyType, &type, &format,
+                        &item_count, &bytes_left, &data);
+                    if(type == atom_incr)
+                    {
+                      printf("Paste: INCR!\n");
+                    }
+                    printf("Paste: format: %d, count: %lu, bytes left: %lu, data: %s\n",
+                        format, item_count, bytes_left, data);
+                    // TODO: Parse URL-encoded file://... path and open it.
+                    XFree(data);
+                    XDeleteProperty(display, window, event.xselection.property);
+                  }
+                } break;
+
                 default:
                 {
                   // printf("Unhandled event type=%u\n", event.type);
@@ -1105,7 +1148,9 @@ int main(int argc, char** argv)
 
           if(dirty)
           {
-            dirty_frames = 5;
+            // Increase this to play out animations and such after events stop.
+            // Might be a better idea to do a diff on the presentation states though.
+            dirty_frames = 1;
           }
 
           if(dirty_frames > 0)
