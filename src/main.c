@@ -736,7 +736,9 @@ int main(int argc, char** argv)
 
                   if(went_down)
                   {
-                    if(ctrl_held && keysym == 'q')
+                    if((ctrl_held && keysym == 'q')
+                        || keysym == XK_Escape
+                      )
                     {
                       quitting = true;
                     }
@@ -978,8 +980,6 @@ int main(int argc, char** argv)
 
                   mouse_x = 0.5f * (r32)win_w;
                   mouse_y = 0.5f * (r32)win_h;
-
-                  dirty = true;
                 } break;
 
                 case Expose:
@@ -1374,8 +1374,12 @@ int main(int argc, char** argv)
               glEnable(GL_TEXTURE_2D);
               glColor3f(1.0f, 1.0f, 1.0f);
               hovered_thumbnail_idx = -1;
-              for(i32 img_idx = 0;
-                  img_idx < img_count;
+              i32 first_visible_row = (i32)sidebar_scroll_rows;
+              i32 last_visible_row = (i32)(sidebar_scroll_rows + win_h / thumbnail_h + 1);
+              i32 first_visible_img_idx = max(0, first_visible_row * thumbnail_columns);
+              i32 last_visible_img_idx = min(img_count, last_visible_row * thumbnail_columns);
+              for(i32 img_idx = first_visible_img_idx;
+                  img_idx < last_visible_img_idx;
                   ++img_idx)
               {
                 img_entry_t* img = &img_entries[img_idx];
