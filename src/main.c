@@ -43,19 +43,6 @@
 
 // static void (*glXSwapIntervalEXT)(Display *dpy, GLXDrawable drawable, int interval);
 
-typedef struct
-{
-  str_t path;
-  str_t data;
-
-  str_t generation_parameters;
-
-  i32 w;
-  i32 h;
-  u8* pixels;
-  GLuint texture_id;
-} img_entry_t;
-
 internal u64 get_nanoseconds()
 {
   struct timespec ts;
@@ -113,6 +100,197 @@ internal void update_scroll_increments(i32 class_count, XIAnyClassInfo** classes
       }
     }
   }
+}
+
+static u8 test_texels[] = {
+  1, 1, 1, 255,
+  255, 0, 0, 255,
+  0, 255, 0, 255,
+  0, 0, 255, 255,
+  2, 2, 2, 255,
+  255, 255, 0, 255,
+  0, 255, 255, 255,
+  255, 0, 255, 255,
+  128, 128, 128, 255,
+};
+static i32 test_texture_w = 3;
+static i32 test_texture_h = 3;
+
+enum
+{
+  LOAD_STATE_UNLOADED = 0,
+  LOAD_STATE_LOADING,
+  LOAD_STATE_LOADED_INTO_RAM,
+};
+
+typedef struct
+{
+  str_t path;
+  str_t data;
+
+  str_t generation_parameters;
+
+  i32 w;
+  i32 h;
+  u8* pixels;
+  u32 load_state;
+  GLuint texture_id;
+} img_entry_t;
+
+typedef struct
+{
+  i32 thread_idx;
+  pthread_mutex_t mutex;
+
+  i32 img_count;
+  img_entry_t* img_entries;
+
+  GLuint test_texture_id;
+} loader_data_t;
+
+internal void* loader_fun(void* raw_data)
+{
+  loader_data_t* data = (loader_data_t*)raw_data;
+
+  i64 nsecs_start = get_nanoseconds();
+
+  for(i32 img_idx = 0;
+      img_idx < data->img_count;
+      ++img_idx)
+  {
+    img_entry_t* img = &data->img_entries[img_idx];
+    b32 load_this = false;
+
+    pthread_mutex_lock(&data->mutex);
+    if(img->load_state == LOAD_STATE_UNLOADED)
+    {
+      load_this = true;
+      img->load_state = LOAD_STATE_LOADING;
+
+#if 0
+      printf("Loader %d: Loading [%d/%d] \"%s\"...\n",
+          data->thread_idx,
+          img_idx + 1, data->img_count,
+          img->path.data);
+#endif
+    }
+    pthread_mutex_unlock(&data->mutex);
+
+    if(load_this)
+    {
+      img->data = read_file((char*)img->path.data);
+      img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
+          &img->w, &img->h, 0, 4);
+      if(!img->pixels)
+      {
+        // TODO: stbi loading an image from memory seems to fail for BMPs.
+        img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, 0, 4);
+        if(img->pixels)
+        {
+          fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
+        }
+      }
+
+      if(!img->pixels)
+      {
+        img->pixels = test_texels;
+        img->w = test_texture_w;
+        img->h = test_texture_h;
+        img->texture_id = data->test_texture_id;
+      }
+
+      // Look for PNG metadata.
+      if(img->data.size >= 16)
+      {
+        u8* ptr = img->data.data;
+        u8* data_end = img->data.data + img->data.size;
+        b32 bad = false;
+
+        // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
+        bad |= (*ptr++ != 0x89);
+        bad |= (*ptr++ != 'P');
+        bad |= (*ptr++ != 'N');
+        bad |= (*ptr++ != 'G');
+        bad |= (*ptr++ != 0x0d);
+        bad |= (*ptr++ != 0x0a);
+        bad |= (*ptr++ != 0x1a);
+        bad |= (*ptr++ != 0x0a);
+
+        while(!bad)
+        {
+          // Convert big-endian to little-endian.
+          u32 chunk_size = 0;
+          chunk_size |= *ptr++;
+          chunk_size <<= 8;
+          chunk_size |= *ptr++;
+          chunk_size <<= 8;
+          chunk_size |= *ptr++;
+          chunk_size <<= 8;
+          chunk_size |= *ptr++;
+
+          // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+          if(ptr[0] == 't'
+              && ptr[1] == 'E'
+              && ptr[2] == 'X'
+              && ptr[3] == 't')
+          {
+            if(ptr + 4 + chunk_size <= data_end)
+            {
+              i32 key_len = 0;
+              while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
+              {
+                ++key_len;
+              }
+              i32 value_len = chunk_size - key_len - 1;
+
+              str_t key = { ptr + 4, key_len };
+              str_t value = { ptr + 4 + key_len + 1, value_len };
+              // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+              if(!img->generation_parameters.size)
+              {
+                img->generation_parameters = value;
+              }
+            }
+            else
+            {
+              bad = true;
+            }
+          }
+
+          ptr += 4 + chunk_size + 4;
+
+          bad |= (ptr + 8 >= data_end);
+        }
+      }
+
+#if 0
+      // Premultiply alpha.
+      for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
+      {
+        if(img->pixels[4*i + 3] != 255)
+        {
+          r32 r = img->pixels[4*i + 0] / 255.0f;
+          r32 g = img->pixels[4*i + 1] / 255.0f;
+          r32 b = img->pixels[4*i + 2] / 255.0f;
+          r32 a = img->pixels[4*i + 3] / 255.0f;
+
+          img->pixels[4*i + 0] = 255.0f * a * r;
+          img->pixels[4*i + 1] = 255.0f * a * g;
+          img->pixels[4*i + 2] = 255.0f * a * b;
+        }
+      }
+#endif
+
+      img->load_state = LOAD_STATE_LOADED_INTO_RAM;
+    }
+  }
+
+  i64 nsecs_end = get_nanoseconds();
+
+  printf("Loader %d: All done in %.6f s.\n", data->thread_idx, (r32)(nsecs_end - nsecs_start) / 1e9f);
+
+  return 0;
 }
 
 int main(int argc, char** argv)
@@ -305,18 +483,16 @@ int main(int argc, char** argv)
         img_entry_t* img_entries = malloc_array(img_count, img_entry_t);
         zero_bytes(img_count * sizeof(img_entry_t), img_entries);
 
-        u8 test_texels[] = {
-          1, 1, 1, 255,
-          255, 0, 0, 255,
-          0, 255, 0, 255,
-          0, 0, 255, 255,
-          2, 2, 2, 255,
-          255, 255, 0, 255,
-          0, 255, 255, 255,
-          255, 0, 255, 255,
-          128, 128, 128, 255,
-        };
         GLuint test_texture_id = 0;
+        glGenTextures(1, &test_texture_id);
+        glBindTexture(GL_TEXTURE_2D, test_texture_id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+            test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
+        glGenerateMipmap(GL_TEXTURE_2D);
 
         for(i32 img_idx = 0;
             img_idx < img_count;
@@ -327,137 +503,28 @@ int main(int argc, char** argv)
           if(argc > 1)
           {
             img->path = wrap_str(argv[img_idx + 1]);
-
-            img->data = read_file((char*)img->path.data);
-            img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
-                &img->w, &img->h, 0, 4);
-            if(!img->pixels)
-            {
-              // TODO: stbi loading an image from memory seems to fail for BMPs.
-              img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, 0, 4);
-              if(img->pixels)
-              {
-                fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
-              }
-            }
-
-            // Look for PNG metadata.
-            if(img->data.size >= 16)
-            {
-              u8* ptr = img->data.data;
-              u8* data_end = img->data.data + img->data.size;
-              b32 bad = false;
-
-              // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
-              bad |= (*ptr++ != 0x89);
-              bad |= (*ptr++ != 'P');
-              bad |= (*ptr++ != 'N');
-              bad |= (*ptr++ != 'G');
-              bad |= (*ptr++ != 0x0d);
-              bad |= (*ptr++ != 0x0a);
-              bad |= (*ptr++ != 0x1a);
-              bad |= (*ptr++ != 0x0a);
-
-              while(!bad)
-              {
-                // Convert big-endian to little-endian.
-                u32 chunk_size = 0;
-                chunk_size |= *ptr++;
-                chunk_size <<= 8;
-                chunk_size |= *ptr++;
-                chunk_size <<= 8;
-                chunk_size |= *ptr++;
-                chunk_size <<= 8;
-                chunk_size |= *ptr++;
-
-                // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
-                if(ptr[0] == 't'
-                    && ptr[1] == 'E'
-                    && ptr[2] == 'X'
-                    && ptr[3] == 't')
-                {
-                  if(ptr + 4 + chunk_size <= data_end)
-                  {
-                    i32 key_len = 0;
-                    while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
-                    {
-                      ++key_len;
-                    }
-                    i32 value_len = chunk_size - key_len - 1;
-
-                    str_t key = { ptr + 4, key_len };
-                    str_t value = { ptr + 4 + key_len + 1, value_len };
-                    // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
-
-                    if(!img->generation_parameters.size)
-                    {
-                      img->generation_parameters = value;
-                    }
-                  }
-                  else
-                  {
-                    bad = true;
-                  }
-                }
-
-                ptr += 4 + chunk_size + 4;
-
-                bad |= (ptr + 8 >= data_end);
-              }
-            }
           }
           else
           {
             img->path = str("<TEST IMAGE>");
           }
+        }
 
-          if(!img->pixels)
-          {
-            img->pixels = test_texels;
-            img->w = 3;
-            img->h = 3;
-            if(!test_texture_id)
-            {
-              glGenTextures(1, &test_texture_id);
-            }
-            img->texture_id = test_texture_id;
-          }
-          else
-          {
-            glGenTextures(1, &img->texture_id);
-          }
-
-          glBindTexture(GL_TEXTURE_2D, img->texture_id);
-#if 0
-          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-#else
-          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-#endif
-          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-          glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-              img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
-          glGenerateMipmap(GL_TEXTURE_2D);
-
-#if 0
-          // Premultiply alpha.
-          for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
-          {
-            if(img->pixels[4*i + 3] != 255)
-            {
-              r32 r = img->pixels[4*i + 0] / 255.0f;
-              r32 g = img->pixels[4*i + 1] / 255.0f;
-              r32 b = img->pixels[4*i + 2] / 255.0f;
-              r32 a = img->pixels[4*i + 3] / 255.0f;
-
-              img->pixels[4*i + 0] = 255.0f * a * r;
-              img->pixels[4*i + 1] = 255.0f * a * g;
-              img->pixels[4*i + 2] = 255.0f * a * b;
-            }
-          }
-#endif
+        pthread_t loader_threads[8] = {0};
+        i32 loader_count = array_count(loader_threads);
+        loader_data_t* loader_data = malloc_array(loader_count, loader_data_t);
+        pthread_mutex_t loader_mutex = {0};
+        pthread_mutex_init(&loader_mutex, 0);
+        for(i32 loader_idx = 0;
+            loader_idx < loader_count;
+            ++loader_idx)
+        {
+          loader_data[loader_idx].thread_idx = loader_idx + 1;
+          loader_data[loader_idx].mutex = loader_mutex;
+          loader_data[loader_idx].img_count = img_count;
+          loader_data[loader_idx].img_entries = img_entries;
+          loader_data[loader_idx].test_texture_id = test_texture_id;
+          pthread_create(&loader_threads[loader_idx], 0, loader_fun, &loader_data[loader_idx]);
         }
 
         i32 win_w = WINDOW_INIT_W;
@@ -777,6 +844,30 @@ int main(int argc, char** argv)
                     else if(keysym == XK_End)
                     {
                       viewing_img_idx = img_count - 1;
+                    }
+                    else if(alt_held && keysym == XK_Page_Up)
+                    {
+                      viewing_img_idx -= thumbnail_columns * (r32)(i32)((r32)win_h / thumbnail_h);
+                      viewing_img_idx = clamp(0, img_count - 1, viewing_img_idx);
+                    }
+                    else if(alt_held && keysym == XK_Page_Down)
+                    {
+                      viewing_img_idx += thumbnail_columns * (r32)(i32)((r32)win_h / thumbnail_h);
+                      viewing_img_idx = clamp(0, img_count - 1, viewing_img_idx);
+                    }
+                    else if(keysym == XK_Page_Up)
+                    {
+                      sidebar_scroll_rows -= (r32)(i32)((r32)win_h / thumbnail_h);
+                      sidebar_scroll_rows = clamp(0,
+                          (img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
+                          sidebar_scroll_rows);
+                    }
+                    else if(keysym == XK_Page_Down)
+                    {
+                      sidebar_scroll_rows += (r32)(i32)((r32)win_h / thumbnail_h);
+                      sidebar_scroll_rows = clamp(0,
+                          (img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
+                          sidebar_scroll_rows);
                     }
                     else if(keysym == 'a')
                     {
@@ -1264,6 +1355,7 @@ int main(int argc, char** argv)
             i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
 
             viewing_img_idx = i32_wrap_upto(viewing_img_idx, img_count);
+            // TODO: This needs an update once the resolution of an already-viewed image gets known.
             if(last_viewing_img_idx != viewing_img_idx)
             {
               char txt[256];
@@ -1378,50 +1470,179 @@ int main(int argc, char** argv)
               i32 last_visible_row = (i32)(sidebar_scroll_rows + win_h / thumbnail_h + 1);
               i32 first_visible_img_idx = max(0, first_visible_row * thumbnail_columns);
               i32 last_visible_img_idx = min(img_count, last_visible_row * thumbnail_columns);
+              b32 loaded_new_img_this_frame = false;
               for(i32 img_idx = first_visible_img_idx;
                   img_idx < last_visible_img_idx;
                   ++img_idx)
               {
                 img_entry_t* img = &img_entries[img_idx];
+
+                if(!img->texture_id)
+                {
+                  loaded_new_img_this_frame = true;
+
+                  if(img->load_state == LOAD_STATE_LOADED_INTO_RAM)
+                  {
+#if 0
+                    img->data = read_file((char*)img->path.data);
+                    img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
+                        &img->w, &img->h, 0, 4);
+                    if(!img->pixels)
+                    {
+                      // TODO: stbi loading an image from memory seems to fail for BMPs.
+                      img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, 0, 4);
+                      if(img->pixels)
+                      {
+                        fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
+                      }
+                    }
+
+                    // Look for PNG metadata.
+                    if(img->data.size >= 16)
+                    {
+                      u8* ptr = img->data.data;
+                      u8* data_end = img->data.data + img->data.size;
+                      b32 bad = false;
+
+                      // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
+                      bad |= (*ptr++ != 0x89);
+                      bad |= (*ptr++ != 'P');
+                      bad |= (*ptr++ != 'N');
+                      bad |= (*ptr++ != 'G');
+                      bad |= (*ptr++ != 0x0d);
+                      bad |= (*ptr++ != 0x0a);
+                      bad |= (*ptr++ != 0x1a);
+                      bad |= (*ptr++ != 0x0a);
+
+                      while(!bad)
+                      {
+                        // Convert big-endian to little-endian.
+                        u32 chunk_size = 0;
+                        chunk_size |= *ptr++;
+                        chunk_size <<= 8;
+                        chunk_size |= *ptr++;
+                        chunk_size <<= 8;
+                        chunk_size |= *ptr++;
+                        chunk_size <<= 8;
+                        chunk_size |= *ptr++;
+
+                        // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+                        if(ptr[0] == 't'
+                            && ptr[1] == 'E'
+                            && ptr[2] == 'X'
+                            && ptr[3] == 't')
+                        {
+                          if(ptr + 4 + chunk_size <= data_end)
+                          {
+                            i32 key_len = 0;
+                            while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
+                            {
+                              ++key_len;
+                            }
+                            i32 value_len = chunk_size - key_len - 1;
+
+                            str_t key = { ptr + 4, key_len };
+                            str_t value = { ptr + 4 + key_len + 1, value_len };
+                            // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+                            if(!img->generation_parameters.size)
+                            {
+                              img->generation_parameters = value;
+                            }
+                          }
+                          else
+                          {
+                            bad = true;
+                          }
+                        }
+
+                        ptr += 4 + chunk_size + 4;
+
+                        bad |= (ptr + 8 >= data_end);
+                      }
+                    }
+
+                    if(!img->pixels)
+                    {
+                      img->pixels = test_texels;
+                      img->w = test_texture_w;
+                      img->h = test_texture_h;
+                      img->texture_id = test_texture_id;
+                    }
+                    else
+#endif
+                    {
+                      glGenTextures(1, &img->texture_id);
+
+                      glBindTexture(GL_TEXTURE_2D, img->texture_id);
+                      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+                      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+                      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+                      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                          img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
+                      glGenerateMipmap(GL_TEXTURE_2D);
+                    }
+
+#if 0
+                    // Premultiply alpha.
+                    for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
+                    {
+                      if(img->pixels[4*i + 3] != 255)
+                      {
+                        r32 r = img->pixels[4*i + 0] / 255.0f;
+                        r32 g = img->pixels[4*i + 1] / 255.0f;
+                        r32 b = img->pixels[4*i + 2] / 255.0f;
+                        r32 a = img->pixels[4*i + 3] / 255.0f;
+
+                        img->pixels[4*i + 0] = 255.0f * a * r;
+                        img->pixels[4*i + 1] = 255.0f * a * g;
+                        img->pixels[4*i + 2] = 255.0f * a * b;
+                      }
+                    }
+#endif
+                  }
+                }
+
+                i32 sidebar_col = img_idx % thumbnail_columns;
+                i32 sidebar_row = img_idx / thumbnail_columns;
+
+                r32 box_x0 = sidebar_col * thumbnail_w;
+                r32 box_y1 = win_h - ((r32)sidebar_row - sidebar_scroll_rows) * thumbnail_h;
+                r32 box_x1 = box_x0 + thumbnail_w;
+                r32 box_y0 = box_y1 - thumbnail_h;
+
+                if(hovered_thumbnail_idx == -1 &&
+                    prev_mouse_x >= box_x0 && prev_mouse_x < box_x1 &&
+                    prev_mouse_y >= box_y0 && prev_mouse_y < box_y1)
+                {
+                  hovered_thumbnail_idx = img_idx;
+                }
+
+                if(img_idx == viewing_img_idx || img_idx == hovered_thumbnail_idx)
+                {
+                  glDisable(GL_TEXTURE_2D);
+
+                  r32 gray = (img_idx == viewing_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
+                  glColor3f(gray, gray, gray);
+
+                  glBegin(GL_QUADS);
+                  glVertex2f(box_x0, box_y0);
+                  glVertex2f(box_x1, box_y0);
+                  glVertex2f(box_x1, box_y1);
+                  glVertex2f(box_x0, box_y1);
+                  glEnd();
+
+                  glEnable(GL_TEXTURE_2D);
+                  glColor3f(1.0f, 1.0f, 1.0f);
+                }
+
                 if(img->texture_id)
                 {
                   r32 tex_w = img->w;
                   r32 tex_h = img->h;
 
                   glBindTexture(GL_TEXTURE_2D, img->texture_id);
-
-                  i32 sidebar_col = img_idx % thumbnail_columns;
-                  i32 sidebar_row = img_idx / thumbnail_columns;
-
-                  r32 box_x0 = sidebar_col * thumbnail_w;
-                  r32 box_y1 = win_h - ((r32)sidebar_row - sidebar_scroll_rows) * thumbnail_h;
-                  r32 box_x1 = box_x0 + thumbnail_w;
-                  r32 box_y0 = box_y1 - thumbnail_h;
-
-                  if(hovered_thumbnail_idx == -1 &&
-                      prev_mouse_x >= box_x0 && prev_mouse_x < box_x1 &&
-                      prev_mouse_y >= box_y0 && prev_mouse_y < box_y1)
-                  {
-                    hovered_thumbnail_idx = img_idx;
-                  }
-
-                  if(img_idx == viewing_img_idx || img_idx == hovered_thumbnail_idx)
-                  {
-                    glDisable(GL_TEXTURE_2D);
-
-                    r32 gray = (img_idx == viewing_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
-                    glColor3f(gray, gray, gray);
-
-                    glBegin(GL_QUADS);
-                    glVertex2f(box_x0, box_y0);
-                    glVertex2f(box_x1, box_y0);
-                    glVertex2f(box_x1, box_y1);
-                    glVertex2f(box_x0, box_y1);
-                    glEnd();
-
-                    glEnable(GL_TEXTURE_2D);
-                    glColor3f(1.0f, 1.0f, 1.0f);
-                  }
 
                   r32 mag = 1.0f;
                   if(thumbnail_w != 0 && thumbnail_h != 0)
@@ -1451,6 +1672,11 @@ int main(int argc, char** argv)
                   glTexCoord2f(u0, v0); glVertex2f(x0, y1);
                   glEnd();
                 }
+              }
+
+              if(loaded_new_img_this_frame)
+              {
+                ++dirty_frames;
               }
             }
 
