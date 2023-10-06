@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -289,10 +290,11 @@ int main(int argc, char** argv)
         }
 
         Atom atom_clipboard = XInternAtom(display, "CLIPBOARD", false);
+        Atom atom_targets = XInternAtom(display, "TARGETS", false);
+        Atom atom_incr = XInternAtom(display, "INCR", false);
         Atom atom_utf8 = XInternAtom(display, "UTF8_STRING", false);
         Atom atom_uri_list = XInternAtom(display, "text/uri-list", false);
-        Atom atom_cliptarget = XInternAtom(display, "PUT_IT_HERE", false);
-        Atom atom_incr = XInternAtom(display, "INCR", false);
+        Atom atom_mycliptarget = XInternAtom(display, "PUT_IT_HERE", false);
 
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
 
@@ -472,6 +474,7 @@ int main(int argc, char** argv)
         b32 quitting = false;
         i32 viewing_img_idx = 0;
         i32 last_viewing_img_idx = -1;
+        str_t clipboard_str = {0};
         b32 border_sampling = true;
         b32 linear_sampling = true;
         b32 alpha_blend = true;
@@ -823,7 +826,7 @@ int main(int argc, char** argv)
                     }
                     else if(ctrl_held && keysym == 'v')
                     {
-                      XConvertSelection(display, atom_clipboard, atom_uri_list, atom_cliptarget, window, CurrentTime);
+                      XConvertSelection(display, atom_clipboard, atom_uri_list, atom_mycliptarget, window, CurrentTime);
                     }
                     else if(keysym == 'v')
                     {
@@ -833,7 +836,8 @@ int main(int argc, char** argv)
                     }
                     else if(ctrl_held && keysym == 'c')
                     {
-                      // XSetSelectionOwner(display, 
+                      clipboard_str = img_entries[viewing_img_idx].path;
+                      XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
                     }
                     else if(keysym == 'x')
                     {
@@ -1007,7 +1011,7 @@ int main(int argc, char** argv)
                     unsigned long item_count = 0;
                     unsigned long bytes_left = 0;
                     u8* data;
-                    if(event.xselection.property != atom_cliptarget)
+                    if(event.xselection.property != atom_mycliptarget)
                     {
                       printf("Paste: Got other target property!\n");
                     }
@@ -1025,6 +1029,106 @@ int main(int argc, char** argv)
                     XFree(data);
                     XDeleteProperty(display, window, event.xselection.property);
                   }
+                } break;
+
+                case SelectionRequest:
+                {
+                  XSelectionRequestEvent* request = (XSelectionRequestEvent*)&event.xselectionrequest;
+                  // if(event.xselectionrequest.
+                  char* property_name = XGetAtomName(display, request->property);
+                  char* target_name = XGetAtomName(display, request->target);
+                  printf("SelectionRequest target: %s, property: %s\n", target_name, property_name);
+                  if(property_name) { XFree(property_name); }
+                  if(target_name) { XFree(target_name); }
+
+                  XSelectionEvent response = {0};
+                  response.type = SelectionNotify;
+                  response.requestor = request->requestor;
+                  response.selection = request->selection;
+                  response.target = request->target;
+                  response.property = None;  // Denied.
+                  response.time = request->time;
+
+                  b32 respond_ok = false;
+
+                  if(request->property != None && clipboard_str.data != 0)
+                  {
+                    if(request->target == atom_targets)
+                    {
+                      Atom target_list[] = {
+                        atom_targets,
+                        atom_uri_list,
+                        atom_utf8,
+                      };
+                      XChangeProperty(display, request->requestor, request->property,
+                          XA_ATOM, 32, PropModeReplace, (u8*)target_list, array_count(target_list));
+
+                      respond_ok = true;
+                    }
+                    else if(request->target == atom_uri_list)
+                    {
+                      char* full_path = realpath((char*)clipboard_str.data, 0);
+                      if(full_path)
+                      {
+                        // URI-encode the path.
+                        u8 buf[4096];
+                        u8* buf_end = buf + array_count(buf);
+                        u8* buf_ptr = buf;
+
+                        *buf_ptr++ = 'f';
+                        *buf_ptr++ = 'i';
+                        *buf_ptr++ = 'l';
+                        *buf_ptr++ = 'e';
+                        *buf_ptr++ = ':';
+                        *buf_ptr++ = '/';
+                        *buf_ptr++ = '/';
+
+                        for(char* path_ptr = full_path;
+                            *path_ptr && buf_ptr + 3 < buf_end;
+                            ++path_ptr)
+                        {
+                          u8 c = *path_ptr;
+                          if((c >= 'A' && c <= 'Z') ||
+                              (c >= 'a' && c <= 'z') ||
+                              (c >= '0' && c <= '9') ||
+                              c == '-' || c == '_' || c == '.' || c == '~' || c == '/')
+                          {
+                            *buf_ptr++ = c;
+                          }
+                          else
+                          {
+                            char* hex = "0123456789ABCDEF";
+                            *buf_ptr++ = '%';
+                            *buf_ptr++ = hex[c >> 4];
+                            *buf_ptr++ = hex[c & 0xF];
+                          }
+                        }
+
+                        free(full_path);
+
+                        XChangeProperty(display, request->requestor, request->property,
+                            atom_uri_list, 8, PropModeReplace,
+                            buf, buf_ptr - buf);
+
+                        respond_ok = true;
+                      }
+                    }
+                    else if(request->target == atom_utf8)
+                    {
+                      XChangeProperty(display, request->requestor, request->property,
+                          atom_utf8, 8, PropModeReplace,
+                          clipboard_str.data, clipboard_str.size);
+
+                      respond_ok = true;
+                    }
+                  }
+
+                  if(respond_ok)
+                  {
+                    response.property = request->property;
+                  }
+
+                  XSendEvent(display, request->requestor, True, NoEventMask, (XEvent*)&response);
                 } break;
 
                 default:
