@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <math.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,164 +134,271 @@ typedef struct
   i32 w;
   i32 h;
   u8* pixels;
-  u32 load_state;
+  volatile u32 load_state;
   GLuint texture_id;
 } img_entry_t;
 
 typedef struct
 {
-  i32 thread_idx;
   pthread_mutex_t mutex;
+  sem_t* semaphore;
 
   i32 img_count;
   img_entry_t* img_entries;
 
   GLuint test_texture_id;
+
+  volatile i32 viewing_img_idx;
+  volatile i32 first_visible_thumbnail_idx;
+  volatile i32 last_visible_thumbnail_idx;
+} shared_loader_data_t;
+
+typedef struct
+{
+  i32 thread_idx;
+  shared_loader_data_t* shared;
 } loader_data_t;
 
 internal void* loader_fun(void* raw_data)
 {
-  loader_data_t* data = (loader_data_t*)raw_data;
+  i32 thread_idx = ((loader_data_t*)raw_data)->thread_idx;
+  shared_loader_data_t* data = ((loader_data_t*)raw_data)->shared;
 
-  i64 nsecs_start = get_nanoseconds();
+  i32 focus_idx = -1;
+  i32 range_start_idx = -1;
+  i32 range_end_idx = -1;
 
-  for(i32 img_idx = 0;
-      img_idx < data->img_count;
-      ++img_idx)
+  for(;;)
   {
-    img_entry_t* img = &data->img_entries[img_idx];
-    b32 load_this = false;
+    b32 do_work = false;
 
     pthread_mutex_lock(&data->mutex);
-    if(img->load_state == LOAD_STATE_UNLOADED)
-    {
-      load_this = true;
-      img->load_state = LOAD_STATE_LOADING;
-
-#if 0
-      printf("Loader %d: Loading [%d/%d] \"%s\"...\n",
-          data->thread_idx,
-          img_idx + 1, data->img_count,
-          img->path.data);
-#endif
-    }
+    do_work = 0
+      || focus_idx != data->viewing_img_idx
+      || range_start_idx != data->first_visible_thumbnail_idx
+      || range_end_idx != data->last_visible_thumbnail_idx;
+    focus_idx = data->viewing_img_idx;
+    range_start_idx = data->first_visible_thumbnail_idx;
+    range_end_idx = data->last_visible_thumbnail_idx;
     pthread_mutex_unlock(&data->mutex);
 
-    if(load_this)
+    i32 focus_offset = 1;
+    i32 range_offset = 0;
+
+    if(do_work)
     {
-      img->data = read_file((char*)img->path.data);
-      img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
-          &img->w, &img->h, 0, 4);
-      if(!img->pixels)
+      for(i32 loading_idx = 0;
+          loading_idx < 1401;
+          ++loading_idx)
       {
-        // TODO: stbi loading an image from memory seems to fail for BMPs.
-        img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, 0, 4);
-        if(img->pixels)
+        if(0
+            || focus_idx != data->viewing_img_idx
+            || range_start_idx != data->first_visible_thumbnail_idx
+            || range_end_idx != data->last_visible_thumbnail_idx
+          )
         {
-          fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
+          break;
         }
-      }
 
-      if(!img->pixels)
-      {
-        img->pixels = test_texels;
-        img->w = test_texture_w;
-        img->h = test_texture_h;
-        img->texture_id = data->test_texture_id;
-      }
-
-      // Look for PNG metadata.
-      if(img->data.size >= 16)
-      {
-        u8* ptr = img->data.data;
-        u8* data_end = img->data.data + img->data.size;
-        b32 bad = false;
-
-        // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
-        bad |= (*ptr++ != 0x89);
-        bad |= (*ptr++ != 'P');
-        bad |= (*ptr++ != 'N');
-        bad |= (*ptr++ != 'G');
-        bad |= (*ptr++ != 0x0d);
-        bad |= (*ptr++ != 0x0a);
-        bad |= (*ptr++ != 0x1a);
-        bad |= (*ptr++ != 0x0a);
-
-        while(!bad)
+        i32 loading_phase = loading_idx % 3;
+        i32 img_idx = focus_idx;
+        if(loading_phase == 0)
         {
-          // Convert big-endian to little-endian.
-          u32 chunk_size = 0;
-          chunk_size |= *ptr++;
-          chunk_size <<= 8;
-          chunk_size |= *ptr++;
-          chunk_size <<= 8;
-          chunk_size |= *ptr++;
-          chunk_size <<= 8;
-          chunk_size |= *ptr++;
-
-          // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
-          if(ptr[0] == 't'
-              && ptr[1] == 'E'
-              && ptr[2] == 'X'
-              && ptr[3] == 't')
+          img_idx = focus_idx - (loading_idx + 2) / 3;
+        }
+        else if(loading_phase == 1)
+        {
+          img_idx = focus_idx + (loading_idx + 2) / 3;
+        }
+        else if(loading_phase == 2)
+        {
+          img_idx = range_start_idx + loading_idx / 3;
+          i32 extra_range_idx = img_idx - range_end_idx;
+          if(extra_range_idx > 0)
           {
-            if(ptr + 4 + chunk_size <= data_end)
+            // TODO: Double-check this logic.
+            if(extra_range_idx % 2 == 0)
             {
-              i32 key_len = 0;
-              while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
-              {
-                ++key_len;
-              }
-              i32 value_len = chunk_size - key_len - 1;
-
-              str_t key = { ptr + 4, key_len };
-              str_t value = { ptr + 4 + key_len + 1, value_len };
-              // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
-
-              if(!img->generation_parameters.size)
-              {
-                img->generation_parameters = value;
-              }
+              img_idx = range_start_idx - extra_range_idx / 2;
             }
             else
             {
-              bad = true;
+              img_idx = range_end_idx + extra_range_idx / 2;
+            }
+          }
+        }
+        img_idx = i32_wrap_upto(img_idx, data->img_count);
+
+        img_entry_t* img = &data->img_entries[img_idx];
+        b32 load_this = false;
+
+        pthread_mutex_lock(&data->mutex);
+        if(img->load_state == LOAD_STATE_UNLOADED)
+        {
+          load_this = true;
+          img->load_state = LOAD_STATE_LOADING;
+
+#if 0
+          printf("Loader %d [%5d/%d] %s\n",
+              thread_idx,
+              img_idx + 1, data->img_count,
+              img->path.data);
+#endif
+        }
+        pthread_mutex_unlock(&data->mutex);
+
+        if(load_this)
+        {
+          i32 original_channel_count = 0;
+
+          img->data = read_file((char*)img->path.data);
+          img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
+              &img->w, &img->h, &original_channel_count, 4);
+          if(!img->pixels)
+          {
+            // TODO: stbi loading an image from memory seems to fail for BMPs.
+            img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, &original_channel_count, 4);
+            if(img->pixels)
+            {
+              fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
             }
           }
 
-          ptr += 4 + chunk_size + 4;
+          if(!img->pixels)
+          {
+            img->pixels = test_texels;
+            img->w = test_texture_w;
+            img->h = test_texture_h;
+            img->texture_id = data->test_texture_id;
+          }
 
-          bad |= (ptr + 8 >= data_end);
-        }
-      }
+          // Look for PNG metadata.
+          if(img->data.size >= 16)
+          {
+            u8* ptr = img->data.data;
+            u8* data_end = img->data.data + img->data.size;
+            b32 bad = false;
 
-#if 0
-      // Premultiply alpha.
-      for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
-      {
-        if(img->pixels[4*i + 3] != 255)
-        {
-          r32 r = img->pixels[4*i + 0] / 255.0f;
-          r32 g = img->pixels[4*i + 1] / 255.0f;
-          r32 b = img->pixels[4*i + 2] / 255.0f;
-          r32 a = img->pixels[4*i + 3] / 255.0f;
+            // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
+            bad |= (*ptr++ != 0x89);
+            bad |= (*ptr++ != 'P');
+            bad |= (*ptr++ != 'N');
+            bad |= (*ptr++ != 'G');
+            bad |= (*ptr++ != 0x0d);
+            bad |= (*ptr++ != 0x0a);
+            bad |= (*ptr++ != 0x1a);
+            bad |= (*ptr++ != 0x0a);
 
-          img->pixels[4*i + 0] = 255.0f * a * r;
-          img->pixels[4*i + 1] = 255.0f * a * g;
-          img->pixels[4*i + 2] = 255.0f * a * b;
-        }
-      }
+            while(!bad)
+            {
+              // Convert big-endian to little-endian.
+              u32 chunk_size = 0;
+              chunk_size |= *ptr++;
+              chunk_size <<= 8;
+              chunk_size |= *ptr++;
+              chunk_size <<= 8;
+              chunk_size |= *ptr++;
+              chunk_size <<= 8;
+              chunk_size |= *ptr++;
+
+              // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+              if(ptr[0] == 't'
+                  && ptr[1] == 'E'
+                  && ptr[2] == 'X'
+                  && ptr[3] == 't')
+              {
+                if(ptr + 4 + chunk_size <= data_end)
+                {
+                  i32 key_len = 0;
+                  while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
+                  {
+                    ++key_len;
+                  }
+                  i32 value_len = chunk_size - key_len - 1;
+
+                  str_t key = { ptr + 4, key_len };
+                  str_t value = { ptr + 4 + key_len + 1, value_len };
+                  // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+                  if(!img->generation_parameters.size)
+                  {
+                    img->generation_parameters = value;
+                  }
+                }
+                else
+                {
+                  bad = true;
+                }
+              }
+
+              ptr += 4 + chunk_size + 4;
+
+              bad |= (ptr + 8 >= data_end);
+            }
+          }
+
+#if 1
+          // printf("Channels: %d\n", original_channel_count);
+          if(original_channel_count == 4)
+          {
+            // Premultiply alpha.
+            // printf("Premultiplying alpha.\n");
+            for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
+            {
+              if(img->pixels[4*i + 3] != 255)
+              {
+                r32 r = img->pixels[4*i + 0] / 255.0f;
+                r32 g = img->pixels[4*i + 1] / 255.0f;
+                r32 b = img->pixels[4*i + 2] / 255.0f;
+                r32 a = img->pixels[4*i + 3] / 255.0f;
+
+                img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
+                img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
+                img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
+              }
+            }
+          }
 #endif
 
-      img->load_state = LOAD_STATE_LOADED_INTO_RAM;
+          img->load_state = LOAD_STATE_LOADED_INTO_RAM;
+        }
+      }
+    }
+
+    // printf("Loader %d: Waiting on semaphore.\n", thread_idx);
+    sem_wait(data->semaphore);
+    // printf("Loader %d: Got signal!\n", thread_idx);
+  }
+
+  return 0;
+}
+
+internal b32 upload_img_texture(img_entry_t* img)
+{
+  b32 result = false;
+
+  if(!img->texture_id)
+  {
+    if(img->load_state == LOAD_STATE_LOADED_INTO_RAM)
+    {
+      glGenTextures(1, &img->texture_id);
+
+      glBindTexture(GL_TEXTURE_2D, img->texture_id);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+          img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
+      glGenerateMipmap(GL_TEXTURE_2D);
+    }
+    else
+    {
+      result = true;
     }
   }
 
-  i64 nsecs_end = get_nanoseconds();
-
-  printf("Loader %d: All done in %.6f s.\n", data->thread_idx, (r32)(nsecs_end - nsecs_start) / 1e9f);
-
-  return 0;
+  return result;
 }
 
 int main(int argc, char** argv)
@@ -476,8 +584,8 @@ int main(int argc, char** argv)
 
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
 
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        // glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         i32 img_count = max(1, argc - 1);
         img_entry_t* img_entries = malloc_array(img_count, img_entry_t);
@@ -512,18 +620,27 @@ int main(int argc, char** argv)
 
         pthread_t loader_threads[8] = {0};
         i32 loader_count = array_count(loader_threads);
+        shared_loader_data_t* shared_loader_data = malloc_array(1, shared_loader_data_t);
         loader_data_t* loader_data = malloc_array(loader_count, loader_data_t);
+
         pthread_mutex_t loader_mutex = {0};
         pthread_mutex_init(&loader_mutex, 0);
+        sem_t* loader_semaphore = malloc_array(1, sem_t);
+        sem_init(loader_semaphore, 0, 0);
+
+        zero_struct(*shared_loader_data);
+        shared_loader_data->mutex = loader_mutex;
+        shared_loader_data->semaphore = loader_semaphore;
+        shared_loader_data->img_count = img_count;
+        shared_loader_data->img_entries = img_entries;
+        shared_loader_data->test_texture_id = test_texture_id;
+
         for(i32 loader_idx = 0;
             loader_idx < loader_count;
             ++loader_idx)
         {
           loader_data[loader_idx].thread_idx = loader_idx + 1;
-          loader_data[loader_idx].mutex = loader_mutex;
-          loader_data[loader_idx].img_count = img_count;
-          loader_data[loader_idx].img_entries = img_entries;
-          loader_data[loader_idx].test_texture_id = test_texture_id;
+          loader_data[loader_idx].shared = shared_loader_data;
           pthread_create(&loader_threads[loader_idx], 0, loader_fun, &loader_data[loader_idx]);
         }
 
@@ -821,21 +938,27 @@ int main(int argc, char** argv)
                     {
                       alt_held = true;
                     }
-                    else if(keysym == XK_BackSpace || (alt_held && keysym == XK_Left))
+                    else if(keysym == XK_BackSpace || keysym == XK_Left)
                     {
                       viewing_img_idx -= 1;
                     }
-                    else if(keysym == ' ' || (alt_held && keysym == XK_Right))
+                    else if(keysym == ' ' || keysym == XK_Right)
                     {
                       viewing_img_idx += 1;
                     }
-                    else if(alt_held && keysym == XK_Up)
+                    else if(keysym == XK_Up)
                     {
-                      viewing_img_idx -= thumbnail_columns;
+                      if(viewing_img_idx - thumbnail_columns >= 0)
+                      {
+                        viewing_img_idx -= thumbnail_columns;
+                      }
                     }
-                    else if(alt_held && keysym == XK_Down)
+                    else if(keysym == XK_Down)
                     {
-                      viewing_img_idx += thumbnail_columns;
+                      if(viewing_img_idx + thumbnail_columns < img_count)
+                      {
+                        viewing_img_idx += thumbnail_columns;
+                      }
                     }
                     else if(keysym == XK_Home)
                     {
@@ -1385,6 +1508,24 @@ int main(int argc, char** argv)
               }
             }
 
+            i32 first_visible_row = (i32)sidebar_scroll_rows;
+            i32 last_visible_row = (i32)(sidebar_scroll_rows + win_h / thumbnail_h + 1);
+            i32 first_visible_thumbnail_idx = max(0, first_visible_row * thumbnail_columns);
+            i32 last_visible_thumbnail_idx = min(img_count, last_visible_row * thumbnail_columns);
+            if(0
+                || viewing_img_idx != shared_loader_data->viewing_img_idx
+                || first_visible_thumbnail_idx != shared_loader_data->first_visible_thumbnail_idx
+                || last_visible_thumbnail_idx != shared_loader_data->last_visible_thumbnail_idx
+              )
+            {
+              pthread_mutex_lock(&shared_loader_data->mutex);
+              shared_loader_data->viewing_img_idx = viewing_img_idx;
+              shared_loader_data->first_visible_thumbnail_idx = first_visible_thumbnail_idx;
+              shared_loader_data->last_visible_thumbnail_idx = last_visible_thumbnail_idx;
+              pthread_mutex_unlock(&shared_loader_data->mutex);
+              for_count(i, loader_count) { sem_post(loader_semaphore); }
+            }
+
 #if 0
             if(game_memory.grab_mouse && !pointer_grabbed)
             {
@@ -1431,6 +1572,8 @@ int main(int argc, char** argv)
               glLoadMatrixf(matrix);
             }
 
+            b32 still_loading = false;
+
             if(!hide_sidebar)
             {
               glScissor(0, 0, sidebar_width, win_h);
@@ -1466,143 +1609,12 @@ int main(int argc, char** argv)
               glEnable(GL_TEXTURE_2D);
               glColor3f(1.0f, 1.0f, 1.0f);
               hovered_thumbnail_idx = -1;
-              i32 first_visible_row = (i32)sidebar_scroll_rows;
-              i32 last_visible_row = (i32)(sidebar_scroll_rows + win_h / thumbnail_h + 1);
-              i32 first_visible_img_idx = max(0, first_visible_row * thumbnail_columns);
-              i32 last_visible_img_idx = min(img_count, last_visible_row * thumbnail_columns);
-              b32 loaded_new_img_this_frame = false;
-              for(i32 img_idx = first_visible_img_idx;
-                  img_idx < last_visible_img_idx;
+              for(i32 img_idx = first_visible_thumbnail_idx;
+                  img_idx < last_visible_thumbnail_idx;
                   ++img_idx)
               {
                 img_entry_t* img = &img_entries[img_idx];
-
-                if(!img->texture_id)
-                {
-                  loaded_new_img_this_frame = true;
-
-                  if(img->load_state == LOAD_STATE_LOADED_INTO_RAM)
-                  {
-#if 0
-                    img->data = read_file((char*)img->path.data);
-                    img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
-                        &img->w, &img->h, 0, 4);
-                    if(!img->pixels)
-                    {
-                      // TODO: stbi loading an image from memory seems to fail for BMPs.
-                      img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, 0, 4);
-                      if(img->pixels)
-                      {
-                        fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
-                      }
-                    }
-
-                    // Look for PNG metadata.
-                    if(img->data.size >= 16)
-                    {
-                      u8* ptr = img->data.data;
-                      u8* data_end = img->data.data + img->data.size;
-                      b32 bad = false;
-
-                      // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
-                      bad |= (*ptr++ != 0x89);
-                      bad |= (*ptr++ != 'P');
-                      bad |= (*ptr++ != 'N');
-                      bad |= (*ptr++ != 'G');
-                      bad |= (*ptr++ != 0x0d);
-                      bad |= (*ptr++ != 0x0a);
-                      bad |= (*ptr++ != 0x1a);
-                      bad |= (*ptr++ != 0x0a);
-
-                      while(!bad)
-                      {
-                        // Convert big-endian to little-endian.
-                        u32 chunk_size = 0;
-                        chunk_size |= *ptr++;
-                        chunk_size <<= 8;
-                        chunk_size |= *ptr++;
-                        chunk_size <<= 8;
-                        chunk_size |= *ptr++;
-                        chunk_size <<= 8;
-                        chunk_size |= *ptr++;
-
-                        // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
-                        if(ptr[0] == 't'
-                            && ptr[1] == 'E'
-                            && ptr[2] == 'X'
-                            && ptr[3] == 't')
-                        {
-                          if(ptr + 4 + chunk_size <= data_end)
-                          {
-                            i32 key_len = 0;
-                            while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
-                            {
-                              ++key_len;
-                            }
-                            i32 value_len = chunk_size - key_len - 1;
-
-                            str_t key = { ptr + 4, key_len };
-                            str_t value = { ptr + 4 + key_len + 1, value_len };
-                            // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
-
-                            if(!img->generation_parameters.size)
-                            {
-                              img->generation_parameters = value;
-                            }
-                          }
-                          else
-                          {
-                            bad = true;
-                          }
-                        }
-
-                        ptr += 4 + chunk_size + 4;
-
-                        bad |= (ptr + 8 >= data_end);
-                      }
-                    }
-
-                    if(!img->pixels)
-                    {
-                      img->pixels = test_texels;
-                      img->w = test_texture_w;
-                      img->h = test_texture_h;
-                      img->texture_id = test_texture_id;
-                    }
-                    else
-#endif
-                    {
-                      glGenTextures(1, &img->texture_id);
-
-                      glBindTexture(GL_TEXTURE_2D, img->texture_id);
-                      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-                      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-                      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-                      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                          img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
-                      glGenerateMipmap(GL_TEXTURE_2D);
-                    }
-
-#if 0
-                    // Premultiply alpha.
-                    for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
-                    {
-                      if(img->pixels[4*i + 3] != 255)
-                      {
-                        r32 r = img->pixels[4*i + 0] / 255.0f;
-                        r32 g = img->pixels[4*i + 1] / 255.0f;
-                        r32 b = img->pixels[4*i + 2] / 255.0f;
-                        r32 a = img->pixels[4*i + 3] / 255.0f;
-
-                        img->pixels[4*i + 0] = 255.0f * a * r;
-                        img->pixels[4*i + 1] = 255.0f * a * g;
-                        img->pixels[4*i + 2] = 255.0f * a * b;
-                      }
-                    }
-#endif
-                  }
-                }
+                still_loading |= upload_img_texture(img);
 
                 i32 sidebar_col = img_idx % thumbnail_columns;
                 i32 sidebar_row = img_idx / thumbnail_columns;
@@ -1673,94 +1685,93 @@ int main(int argc, char** argv)
                   glEnd();
                 }
               }
-
-              if(loaded_new_img_this_frame)
-              {
-                ++dirty_frames;
-              }
             }
 
             img_entry_t* img = &img_entries[viewing_img_idx];
-
-            glBindTexture(GL_TEXTURE_2D, img->texture_id);
-
-            r32 tex_w = img->w;
-            r32 tex_h = img->h;
-
-            if(alpha_blend)
-            {
-              glEnable(GL_BLEND);
-            }
-            else
-            {
-              glDisable(GL_BLEND);
-            }
-
-            r32 u0 = 0.0f;
-            r32 v0 = 0.0f;
-            r32 u1 = 1.0f;
-            r32 v1 = 1.0f;
+            still_loading |= upload_img_texture(img);
 
             i32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
             i32 image_region_y0 = show_info ? info_height : 0;
             i32 image_region_w = win_w - image_region_x0;
             i32 image_region_h = win_h - image_region_y0;
 
-            glScissor(image_region_x0, image_region_y0, image_region_w, image_region_h);
-
-            r32 mag = 1.0f;
-            if(image_region_w != 0 && image_region_h != 0)
+            // if(img->texture_id)
             {
-              mag = min((r32)image_region_w / (r32)tex_w, (r32)image_region_h / (r32)tex_h);
+              glBindTexture(GL_TEXTURE_2D, img->texture_id);
+
+              r32 tex_w = img->w;
+              r32 tex_h = img->h;
+
+              if(alpha_blend)
+              {
+                glEnable(GL_BLEND);
+              }
+              else
+              {
+                glDisable(GL_BLEND);
+              }
+
+              r32 u0 = 0.0f;
+              r32 v0 = 0.0f;
+              r32 u1 = 1.0f;
+              r32 v1 = 1.0f;
+
+              glScissor(image_region_x0, image_region_y0, image_region_w, image_region_h);
+
+              r32 mag = 1.0f;
+              if(tex_w != 0 && tex_h != 0)
+              {
+                mag = min((r32)image_region_w / (r32)tex_w, (r32)image_region_h / (r32)tex_h);
+              }
+              r32 exp_zoom = exp2f(zoom);
+              mag *= exp_zoom;
+
+              if(absolute(mag - 1.0f) <= 1e-3f)
+              {
+                mag = 1.0f;
+              }
+
+              r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
+              r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
+
+              r32 win_min_side = min(win_w, win_h);
+              x0 += win_min_side * exp_zoom * offset_x;
+              y0 += win_min_side * exp_zoom * offset_y;
+
+              if(mag == 1.0f)
+              {
+                // Avoid interpolating pixels when viewing them 1:1.
+                x0 = (r32)(i32)(x0 + 0.5f);
+                y0 = (r32)(i32)(y0 + 0.5f);
+              }
+
+              r32 x1 = x0 + mag * tex_w;
+              r32 y1 = y0 + mag * tex_h;
+
+              if(border_sampling)
+              {
+                r32 margin = max(1.0f, mag);
+
+                u0 -= margin / (r32)(mag * tex_w);
+                v0 -= margin / (r32)(mag * tex_h);
+                u1 += margin / (r32)(mag * tex_w);
+                v1 += margin / (r32)(mag * tex_h);
+
+                x0 -= margin;
+                y0 -= margin;
+                x1 += margin;
+                y1 += margin;
+              }
+
+              glEnable(GL_TEXTURE_2D);
+              glColor3f(1.0f, 1.0f, 1.0f);
+              glBegin(GL_QUADS);
+              glTexCoord2f(u0, v1); glVertex2f(x0, y0);
+              glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+              glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+              glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+              glEnd();
             }
-            r32 exp_zoom = exp2f(zoom);
-            mag *= exp_zoom;
-
-            if(absolute(mag - 1.0f) <= 1e-3f)
-            {
-              mag = 1.0f;
-            }
-
-            r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
-            r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
-
-            r32 win_min_side = min(win_w, win_h);
-            x0 += win_min_side * exp_zoom * offset_x;
-            y0 += win_min_side * exp_zoom * offset_y;
-
-            if(mag == 1.0f)
-            {
-              // Avoid interpolating pixels when viewing them 1:1.
-              x0 = (r32)(i32)(x0 + 0.5f);
-              y0 = (r32)(i32)(y0 + 0.5f);
-            }
-
-            r32 x1 = x0 + mag * tex_w;
-            r32 y1 = y0 + mag * tex_h;
-
-            if(border_sampling)
-            {
-              r32 margin = max(1.0f, mag);
-
-              u0 -= margin / (r32)(mag * tex_w);
-              v0 -= margin / (r32)(mag * tex_h);
-              u1 += margin / (r32)(mag * tex_w);
-              v1 += margin / (r32)(mag * tex_h);
-
-              x0 -= margin;
-              y0 -= margin;
-              x1 += margin;
-              y1 += margin;
-            }
-
-            glEnable(GL_TEXTURE_2D);
-            glColor3f(1.0f, 1.0f, 1.0f);
-            glBegin(GL_QUADS);
-            glTexCoord2f(u0, v1); glVertex2f(x0, y0);
-            glTexCoord2f(u1, v1); glVertex2f(x1, y0);
-            glTexCoord2f(u1, v0); glVertex2f(x1, y1);
-            glTexCoord2f(u0, v0); glVertex2f(x0, y1);
-            glEnd();
 
 #if 0
             // https://www.khronos.org/opengl/wiki/Sync_Object#Synchronization
@@ -1798,6 +1809,11 @@ int main(int argc, char** argv)
               glXWaitX();
               // XSync(display, false);
               // usleep(10000);
+            }
+
+            if(still_loading)
+            {
+              ++dirty_frames;
             }
           }
           else
