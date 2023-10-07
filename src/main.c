@@ -141,7 +141,6 @@ typedef struct
 typedef struct
 {
   pthread_mutex_t mutex;
-  sem_t* semaphore;
 
   i32 img_count;
   img_entry_t* img_entries;
@@ -156,13 +155,15 @@ typedef struct
 typedef struct
 {
   i32 thread_idx;
+  sem_t* semaphore;
   shared_loader_data_t* shared;
 } loader_data_t;
 
 internal void* loader_fun(void* raw_data)
 {
-  i32 thread_idx = ((loader_data_t*)raw_data)->thread_idx;
-  shared_loader_data_t* data = ((loader_data_t*)raw_data)->shared;
+  loader_data_t* data = (loader_data_t*)raw_data;
+  i32 thread_idx = data->thread_idx;
+  shared_loader_data_t* shared = data->shared;
 
   i32 focus_idx = -1;
   i32 range_start_idx = -1;
@@ -172,67 +173,83 @@ internal void* loader_fun(void* raw_data)
   {
     b32 do_work = false;
 
-    pthread_mutex_lock(&data->mutex);
+    // printf("Loader %d: Waiting on semaphore.\n", thread_idx);
+    sem_wait(data->semaphore);
+    // printf("Loader %d: Got signal!\n", thread_idx);
+
+    pthread_mutex_lock(&shared->mutex);
     do_work = 0
-      || focus_idx != data->viewing_img_idx
-      || range_start_idx != data->first_visible_thumbnail_idx
-      || range_end_idx != data->last_visible_thumbnail_idx;
-    focus_idx = data->viewing_img_idx;
-    range_start_idx = data->first_visible_thumbnail_idx;
-    range_end_idx = data->last_visible_thumbnail_idx;
-    pthread_mutex_unlock(&data->mutex);
+      || focus_idx != shared->viewing_img_idx
+      || range_start_idx != shared->first_visible_thumbnail_idx
+      || range_end_idx != shared->last_visible_thumbnail_idx;
+    focus_idx = shared->viewing_img_idx;
+    range_start_idx = shared->first_visible_thumbnail_idx;
+    range_end_idx = shared->last_visible_thumbnail_idx;
+    pthread_mutex_unlock(&shared->mutex);
 
     i32 focus_offset = 1;
     i32 range_offset = 0;
 
     if(do_work)
     {
+      // printf("Loader %d focus %d range_start %d range_end %d\n", thread_idx, focus_idx, range_start_idx, range_end_idx);
+
       for(i32 loading_idx = 0;
-          loading_idx < 1401;
+          loading_idx < 800;
           ++loading_idx)
       {
         if(0
-            || focus_idx != data->viewing_img_idx
-            || range_start_idx != data->first_visible_thumbnail_idx
-            || range_end_idx != data->last_visible_thumbnail_idx
+            || focus_idx != shared->viewing_img_idx
+            || range_start_idx != shared->first_visible_thumbnail_idx
+            || range_end_idx != shared->last_visible_thumbnail_idx
           )
         {
           break;
         }
 
-        i32 loading_phase = loading_idx % 3;
-        i32 img_idx = focus_idx;
+        // Spiral around the viewed image and the thumbnail range.
+        i32 img_idx = 0;
+        i32 loading_phase = loading_idx % 2;
+        i32 offset = loading_idx / 2;
         if(loading_phase == 0)
         {
-          img_idx = focus_idx - (loading_idx + 2) / 3;
+          if(offset % 2 == 0)
+          {
+            img_idx = focus_idx - (offset + 1) / 2;
+          }
+          else
+          {
+            img_idx = focus_idx + (offset + 1) / 2;
+          }
         }
         else if(loading_phase == 1)
         {
-          img_idx = focus_idx + (loading_idx + 2) / 3;
-        }
-        else if(loading_phase == 2)
-        {
-          img_idx = range_start_idx + loading_idx / 3;
+          img_idx = range_start_idx + offset;
           i32 extra_range_idx = img_idx - range_end_idx;
           if(extra_range_idx > 0)
           {
-            // TODO: Double-check this logic.
             if(extra_range_idx % 2 == 0)
             {
-              img_idx = range_start_idx - extra_range_idx / 2;
+              img_idx = range_start_idx - (extra_range_idx + 1) / 2;
             }
             else
             {
-              img_idx = range_end_idx + extra_range_idx / 2;
+              img_idx = range_end_idx + (extra_range_idx + 1) / 2;
             }
           }
         }
-        img_idx = i32_wrap_upto(img_idx, data->img_count);
+        img_idx = i32_wrap_upto(img_idx, shared->img_count);
 
-        img_entry_t* img = &data->img_entries[img_idx];
+#if 0
+        printf("Loader %d load %d offset %d phase %d [%5d/%d]\n", thread_idx,
+            loading_idx, offset, loading_phase, img_idx + 1, shared->img_count);
+#endif
+
+        img_entry_t* img = &shared->img_entries[img_idx];
         b32 load_this = false;
 
-        pthread_mutex_lock(&data->mutex);
+        // TODO: Use compare-exchange.
+        pthread_mutex_lock(&shared->mutex);
         if(img->load_state == LOAD_STATE_UNLOADED)
         {
           load_this = true;
@@ -241,11 +258,11 @@ internal void* loader_fun(void* raw_data)
 #if 0
           printf("Loader %d [%5d/%d] %s\n",
               thread_idx,
-              img_idx + 1, data->img_count,
+              img_idx + 1, shared->img_count,
               img->path.data);
 #endif
         }
-        pthread_mutex_unlock(&data->mutex);
+        pthread_mutex_unlock(&shared->mutex);
 
         if(load_this)
         {
@@ -269,7 +286,7 @@ internal void* loader_fun(void* raw_data)
             img->pixels = test_texels;
             img->w = test_texture_w;
             img->h = test_texture_h;
-            img->texture_id = data->test_texture_id;
+            img->texture_id = shared->test_texture_id;
           }
 
           // Look for PNG metadata.
@@ -364,10 +381,6 @@ internal void* loader_fun(void* raw_data)
         }
       }
     }
-
-    // printf("Loader %d: Waiting on semaphore.\n", thread_idx);
-    sem_wait(data->semaphore);
-    // printf("Loader %d: Got signal!\n", thread_idx);
   }
 
   return 0;
@@ -562,8 +575,15 @@ int main(int argc, char** argv)
 
         // sudo pacman -S terminus-font
         // xset +fp /usr/share/fonts/misc
-        Font font = XLoadFont(display, "-*-terminus-*-*-*-*-32-*-*-*-*-*-*-*");
-        XSetFont(display, gc, font);
+        XFontStruct* font = XLoadQueryFont(display, "-*-terminus-*-*-*-*-32-*-*-*-*-*-*-*");
+        if(font)
+        {
+          XSetFont(display, gc, font->fid);
+        }
+        else
+        {
+          fprintf(stderr, "Terminus font not available.\n");
+        }
 
         Cursor empty_cursor;
         {
@@ -625,12 +645,10 @@ int main(int argc, char** argv)
 
         pthread_mutex_t loader_mutex = {0};
         pthread_mutex_init(&loader_mutex, 0);
-        sem_t* loader_semaphore = malloc_array(1, sem_t);
-        sem_init(loader_semaphore, 0, 0);
+        sem_t* loader_semaphores = malloc_array(loader_count, sem_t);
 
         zero_struct(*shared_loader_data);
         shared_loader_data->mutex = loader_mutex;
-        shared_loader_data->semaphore = loader_semaphore;
         shared_loader_data->img_count = img_count;
         shared_loader_data->img_entries = img_entries;
         shared_loader_data->test_texture_id = test_texture_id;
@@ -639,7 +657,9 @@ int main(int argc, char** argv)
             loader_idx < loader_count;
             ++loader_idx)
         {
+          sem_init(&loader_semaphores[loader_idx], 0, 0);
           loader_data[loader_idx].thread_idx = loader_idx + 1;
+          loader_data[loader_idx].semaphore = &loader_semaphores[loader_idx];
           loader_data[loader_idx].shared = shared_loader_data;
           pthread_create(&loader_threads[loader_idx], 0, loader_fun, &loader_data[loader_idx]);
         }
@@ -1509,9 +1529,9 @@ int main(int argc, char** argv)
             }
 
             i32 first_visible_row = (i32)sidebar_scroll_rows;
-            i32 last_visible_row = (i32)(sidebar_scroll_rows + win_h / thumbnail_h + 1);
+            i32 one_past_last_visible_row = (i32)(sidebar_scroll_rows + win_h / thumbnail_h + 1);
             i32 first_visible_thumbnail_idx = max(0, first_visible_row * thumbnail_columns);
-            i32 last_visible_thumbnail_idx = min(img_count, last_visible_row * thumbnail_columns);
+            i32 last_visible_thumbnail_idx = min(img_count, one_past_last_visible_row * thumbnail_columns) - 1;
             if(0
                 || viewing_img_idx != shared_loader_data->viewing_img_idx
                 || first_visible_thumbnail_idx != shared_loader_data->first_visible_thumbnail_idx
@@ -1523,7 +1543,7 @@ int main(int argc, char** argv)
               shared_loader_data->first_visible_thumbnail_idx = first_visible_thumbnail_idx;
               shared_loader_data->last_visible_thumbnail_idx = last_visible_thumbnail_idx;
               pthread_mutex_unlock(&shared_loader_data->mutex);
-              for_count(i, loader_count) { sem_post(loader_semaphore); }
+              for_count(i, loader_count) { sem_post(&loader_semaphores[i]); }
             }
 
 #if 0
@@ -1610,7 +1630,7 @@ int main(int argc, char** argv)
               glColor3f(1.0f, 1.0f, 1.0f);
               hovered_thumbnail_idx = -1;
               for(i32 img_idx = first_visible_thumbnail_idx;
-                  img_idx < last_visible_thumbnail_idx;
+                  img_idx <= last_visible_thumbnail_idx;
                   ++img_idx)
               {
                 img_entry_t* img = &img_entries[img_idx];
