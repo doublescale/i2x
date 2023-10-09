@@ -148,8 +148,6 @@ typedef struct img_entry_t
 
 typedef struct
 {
-  pthread_mutex_t mutex;
-
   i32 img_count;
   img_entry_t* img_entries;
 
@@ -173,208 +171,181 @@ internal void* loader_fun(void* raw_data)
   i32 thread_idx = data->thread_idx;
   shared_loader_data_t* shared = data->shared;
 
-  i32 focus_idx = -1;
-  i32 range_start_idx = -1;
-  i32 range_end_idx = -1;
-
   for(;;)
   {
-    b32 do_work = false;
+    i32 viewing_img_idx = shared->viewing_img_idx;
+    i32 range_start_idx = shared->first_visible_thumbnail_idx;
+    i32 range_end_idx = shared->last_visible_thumbnail_idx;
 
-    pthread_mutex_lock(&shared->mutex);
-    do_work = 0
-      || focus_idx != shared->viewing_img_idx
-      || range_start_idx != shared->first_visible_thumbnail_idx
-      || range_end_idx != shared->last_visible_thumbnail_idx;
-    focus_idx = shared->viewing_img_idx;
-    range_start_idx = shared->first_visible_thumbnail_idx;
-    range_end_idx = shared->last_visible_thumbnail_idx;
-    pthread_mutex_unlock(&shared->mutex);
+    // printf("Loader %d focus %d range_start %d range_end %d\n", thread_idx, viewing_img_idx, range_start_idx, range_end_idx);
 
-    if(do_work)
+    i32 max_loading_idx = min(shared->img_count + 1, 800);
+    // i32 max_loading_idx = min(shared->img_count + 1, 40);
+    // i32 max_loading_idx = min(shared->img_count + 1, 4000);
+    for(i32 loading_idx = 0;
+        loading_idx < max_loading_idx;
+        ++loading_idx)
     {
-      // printf("Loader %d focus %d range_start %d range_end %d\n", thread_idx, focus_idx, range_start_idx, range_end_idx);
-
-      for(i32 loading_idx = 0;
-          // loading_idx < 800;
-          // loading_idx < 80;
-          loading_idx < 4000;
-          // loading_idx < 3;
-          ++loading_idx)
+      if(0
+          || viewing_img_idx != shared->viewing_img_idx
+          || range_start_idx != shared->first_visible_thumbnail_idx
+          || range_end_idx != shared->last_visible_thumbnail_idx
+        )
       {
-        if(0
-            || focus_idx != shared->viewing_img_idx
-            || range_start_idx != shared->first_visible_thumbnail_idx
-            || range_end_idx != shared->last_visible_thumbnail_idx
-          )
-        {
-          break;
-        }
+        break;
+      }
 
-        // Spiral around the viewed image and the thumbnail range.
-        i32 img_idx = 0;
-        i32 loading_phase = loading_idx % 2;
-        i32 offset = loading_idx / 2;
-        if(loading_phase == 0)
+      // Load the viewed image, then the thumbnail range, then spiral around the thumbnail range.
+      i32 img_idx = 0;
+      if(loading_idx == 0)
+      {
+        img_idx = viewing_img_idx;
+      }
+      else
+      {
+        img_idx = range_start_idx + loading_idx - 1;
+        i32 extra_range_idx = img_idx - range_end_idx;
+        if(extra_range_idx > 0)
         {
-          if(offset % 2 == 0)
+          if(extra_range_idx % 2 == 0)
           {
-            img_idx = focus_idx - (offset + 1) / 2;
+            img_idx = range_start_idx - (extra_range_idx + 1) / 2;
           }
           else
           {
-            img_idx = focus_idx + (offset + 1) / 2;
-          }
-        }
-        else if(loading_phase == 1)
-        {
-          img_idx = range_start_idx + offset;
-          i32 extra_range_idx = img_idx - range_end_idx;
-          if(extra_range_idx > 0)
-          {
-            if(extra_range_idx % 2 == 0)
-            {
-              img_idx = range_start_idx - (extra_range_idx + 1) / 2;
-            }
-            else
-            {
-              img_idx = range_end_idx + (extra_range_idx + 1) / 2;
-            }
+            img_idx = range_end_idx + (extra_range_idx + 1) / 2;
           }
         }
         img_idx = i32_wrap_upto(img_idx, shared->img_count);
+      }
 
+      // printf("Loader %d loading_idx %d [%5d/%d]\n", thread_idx, loading_idx, img_idx + 1, shared->img_count);
+
+      img_entry_t* img = &shared->img_entries[img_idx];
+
+      if(__sync_bool_compare_and_swap(&img->load_state, LOAD_STATE_UNLOADED, LOAD_STATE_LOADING))
+      {
 #if 0
-        printf("Loader %d load %d offset %d phase %d [%5d/%d]\n", thread_idx,
-            loading_idx, offset, loading_phase, img_idx + 1, shared->img_count);
+        printf("Loader %d [%5d/%d] %s\n",
+            thread_idx,
+            img_idx + 1, shared->img_count,
+            img->path.data);
 #endif
 
-        img_entry_t* img = &shared->img_entries[img_idx];
-
-        if(__sync_bool_compare_and_swap(&img->load_state, LOAD_STATE_UNLOADED, LOAD_STATE_LOADING))
+        i32 original_channel_count = 0;
+        img->data = read_file((char*)img->path.data);
+        img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
+            &img->w, &img->h, &original_channel_count, 4);
+        if(!img->pixels)
         {
-#if 0
-          printf("Loader %d [%5d/%d] %s\n",
-              thread_idx,
-              img_idx + 1, shared->img_count,
-              img->path.data);
-#endif
-
-          i32 original_channel_count = 0;
-          img->data = read_file((char*)img->path.data);
-          img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
-              &img->w, &img->h, &original_channel_count, 4);
-          if(!img->pixels)
+          // TODO: stbi loading an image from memory seems to fail for BMPs.
+          img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, &original_channel_count, 4);
+          if(img->pixels)
           {
-            // TODO: stbi loading an image from memory seems to fail for BMPs.
-            img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, &original_channel_count, 4);
-            if(img->pixels)
-            {
-              fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
-            }
+            fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
           }
+        }
 
-          // Look for PNG metadata.
-          if(img->data.size >= 16)
+        // Look for PNG metadata.
+        if(img->data.size >= 16)
+        {
+          u8* ptr = img->data.data;
+          u8* data_end = img->data.data + img->data.size;
+          b32 bad = false;
+
+          // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
+          bad |= (*ptr++ != 0x89);
+          bad |= (*ptr++ != 'P');
+          bad |= (*ptr++ != 'N');
+          bad |= (*ptr++ != 'G');
+          bad |= (*ptr++ != 0x0d);
+          bad |= (*ptr++ != 0x0a);
+          bad |= (*ptr++ != 0x1a);
+          bad |= (*ptr++ != 0x0a);
+
+          while(!bad)
           {
-            u8* ptr = img->data.data;
-            u8* data_end = img->data.data + img->data.size;
-            b32 bad = false;
+            // Convert big-endian to little-endian.
+            u32 chunk_size = 0;
+            chunk_size |= *ptr++;
+            chunk_size <<= 8;
+            chunk_size |= *ptr++;
+            chunk_size <<= 8;
+            chunk_size |= *ptr++;
+            chunk_size <<= 8;
+            chunk_size |= *ptr++;
 
-            // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
-            bad |= (*ptr++ != 0x89);
-            bad |= (*ptr++ != 'P');
-            bad |= (*ptr++ != 'N');
-            bad |= (*ptr++ != 'G');
-            bad |= (*ptr++ != 0x0d);
-            bad |= (*ptr++ != 0x0a);
-            bad |= (*ptr++ != 0x1a);
-            bad |= (*ptr++ != 0x0a);
-
-            while(!bad)
+            // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+            if(ptr[0] == 't'
+                && ptr[1] == 'E'
+                && ptr[2] == 'X'
+                && ptr[3] == 't')
             {
-              // Convert big-endian to little-endian.
-              u32 chunk_size = 0;
-              chunk_size |= *ptr++;
-              chunk_size <<= 8;
-              chunk_size |= *ptr++;
-              chunk_size <<= 8;
-              chunk_size |= *ptr++;
-              chunk_size <<= 8;
-              chunk_size |= *ptr++;
-
-              // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
-              if(ptr[0] == 't'
-                  && ptr[1] == 'E'
-                  && ptr[2] == 'X'
-                  && ptr[3] == 't')
+              if(ptr + 4 + chunk_size <= data_end)
               {
-                if(ptr + 4 + chunk_size <= data_end)
+                i32 key_len = 0;
+                while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
                 {
-                  i32 key_len = 0;
-                  while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
-                  {
-                    ++key_len;
-                  }
-                  i32 value_len = chunk_size - key_len - 1;
-
-                  str_t key = { ptr + 4, key_len };
-                  str_t value = { ptr + 4 + key_len + 1, value_len };
-                  // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
-
-                  if(!img->generation_parameters.size)
-                  {
-                    img->generation_parameters = value;
-                  }
+                  ++key_len;
                 }
-                else
+                i32 value_len = chunk_size - key_len - 1;
+
+                str_t key = { ptr + 4, key_len };
+                str_t value = { ptr + 4 + key_len + 1, value_len };
+                // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+                if(!img->generation_parameters.size)
                 {
-                  bad = true;
+                  img->generation_parameters = value;
                 }
               }
-
-              ptr += 4 + chunk_size + 4;
-
-              bad |= (ptr + 8 >= data_end);
+              else
+              {
+                bad = true;
+              }
             }
-          }
 
-          if(!img->pixels)
-          {
-            img->pixels = test_texels;
-            img->w = test_texture_w;
-            img->h = test_texture_h;
-            img->texture_id = shared->test_texture_id;
+            ptr += 4 + chunk_size + 4;
 
-            img->load_state = LOAD_STATE_LOAD_FAILED;
+            bad |= (ptr + 8 >= data_end);
           }
-          else
-          {
+        }
+
+        if(!img->pixels)
+        {
+          img->pixels = test_texels;
+          img->w = test_texture_w;
+          img->h = test_texture_h;
+          img->texture_id = shared->test_texture_id;
+
+          img->load_state = LOAD_STATE_LOAD_FAILED;
+        }
+        else
+        {
 #if 1
-            // printf("Channels: %d\n", original_channel_count);
-            if(original_channel_count == 4)
+          // printf("Channels: %d\n", original_channel_count);
+          if(original_channel_count == 4)
+          {
+            // Premultiply alpha.
+            // printf("Premultiplying alpha.\n");
+            for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
             {
-              // Premultiply alpha.
-              // printf("Premultiplying alpha.\n");
-              for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
+              if(img->pixels[4*i + 3] != 255)
               {
-                if(img->pixels[4*i + 3] != 255)
-                {
-                  r32 r = img->pixels[4*i + 0] / 255.0f;
-                  r32 g = img->pixels[4*i + 1] / 255.0f;
-                  r32 b = img->pixels[4*i + 2] / 255.0f;
-                  r32 a = img->pixels[4*i + 3] / 255.0f;
+                r32 r = img->pixels[4*i + 0] / 255.0f;
+                r32 g = img->pixels[4*i + 1] / 255.0f;
+                r32 b = img->pixels[4*i + 2] / 255.0f;
+                r32 a = img->pixels[4*i + 3] / 255.0f;
 
-                  img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
-                  img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
-                  img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
-                }
+                img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
+                img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
+                img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
               }
             }
+          }
 #endif
 
-            img->load_state = LOAD_STATE_LOADED_INTO_RAM;
-          }
+          img->load_state = LOAD_STATE_LOADED_INTO_RAM;
         }
       }
     }
@@ -770,13 +741,9 @@ int main(int argc, char** argv)
         i32 loader_count = array_count(loader_threads);
         shared_loader_data_t* shared_loader_data = malloc_array(1, shared_loader_data_t);
         loader_data_t* loader_data = malloc_array(loader_count, loader_data_t);
-
-        pthread_mutex_t loader_mutex = {0};
-        pthread_mutex_init(&loader_mutex, 0);
         sem_t* loader_semaphores = malloc_array(loader_count, sem_t);
 
         zero_struct(*shared_loader_data);
-        shared_loader_data->mutex = loader_mutex;
         shared_loader_data->img_count = img_count;
         shared_loader_data->img_entries = img_entries;
         shared_loader_data->test_texture_id = test_texture_id;
@@ -1531,6 +1498,7 @@ int main(int argc, char** argv)
                     {
                       thumbnail_w *= exp2f(scroll_y);
                       thumbnail_h = thumbnail_w;
+                      scroll_thumbnail_into_view = true;
                     }
                   }
                   else if(shift_held)
@@ -1646,14 +1614,15 @@ int main(int argc, char** argv)
             if(scroll_thumbnail_into_view)
             {
               i32 thumbnail_row = viewing_img_idx / thumbnail_columns;
-              if((thumbnail_row - sidebar_scroll_rows + 1) * thumbnail_h > win_h)
-              {
-                sidebar_scroll_rows = thumbnail_row + 1 - win_h / thumbnail_h;
-              }
-              if(thumbnail_row - sidebar_scroll_rows < 0)
-              {
-                sidebar_scroll_rows = thumbnail_row;
-              }
+
+              // TODO: Fix this so clicking on the first or last row doesn't mess up.
+              // i32 extra_rows = (win_h >= 2 * thumbnail_h) ? 1 : 0;
+              i32 extra_rows = 0;
+
+              sidebar_scroll_rows = clamp(
+                  max(0, thumbnail_row + 1 - win_h / thumbnail_h + extra_rows),
+                  thumbnail_row - extra_rows,
+                  sidebar_scroll_rows);
             }
 
             i32 first_visible_row = (i32)sidebar_scroll_rows;
@@ -1666,11 +1635,9 @@ int main(int argc, char** argv)
                 || last_visible_thumbnail_idx != shared_loader_data->last_visible_thumbnail_idx
               )
             {
-              pthread_mutex_lock(&shared_loader_data->mutex);
               shared_loader_data->viewing_img_idx = viewing_img_idx;
               shared_loader_data->first_visible_thumbnail_idx = first_visible_thumbnail_idx;
               shared_loader_data->last_visible_thumbnail_idx = last_visible_thumbnail_idx;
-              pthread_mutex_unlock(&shared_loader_data->mutex);
               for_count(i, loader_count) { sem_post(&loader_semaphores[i]); }
             }
 
