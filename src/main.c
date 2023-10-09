@@ -181,10 +181,6 @@ internal void* loader_fun(void* raw_data)
   {
     b32 do_work = false;
 
-    // printf("Loader %d: Waiting on semaphore.\n", thread_idx);
-    sem_wait(data->semaphore);
-    // printf("Loader %d: Got signal!\n", thread_idx);
-
     pthread_mutex_lock(&shared->mutex);
     do_work = 0
       || focus_idx != shared->viewing_img_idx
@@ -194,9 +190,6 @@ internal void* loader_fun(void* raw_data)
     range_start_idx = shared->first_visible_thumbnail_idx;
     range_end_idx = shared->last_visible_thumbnail_idx;
     pthread_mutex_unlock(&shared->mutex);
-
-    i32 focus_offset = 1;
-    i32 range_offset = 0;
 
     if(do_work)
     {
@@ -385,6 +378,10 @@ internal void* loader_fun(void* raw_data)
         }
       }
     }
+
+    // printf("Loader %d: Waiting on semaphore.\n", thread_idx);
+    sem_wait(data->semaphore);
+    // printf("Loader %d: Got signal!\n", thread_idx);
   }
 
   return 0;
