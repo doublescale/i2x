@@ -33,6 +33,7 @@
 #undef GL_GLEXT_PROTOTYPES
 #undef GLX_GLXEXT_PROTOTYPES
 // #include <GL/glxext.h>
+// #include <GL/glext.h>
 
 #include "lib/stb_image.h"
 
@@ -122,9 +123,10 @@ enum
   LOAD_STATE_UNLOADED = 0,
   LOAD_STATE_LOADING,
   LOAD_STATE_LOADED_INTO_RAM,
+  LOAD_STATE_LOAD_FAILED,
 };
 
-typedef struct
+typedef struct img_entry_t
 {
   str_t path;
   str_t data;
@@ -134,8 +136,14 @@ typedef struct
   i32 w;
   i32 h;
   u8* pixels;
-  volatile u32 load_state;
   GLuint texture_id;
+  u32 vram_bytes;
+
+  struct img_entry_t* lru_prev;
+  struct img_entry_t* lru_next;
+
+  // This should stay at the end so zeroing the memory updates this last.
+  volatile u32 load_state;
 } img_entry_t;
 
 typedef struct
@@ -195,7 +203,10 @@ internal void* loader_fun(void* raw_data)
       // printf("Loader %d focus %d range_start %d range_end %d\n", thread_idx, focus_idx, range_start_idx, range_end_idx);
 
       for(i32 loading_idx = 0;
-          loading_idx < 800;
+          // loading_idx < 800;
+          // loading_idx < 80;
+          loading_idx < 4000;
+          // loading_idx < 3;
           ++loading_idx)
       {
         if(0
@@ -246,28 +257,17 @@ internal void* loader_fun(void* raw_data)
 #endif
 
         img_entry_t* img = &shared->img_entries[img_idx];
-        b32 load_this = false;
 
-        // TODO: Use compare-exchange.
-        pthread_mutex_lock(&shared->mutex);
-        if(img->load_state == LOAD_STATE_UNLOADED)
+        if(__sync_bool_compare_and_swap(&img->load_state, LOAD_STATE_UNLOADED, LOAD_STATE_LOADING))
         {
-          load_this = true;
-          img->load_state = LOAD_STATE_LOADING;
-
 #if 0
           printf("Loader %d [%5d/%d] %s\n",
               thread_idx,
               img_idx + 1, shared->img_count,
               img->path.data);
 #endif
-        }
-        pthread_mutex_unlock(&shared->mutex);
 
-        if(load_this)
-        {
           i32 original_channel_count = 0;
-
           img->data = read_file((char*)img->path.data);
           img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
               &img->w, &img->h, &original_channel_count, 4);
@@ -279,14 +279,6 @@ internal void* loader_fun(void* raw_data)
             {
               fprintf(stderr, "stbi had to load \"%s\" from path, not memory!\n", img->path.data);
             }
-          }
-
-          if(!img->pixels)
-          {
-            img->pixels = test_texels;
-            img->w = test_texture_w;
-            img->h = test_texture_h;
-            img->texture_id = shared->test_texture_id;
           }
 
           // Look for PNG metadata.
@@ -354,30 +346,42 @@ internal void* loader_fun(void* raw_data)
             }
           }
 
-#if 1
-          // printf("Channels: %d\n", original_channel_count);
-          if(original_channel_count == 4)
+          if(!img->pixels)
           {
-            // Premultiply alpha.
-            // printf("Premultiplying alpha.\n");
-            for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
-            {
-              if(img->pixels[4*i + 3] != 255)
-              {
-                r32 r = img->pixels[4*i + 0] / 255.0f;
-                r32 g = img->pixels[4*i + 1] / 255.0f;
-                r32 b = img->pixels[4*i + 2] / 255.0f;
-                r32 a = img->pixels[4*i + 3] / 255.0f;
+            img->pixels = test_texels;
+            img->w = test_texture_w;
+            img->h = test_texture_h;
+            img->texture_id = shared->test_texture_id;
 
-                img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
-                img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
-                img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
+            img->load_state = LOAD_STATE_LOAD_FAILED;
+          }
+          else
+          {
+#if 1
+            // printf("Channels: %d\n", original_channel_count);
+            if(original_channel_count == 4)
+            {
+              // Premultiply alpha.
+              // printf("Premultiplying alpha.\n");
+              for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
+              {
+                if(img->pixels[4*i + 3] != 255)
+                {
+                  r32 r = img->pixels[4*i + 0] / 255.0f;
+                  r32 g = img->pixels[4*i + 1] / 255.0f;
+                  r32 b = img->pixels[4*i + 2] / 255.0f;
+                  r32 a = img->pixels[4*i + 3] / 255.0f;
+
+                  img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
+                  img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
+                  img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
+                }
               }
             }
-          }
 #endif
 
-          img->load_state = LOAD_STATE_LOADED_INTO_RAM;
+            img->load_state = LOAD_STATE_LOADED_INTO_RAM;
+          }
         }
       }
     }
@@ -386,30 +390,157 @@ internal void* loader_fun(void* raw_data)
   return 0;
 }
 
-internal b32 upload_img_texture(img_entry_t* img)
+internal b32 upload_img_texture(img_entry_t* img, b32 linear_sampling, i64* vram_bytes_used)
 {
+  u64 nsecs_start = get_nanoseconds();
+  i32 num_deletions = 0;
+  i32 num_uploads = 0;
+
   b32 result = false;
+
+  static img_entry_t* lru_first = 0;
+  static img_entry_t* lru_last = 0;
 
   if(!img->texture_id)
   {
     if(img->load_state == LOAD_STATE_LOADED_INTO_RAM)
     {
+      i64 texture_bytes = 4 * img->w * img->h;
+
+      i64 vram_byte_limit = 1 * 1024 * 1024 * 1024;
+      while(*vram_bytes_used + texture_bytes > vram_byte_limit)
+      {
+        img_entry_t* unload = lru_last;
+        lru_last = unload->lru_prev;
+        if(lru_last)
+        {
+          lru_last->lru_next = 0;
+        }
+
+        // printf("Unloading texture ID %u\n", unload->texture_id);
+
+        glDeleteTextures(1, &unload->texture_id);
+        ++num_deletions;
+        *vram_bytes_used -= unload->vram_bytes;
+        unload->vram_bytes = 0;
+        unload->texture_id = 0;
+        unload->lru_prev = 0;
+        unload->lru_next = 0;
+
+        free(unload->data.data);
+        stbi_image_free(unload->pixels);
+        zero_struct(unload->data);
+        zero_struct(unload->generation_parameters);
+        unload->w = 0;
+        unload->h = 0;
+        unload->pixels = 0;
+        unload->load_state = LOAD_STATE_UNLOADED;
+      }
+
       glGenTextures(1, &img->texture_id);
 
       glBindTexture(GL_TEXTURE_2D, img->texture_id);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+      if(linear_sampling)
+      {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+      }
+      else
+      {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      }
       glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
           img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
       glGenerateMipmap(GL_TEXTURE_2D);
+      ++num_uploads;
+
+      img->vram_bytes = texture_bytes;
+      *vram_bytes_used += texture_bytes;
+      GLint tmp = 0;
+      // printf("VRAM used: approx. %.0f MiB\n", (r64)*vram_bytes_used / (1024.0 * 1024.0));
+
+      // glGetIntegerv(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &tmp);
+      // printf("  GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX:         %d kiB\n", tmp);
+
+      // glGetIntegerv(GL_GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX, &tmp);
+      // printf("  GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX:   %d kiB\n", tmp);
+
+      // glGetIntegerv(GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX, &tmp);
+      // printf("  GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX: %d kiB\n", tmp);
+
+      // glGetIntegerv(GL_GPU_MEMORY_INFO_EVICTION_COUNT_NVX, &tmp);
+      // printf("  GPU_MEMORY_INFO_EVICTION_COUNT_NVX: %d\n", tmp);
+
+      // glGetIntegerv(GL_GPU_MEMORY_INFO_EVICTED_MEMORY_NVX, &tmp);
+      // printf("  GPU_MEMORY_INFO_EVICTED_MEMORY_NVX: %d kiB\n", tmp);
     }
     else
     {
       result = true;
     }
   }
+
+  if(img->texture_id)
+  {
+    if(!lru_first)
+    {
+      lru_first = img;
+      lru_last = img;
+    }
+    else
+    {
+      if(img != lru_first)
+      {
+        if(img == lru_last)
+        {
+          lru_last = img->lru_prev;
+        }
+
+        if(img->lru_next)
+        {
+          img->lru_next->lru_prev = img->lru_prev;
+        }
+        if(img->lru_prev)
+        {
+          img->lru_prev->lru_next = img->lru_next;
+        }
+
+        lru_first->lru_prev = img;
+        img->lru_next = lru_first;
+        img->lru_prev = 0;
+        lru_first = img;
+      }
+    }
+  }
+
+#if 0
+  {
+    printf("LRU chain:");
+    img_entry_t* detected_last = 0;
+    for(img_entry_t* i = lru_first; i; i = i->lru_next)
+    {
+      printf(" %u", i->texture_id);
+      detected_last = i;
+    }
+    if(lru_last != detected_last) { printf(", WRONG last: %u", lru_last->texture_id); }
+    printf("\n");
+  }
+#endif
+
+#if 0
+  u64 nsecs_end = get_nanoseconds();
+  u64 nsecs_taken = nsecs_end - nsecs_start;
+  if(nsecs_taken > 1 * 1000 * 1000)
+  {
+    printf("upload_img_texture took %.0f ms (%d deletions, %d uploads)\n",
+        1e-6 * (r64)nsecs_taken,
+        num_deletions,
+        num_uploads);
+  }
+#endif
 
   return result;
 }
@@ -638,7 +769,7 @@ int main(int argc, char** argv)
           }
         }
 
-        pthread_t loader_threads[8] = {0};
+        pthread_t loader_threads[7] = {0};
         i32 loader_count = array_count(loader_threads);
         shared_loader_data_t* shared_loader_data = malloc_array(1, shared_loader_data_t);
         loader_data_t* loader_data = malloc_array(loader_count, loader_data_t);
@@ -667,6 +798,7 @@ int main(int argc, char** argv)
         i32 win_w = WINDOW_INIT_W;
         i32 win_h = WINDOW_INIT_H;
         GLuint texture_id = 0;
+        i64 vram_bytes_used = 0;
 
         r32 time = 0;
         u32 frames_since_last_print = 0;
@@ -1402,7 +1534,6 @@ int main(int argc, char** argv)
                     {
                       thumbnail_w *= exp2f(scroll_y);
                       thumbnail_h = thumbnail_w;
-                      scroll_thumbnail_into_view = true;
                     }
                   }
                   else if(shift_held)
@@ -1634,7 +1765,7 @@ int main(int argc, char** argv)
                   ++img_idx)
               {
                 img_entry_t* img = &img_entries[img_idx];
-                still_loading |= upload_img_texture(img);
+                still_loading |= upload_img_texture(img, linear_sampling, &vram_bytes_used);
 
                 i32 sidebar_col = img_idx % thumbnail_columns;
                 i32 sidebar_row = img_idx / thumbnail_columns;
@@ -1708,7 +1839,7 @@ int main(int argc, char** argv)
             }
 
             img_entry_t* img = &img_entries[viewing_img_idx];
-            still_loading |= upload_img_texture(img);
+            still_loading |= upload_img_texture(img, linear_sampling, &vram_bytes_used);
 
             i32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
             i32 image_region_y0 = show_info ? info_height : 0;
