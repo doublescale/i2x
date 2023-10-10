@@ -96,17 +96,6 @@ internal str_t wrap_str(char* z)
   return result;
 }
 
-internal b32 zstr_eq(char* a, char* b)
-{
-  b32 result = true;
-  while(*a && *b && result)
-  {
-    result &= (*a++ == *b++);
-  }
-  result &= (*a++ == *b++);
-  return result;
-}
-
 internal b32 str_eq(str_t a, str_t b)
 {
   b32 result = true;
@@ -127,6 +116,70 @@ internal b32 str_eq(str_t a, str_t b)
     result = false;
   }
   return result;
+}
+
+internal b32 str_eq_zstr(str_t a, char* b)
+{
+  b32 result = true;
+
+  for(u64 idx = 0;
+      idx < a.size;
+      ++idx)
+  {
+    if(b[idx] == 0 || a.data[idx] != b[idx])
+    {
+      result = false;
+      break;
+    }
+  }
+
+  if(result && b[a.size] != 0)
+  {
+    result = false;
+  }
+
+  return result;
+}
+
+internal b32 zstr_eq(char* a, char* b)
+{
+  b32 result = true;
+  while(*a && *b && result)
+  {
+    result &= (*a++ == *b++);
+  }
+  result &= (*a++ == *b++);
+  return result;
+}
+
+internal i32 zstr_length(const char* txt)
+{
+  i32 result = 0;
+
+  if(txt)
+  {
+    while(*txt)
+    {
+      ++result;
+      ++txt;
+    }
+  }
+
+  return result;
+}
+
+internal str_t str_remove_suffix(str_t input, str_t suffix)
+{
+  if(input.size >= suffix.size)
+  {
+    str_t input_suffix = { input.data + input.size - suffix.size, suffix.size };
+    if(str_eq(input_suffix, suffix))
+    {
+      input.size -= suffix.size;
+    }
+  }
+
+  return input;
 }
 
 // If successful, string is zero-terminated (not included in size).
@@ -216,6 +269,11 @@ internal b32 bytes_eq(u64 size, void* a, void* b)
 internal b32 is_ascii(u8 c)
 {
   return (c & 0x80) == 0;
+}
+
+internal b32 is_digit(u8 c)
+{
+  return c >= '0' && c <= '9';
 }
 
 internal b32 is_printable(u8 c)

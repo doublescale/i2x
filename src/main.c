@@ -104,6 +104,31 @@ internal void update_scroll_increments(i32 class_count, XIAnyClassInfo** classes
   }
 }
 
+internal b32 advance_if_prefix_matches(u8** input, u8* input_end, char* prefix)
+{
+  b32 matches = true;
+  u8* ptr = *input;
+
+  while(*prefix)
+  {
+    if(ptr >= input_end || *ptr != *prefix)
+    {
+      matches = false;
+      break;
+    }
+
+    ++prefix;
+    ++ptr;
+  }
+
+  if(matches)
+  {
+    *input = ptr;
+  }
+
+  return matches;
+}
+
 static u8 test_texels[] = {
   1, 1, 1, 255,
   255, 0, 0, 255,
@@ -132,6 +157,14 @@ typedef struct img_entry_t
   str_t data;
 
   str_t generation_parameters;
+  str_t positive_prompt;
+  str_t negative_prompt;
+  str_t seed;
+  str_t batch_size;
+  str_t model;
+  str_t sampler;
+  str_t sampling_steps;
+  str_t cfg;
 
   i32 w;
   i32 h;
@@ -293,6 +326,162 @@ internal void* loader_fun(void* raw_data)
                 str_t key = { ptr + 4, key_len };
                 str_t value = { ptr + 4 + key_len + 1, value_len };
                 // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+                u8* value_start = value.data;
+                u8* value_end = value.data + value.size;
+                if(str_eq_zstr(key, "prompt"))
+                {
+                  // comfyanonymous/ComfyUI JSON.
+                  // TODO: Tokenize properly, or string contents might get mistaken for object keys,
+                  //       like {"seed": "tricky \"seed:"}
+
+                  for(u8* p = value_start;
+                      p < value_end;
+                     )
+                  {
+                    if(0) {}
+                    else if(advance_if_prefix_matches(&p, value_end, "\"seed\"")
+                        || advance_if_prefix_matches(&p, value_end, "\"noise_seed\""))
+                    {
+                      while(p < value_end && !is_digit(*p)) { ++p; }
+                      str_t v = {p};
+                      while(p < value_end && is_digit(*p)) { ++p; }
+                      v.size = p - v.data;
+
+                      img->seed = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "\"steps\""))
+                    {
+                      while(p < value_end && !is_digit(*p)) { ++p; }
+                      str_t v = {p};
+                      while(p < value_end && is_digit(*p)) { ++p; }
+                      v.size = p - v.data;
+
+                      img->sampling_steps = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "\"cfg\""))
+                    {
+                      while(p < value_end && !(is_digit(*p) || *p == '.')) { ++p; }
+                      str_t v = {p};
+                      while(p < value_end && (is_digit(*p) || *p == '.')) { ++p; }
+                      v.size = p - v.data;
+
+                      img->cfg = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
+                    {
+                      while(p < value_end && *p != '"') { ++p; }
+                      ++p;
+                      str_t v = {p};
+                      while(p < value_end && *p != '"') { ++p; }
+                      v.size = p - v.data;
+
+                      img->sampler = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
+                    {
+                      while(p < value_end && *p != '"') { ++p; }
+                      ++p;
+                      str_t v = {p};
+                      while(p < value_end && *p != '"') { ++p; }
+                      v.size = p - v.data;
+
+                      v = str_remove_suffix(v, str(".ckpt"));
+                      v = str_remove_suffix(v, str(".safetensors"));
+
+                      img->model = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
+                    {
+                      while(p < value_end && !is_digit(*p)) { ++p; }
+                      str_t v = {p};
+                      while(p < value_end && is_digit(*p)) { ++p; }
+                      v.size = p - v.data;
+
+                      img->batch_size = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
+                    {
+                      while(p < value_end && *p != '"') { ++p; }
+                      ++p;
+                      str_t v = {p};
+                      while(p < value_end && *p != '"') { ++p; }
+                      v.size = p - v.data;
+
+                      if(!img->positive_prompt.data) { img->positive_prompt = v; }
+                      else if(!img->negative_prompt.data) { img->negative_prompt = v; }
+                    }
+                    else
+                    {
+                      ++p;
+                    }
+                  }
+                }
+                else if(str_eq_zstr(key, "parameters"))
+                {
+                  // AUTOMATIC1111/stable-diffusion-webui.
+
+                  u8* p = value_start;
+
+                  img->positive_prompt.data = p;
+                  while(p < value_end && *p != '\n') { ++p; }
+                  img->positive_prompt.size = p - img->positive_prompt.data;
+
+                  while(p < value_end)
+                  {
+                    if(0) {}
+                    else if(advance_if_prefix_matches(&p, value_end, "Negative prompt: "))
+                    {
+                      str_t v = {p};
+                      while(p < value_end && *p != '\n') { ++p; }
+                      v.size = p - v.data;
+
+                      img->negative_prompt = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "Steps: "))
+                    {
+                      str_t v = {p};
+                      while(p < value_end && *p != ',') { ++p; }
+                      v.size = p - v.data;
+
+                      img->sampling_steps = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "Sampler: "))
+                    {
+                      str_t v = {p};
+                      while(p < value_end && *p != ',') { ++p; }
+                      v.size = p - v.data;
+
+                      img->sampler = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "CFG scale: "))
+                    {
+                      str_t v = {p};
+                      while(p < value_end && *p != ',') { ++p; }
+                      v.size = p - v.data;
+
+                      img->cfg = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "Seed: "))
+                    {
+                      str_t v = {p};
+                      while(p < value_end && *p != ',') { ++p; }
+                      v.size = p - v.data;
+
+                      img->seed = v;
+                    }
+                    else if(advance_if_prefix_matches(&p, value_end, "Model: "))
+                    {
+                      str_t v = {p};
+                      while(p < value_end && *p != ',') { ++p; }
+                      v.size = p - v.data;
+
+                      img->model = v;
+                    }
+
+                    ++p;
+                  }
+                }
 
                 if(!img->generation_parameters.size)
                 {
@@ -1594,17 +1783,34 @@ int main(int argc, char** argv)
             i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
 
             viewing_img_idx = i32_wrap_upto(viewing_img_idx, img_count);
-            // TODO: This needs an update once the resolution of an already-viewed image gets known.
-            if(last_viewing_img_idx != viewing_img_idx)
+            img_entry_t* img = &img_entries[viewing_img_idx];
+
+            if(last_viewing_img_idx != viewing_img_idx && img->load_state == LOAD_STATE_LOADED_INTO_RAM)
             {
               char txt[256];
               txt[0] = 0;
               i32 txt_len = snprintf(txt, sizeof(txt), "%s [%d/%d] %dx%d %s",
                   PROGRAM_NAME,
                   viewing_img_idx + 1, img_count,
-                  img_entries[viewing_img_idx].w, img_entries[viewing_img_idx].h,
-                  img_entries[viewing_img_idx].path.data);
+                  img->w, img->h,
+                  img->path.data);
               set_title(display, window, (u8*)txt, txt_len);
+
+#if 1
+#define p(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
+              puts("");
+              puts(txt);
+              p(generation_parameters);
+              p(positive_prompt);
+              p(negative_prompt);
+              p(seed);
+              p(batch_size);
+              p(model);
+              p(sampler);
+              p(sampling_steps);
+              p(cfg);
+#undef p
+#endif
 
               scroll_thumbnail_into_view = true;
 
@@ -1728,8 +1934,8 @@ int main(int argc, char** argv)
                   img_idx <= last_visible_thumbnail_idx;
                   ++img_idx)
               {
-                img_entry_t* img = &img_entries[img_idx];
-                still_loading |= upload_img_texture(img, linear_sampling, &vram_bytes_used);
+                img_entry_t* thumb = &img_entries[img_idx];
+                still_loading |= upload_img_texture(thumb, linear_sampling, &vram_bytes_used);
 
                 i32 sidebar_col = img_idx % thumbnail_columns;
                 i32 sidebar_row = img_idx / thumbnail_columns;
@@ -1764,12 +1970,12 @@ int main(int argc, char** argv)
                   glColor3f(1.0f, 1.0f, 1.0f);
                 }
 
-                if(img->texture_id)
+                if(thumb->texture_id)
                 {
-                  r32 tex_w = img->w;
-                  r32 tex_h = img->h;
+                  r32 tex_w = thumb->w;
+                  r32 tex_h = thumb->h;
 
-                  glBindTexture(GL_TEXTURE_2D, img->texture_id);
+                  glBindTexture(GL_TEXTURE_2D, thumb->texture_id);
 
                   r32 mag = 1.0f;
                   if(thumbnail_w != 0 && thumbnail_h != 0)
@@ -1802,7 +2008,6 @@ int main(int argc, char** argv)
               }
             }
 
-            img_entry_t* img = &img_entries[viewing_img_idx];
             still_loading |= upload_img_texture(img, linear_sampling, &vram_bytes_used);
 
             i32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
@@ -1920,7 +2125,7 @@ int main(int argc, char** argv)
               glXWaitGL();
               // XSync(display, false);
               XDrawString(display, window, gc, image_region_x0 + 10, win_h - 10,
-                  (char*)img->generation_parameters.data, img->generation_parameters.size);
+                  (char*)img->positive_prompt.data, img->positive_prompt.size);
               glXWaitX();
               // XSync(display, false);
               // usleep(10000);
