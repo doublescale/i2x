@@ -38,15 +38,23 @@ typedef double r64;
 #define clamp(a, b, x) (max((a), min((b), (x))))
 #define absolute(x) ((x) >= 0 ? (x) : -(x))
 #define bflip(x) (x = !x)
+#define lerp(a, b, t) ((1 - (t)) * (a) + (t) * (b))
 
 #define malloc_array(count, type) ((type*)malloc((count) * sizeof(type)))
 
 // Modulo, but positive.
 internal i32 i32_wrap_upto(i32 x, i32 y)
 {
-  // TODO: Don't be retarded.
-  while(x < 0) { x += y; }
-  x = x % y;
+  if(y == 0)
+  {
+    x = 0;
+  }
+  else
+  {
+    // TODO: Don't be retarded.
+    while(x < 0) { x += y; }
+    x = x % y;
+  }
 
   return x;
 }

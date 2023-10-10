@@ -150,11 +150,18 @@ enum
   LOAD_STATE_LOADED_INTO_RAM,
   LOAD_STATE_LOAD_FAILED,
 };
+typedef u32 load_state_t;
+
+enum
+{
+  IMG_FLAG_MARKED = (1 << 0),
+};
+typedef u32 img_flags_t;
 
 typedef struct img_entry_t
 {
   str_t path;
-  str_t data;
+  str_t file_data;
 
   str_t generation_parameters;
   str_t positive_prompt;
@@ -166,6 +173,7 @@ typedef struct img_entry_t
   str_t sampling_steps;
   str_t cfg;
 
+  img_flags_t flags;
   i32 w;
   i32 h;
   u8* pixels;
@@ -176,17 +184,20 @@ typedef struct img_entry_t
   struct img_entry_t* lru_next;
 
   // This should stay at the end so zeroing the memory updates this last.
-  volatile u32 load_state;
+  volatile load_state_t load_state;
 } img_entry_t;
 
 typedef struct
 {
-  i32 img_count;
+  i32 total_img_count;
   img_entry_t* img_entries;
+
+  i32 filtered_img_count;
+  i32* filtered_img_idxs;
 
   GLuint test_texture_id;
 
-  volatile i32 viewing_img_idx;
+  volatile i32 viewing_filtered_img_idx;
   volatile i32 first_visible_thumbnail_idx;
   volatile i32 last_visible_thumbnail_idx;
 } shared_loader_data_t;
@@ -206,53 +217,58 @@ internal void* loader_fun(void* raw_data)
 
   for(;;)
   {
-    i32 viewing_img_idx = shared->viewing_img_idx;
+    i32 viewing_filtered_img_idx = shared->viewing_filtered_img_idx;
     i32 range_start_idx = shared->first_visible_thumbnail_idx;
     i32 range_end_idx = shared->last_visible_thumbnail_idx;
+    i32 filtered_img_count = shared->filtered_img_count;
 
-    // printf("Loader %d focus %d range_start %d range_end %d\n", thread_idx, viewing_img_idx, range_start_idx, range_end_idx);
+    // printf("Loader %d focus %d range_start %d range_end %d\n", thread_idx, viewing_filtered_img_idx, range_start_idx, range_end_idx);
 
-    i32 max_loading_idx = min(shared->img_count + 1, 800);
-    // i32 max_loading_idx = min(shared->img_count + 1, 40);
-    // i32 max_loading_idx = min(shared->img_count + 1, 4000);
+    i32 max_loading_idx = min(filtered_img_count + 1, 800);
+    // i32 max_loading_idx = min(filtered_img_count + 1, 40);
+    // i32 max_loading_idx = min(filtered_img_count + 1, 4000);
     for(i32 loading_idx = 0;
         loading_idx < max_loading_idx;
         ++loading_idx)
     {
       if(0
-          || viewing_img_idx != shared->viewing_img_idx
+          || viewing_filtered_img_idx != shared->viewing_filtered_img_idx
           || range_start_idx != shared->first_visible_thumbnail_idx
           || range_end_idx != shared->last_visible_thumbnail_idx
+          || filtered_img_count != shared->filtered_img_count
+          || shared->filtered_img_count == 0
         )
       {
         break;
       }
 
       // Load the viewed image, then the thumbnail range, then spiral around the thumbnail range.
-      i32 img_idx = 0;
+      i32 filtered_img_idx = 0;
       if(loading_idx == 0)
       {
-        img_idx = viewing_img_idx;
+        filtered_img_idx = viewing_filtered_img_idx;
       }
       else
       {
-        img_idx = range_start_idx + loading_idx - 1;
-        i32 extra_range_idx = img_idx - range_end_idx;
+        filtered_img_idx = range_start_idx + loading_idx - 1;
+        i32 extra_range_idx = filtered_img_idx - range_end_idx;
         if(extra_range_idx > 0)
         {
           if(extra_range_idx % 2 == 0)
           {
-            img_idx = range_start_idx - (extra_range_idx + 1) / 2;
+            filtered_img_idx = range_start_idx - (extra_range_idx + 1) / 2;
           }
           else
           {
-            img_idx = range_end_idx + (extra_range_idx + 1) / 2;
+            filtered_img_idx = range_end_idx + (extra_range_idx + 1) / 2;
           }
         }
-        img_idx = i32_wrap_upto(img_idx, shared->img_count);
+        filtered_img_idx = i32_wrap_upto(filtered_img_idx, shared->filtered_img_count);
       }
 
-      // printf("Loader %d loading_idx %d [%5d/%d]\n", thread_idx, loading_idx, img_idx + 1, shared->img_count);
+      i32 img_idx = shared->filtered_img_idxs[filtered_img_idx];
+
+      // printf("Loader %d loading_idx %d [%5d/%d]\n", thread_idx, loading_idx, img_idx + 1, shared->total_img_count);
 
       img_entry_t* img = &shared->img_entries[img_idx];
 
@@ -261,13 +277,16 @@ internal void* loader_fun(void* raw_data)
 #if 0
         printf("Loader %d [%5d/%d] %s\n",
             thread_idx,
-            img_idx + 1, shared->img_count,
+            img_idx + 1, shared->total_img_count,
             img->path.data);
 #endif
 
+        if(!img->file_data.data)
+        {
+          img->file_data = read_file((char*)img->path.data);
+        }
         i32 original_channel_count = 0;
-        img->data = read_file((char*)img->path.data);
-        img->pixels = stbi_load_from_memory(img->data.data, img->data.size,
+        img->pixels = stbi_load_from_memory(img->file_data.data, img->file_data.size,
             &img->w, &img->h, &original_channel_count, 4);
         if(!img->pixels)
         {
@@ -280,10 +299,10 @@ internal void* loader_fun(void* raw_data)
         }
 
         // Look for PNG metadata.
-        if(img->data.size >= 16)
+        if(img->file_data.size >= 16)
         {
-          u8* ptr = img->data.data;
-          u8* data_end = img->data.data + img->data.size;
+          u8* ptr = img->file_data.data;
+          u8* data_end = img->file_data.data + img->file_data.size;
           b32 bad = false;
 
           // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
@@ -309,10 +328,9 @@ internal void* loader_fun(void* raw_data)
             chunk_size |= *ptr++;
 
             // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
-            if(ptr[0] == 't'
-                && ptr[1] == 'E'
-                && ptr[2] == 'X'
-                && ptr[3] == 't')
+            b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
+            b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
+            if(tEXt_header || iTXt_header)
             {
               if(ptr + 4 + chunk_size <= data_end)
               {
@@ -321,13 +339,24 @@ internal void* loader_fun(void* raw_data)
                 {
                   ++key_len;
                 }
-                i32 value_len = chunk_size - key_len - 1;
+
+                u8* value_start = ptr + 4 + key_len + 1;
+                // https://www.w3.org/TR/2003/REC-PNG-20031110/#11iTXt
+                if(iTXt_header)
+                {
+                  value_start += 2;
+                  while(*value_start) { ++value_start; }
+                  ++value_start;
+                  while(*value_start) { ++value_start; }
+                  ++value_start;
+                }
+
+                i32 value_len = chunk_size - (value_start - ptr) - 1;
 
                 str_t key = { ptr + 4, key_len };
-                str_t value = { ptr + 4 + key_len + 1, value_len };
+                str_t value = { value_start, value_len };
                 // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
 
-                u8* value_start = value.data;
                 u8* value_end = value.data + value.size;
                 if(str_eq_zstr(key, "prompt"))
                 {
@@ -373,7 +402,7 @@ internal void* loader_fun(void* raw_data)
                       while(p < value_end && *p != '"') { ++p; }
                       ++p;
                       str_t v = {p};
-                      while(p < value_end && *p != '"') { ++p; }
+                      while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
                       v.size = p - v.data;
 
                       img->sampler = v;
@@ -383,7 +412,7 @@ internal void* loader_fun(void* raw_data)
                       while(p < value_end && *p != '"') { ++p; }
                       ++p;
                       str_t v = {p};
-                      while(p < value_end && *p != '"') { ++p; }
+                      while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
                       v.size = p - v.data;
 
                       v = str_remove_suffix(v, str(".ckpt"));
@@ -405,7 +434,7 @@ internal void* loader_fun(void* raw_data)
                       while(p < value_end && *p != '"') { ++p; }
                       ++p;
                       str_t v = {p};
-                      while(p < value_end && *p != '"') { ++p; }
+                      while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
                       v.size = p - v.data;
 
                       if(!img->positive_prompt.data) { img->positive_prompt = v; }
@@ -424,6 +453,8 @@ internal void* loader_fun(void* raw_data)
                   u8* p = value_start;
 
                   img->positive_prompt.data = p;
+                  // TODO: Advance until negative prompt, or "Steps:"!
+                  //       (The promt might have newlines in it.)
                   while(p < value_end && *p != '\n') { ++p; }
                   img->positive_prompt.size = p - img->positive_prompt.data;
 
@@ -584,10 +615,10 @@ internal b32 upload_img_texture(img_entry_t* img, b32 linear_sampling, i64* vram
         unload->lru_prev = 0;
         unload->lru_next = 0;
 
-        free(unload->data.data);
+        // free(unload->file_data.data);
         stbi_image_free(unload->pixels);
-        zero_struct(unload->data);
-        zero_struct(unload->generation_parameters);
+        // zero_struct(unload->file_data);
+        // zero_struct(unload->generation_parameters);
         unload->w = 0;
         unload->h = 0;
         unload->pixels = 0;
@@ -895,9 +926,12 @@ int main(int argc, char** argv)
         // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-        i32 img_count = max(1, argc - 1);
-        img_entry_t* img_entries = malloc_array(img_count, img_entry_t);
-        zero_bytes(img_count * sizeof(img_entry_t), img_entries);
+        i32 total_img_count = max(1, argc - 1);
+        img_entry_t* img_entries = malloc_array(total_img_count, img_entry_t);
+        zero_bytes(total_img_count * sizeof(img_entry_t), img_entries);
+
+        i32* filtered_img_idxs = malloc_array(total_img_count, i32);
+        i32 filtered_img_count = total_img_count;
 
         GLuint test_texture_id = 0;
         glGenTextures(1, &test_texture_id);
@@ -911,7 +945,7 @@ int main(int argc, char** argv)
         glGenerateMipmap(GL_TEXTURE_2D);
 
         for(i32 img_idx = 0;
-            img_idx < img_count;
+            img_idx < total_img_count;
             ++img_idx)
         {
           img_entry_t* img = &img_entries[img_idx];
@@ -924,6 +958,8 @@ int main(int argc, char** argv)
           {
             img->path = str("<TEST IMAGE>");
           }
+
+          filtered_img_idxs[img_idx] = img_idx;
         }
 
         pthread_t loader_threads[7] = {0};
@@ -933,8 +969,10 @@ int main(int argc, char** argv)
         sem_t* loader_semaphores = malloc_array(loader_count, sem_t);
 
         zero_struct(*shared_loader_data);
-        shared_loader_data->img_count = img_count;
+        shared_loader_data->total_img_count = total_img_count;
         shared_loader_data->img_entries = img_entries;
+        shared_loader_data->filtered_img_count = filtered_img_count;
+        shared_loader_data->filtered_img_idxs = filtered_img_idxs;
         shared_loader_data->test_texture_id = test_texture_id;
 
         for(i32 loader_idx = 0;
@@ -961,13 +999,13 @@ int main(int argc, char** argv)
         i64 nsecs_max = I64_MIN;
 
         b32 quitting = false;
-        i32 viewing_img_idx = 0;
+        i32 viewing_filtered_img_idx = 0;
         i32 last_viewing_img_idx = -1;
         str_t clipboard_str = {0};
         b32 border_sampling = true;
         b32 linear_sampling = true;
         b32 alpha_blend = true;
-        b32 bright_bg = true;
+        b32 bright_bg = false;
         b32 extra_toggles[10] = {0};
         r32 zoom = 0;
         r32 offset_x = 0;
@@ -980,6 +1018,8 @@ int main(int argc, char** argv)
         i32 hovered_thumbnail_idx = -1;
         b32 show_info = true;
         i32 info_height = 40;
+
+        XSetForeground(display, gc, bright_bg ? XBlackPixel(display, DefaultScreen(display)) : XWhitePixel(display, DefaultScreen(display)));
 
         // TODO: Split these for x/y ?
         //       Actually, just using the constant 120 might be enough.
@@ -1245,57 +1285,115 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == XK_BackSpace || keysym == XK_Left)
                     {
-                      viewing_img_idx -= 1;
+                      viewing_filtered_img_idx -= 1;
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == ' ' || keysym == XK_Right)
                     {
-                      viewing_img_idx += 1;
+                      viewing_filtered_img_idx += 1;
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_Up)
                     {
-                      if(viewing_img_idx - thumbnail_columns >= 0)
+                      if(viewing_filtered_img_idx - thumbnail_columns >= 0)
                       {
-                        viewing_img_idx -= thumbnail_columns;
+                        viewing_filtered_img_idx -= thumbnail_columns;
                       }
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_Down)
                     {
-                      if(viewing_img_idx + thumbnail_columns < img_count)
+                      if(viewing_filtered_img_idx + thumbnail_columns < filtered_img_count)
                       {
-                        viewing_img_idx += thumbnail_columns;
+                        viewing_filtered_img_idx += thumbnail_columns;
                       }
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_Home)
                     {
-                      viewing_img_idx = 0;
+                      viewing_filtered_img_idx = 0;
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_End)
                     {
-                      viewing_img_idx = img_count - 1;
+                      viewing_filtered_img_idx = filtered_img_count - 1;
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(alt_held && keysym == XK_Page_Up)
                     {
-                      viewing_img_idx -= thumbnail_columns * (r32)(i32)((r32)win_h / thumbnail_h);
-                      viewing_img_idx = clamp(0, img_count - 1, viewing_img_idx);
+                      viewing_filtered_img_idx -= thumbnail_columns * (r32)(i32)((r32)win_h / thumbnail_h);
+                      viewing_filtered_img_idx = clamp(0, filtered_img_count - 1, viewing_filtered_img_idx);
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(alt_held && keysym == XK_Page_Down)
                     {
-                      viewing_img_idx += thumbnail_columns * (r32)(i32)((r32)win_h / thumbnail_h);
-                      viewing_img_idx = clamp(0, img_count - 1, viewing_img_idx);
+                      viewing_filtered_img_idx += thumbnail_columns * (r32)(i32)((r32)win_h / thumbnail_h);
+                      viewing_filtered_img_idx = clamp(0, filtered_img_count - 1, viewing_filtered_img_idx);
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_Page_Up)
                     {
                       sidebar_scroll_rows -= (r32)(i32)((r32)win_h / thumbnail_h);
                       sidebar_scroll_rows = clamp(0,
-                          (img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
+                          (filtered_img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
                           sidebar_scroll_rows);
                     }
                     else if(keysym == XK_Page_Down)
                     {
                       sidebar_scroll_rows += (r32)(i32)((r32)win_h / thumbnail_h);
                       sidebar_scroll_rows = clamp(0,
-                          (img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
+                          (filtered_img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
                           sidebar_scroll_rows);
+                    }
+                    else if(ctrl_held && keysym == 'a')
+                    {
+                      b32 none_were_marked = true;
+                      for_count(i, total_img_count)
+                      {
+                        none_were_marked = none_were_marked && !(img_entries[i].flags & IMG_FLAG_MARKED);
+                        img_entries[i].flags &= ~IMG_FLAG_MARKED;
+                      }
+                      if(none_were_marked)
+                      {
+                        for_count(i, total_img_count)
+                        {
+                          img_entries[i].flags |= IMG_FLAG_MARKED;
+                        }
+                      }
+                    }
+                    else if(keysym == 'm')
+                    {
+                      if(filtered_img_count)
+                      {
+                        img_entries[filtered_img_idxs[viewing_filtered_img_idx]].flags ^= IMG_FLAG_MARKED;
+                      }
+                    }
+                    else if(keysym == 'f')
+                    {
+                      i32 prev_viewing_idx = filtered_img_idxs[viewing_filtered_img_idx];
+
+                      if(filtered_img_count == total_img_count)
+                      {
+                        filtered_img_count = 0;
+                        for_count(idx, total_img_count)
+                        {
+                          if(img_entries[idx].flags & IMG_FLAG_MARKED)
+                          {
+                            if(prev_viewing_idx >= idx)
+                            {
+                              viewing_filtered_img_idx = filtered_img_count;
+                            }
+
+                            filtered_img_idxs[filtered_img_count++] = idx;
+                          }
+                        }
+                      }
+                      else
+                      {
+                        for_count(i, total_img_count) { filtered_img_idxs[i] = i; }
+                        filtered_img_count = total_img_count;
+                        viewing_filtered_img_idx = prev_viewing_idx;
+                      }
                     }
                     else if(keysym == 'a')
                     {
@@ -1304,14 +1402,7 @@ int main(int argc, char** argv)
                     else if(keysym == 'b')
                     {
                       bflip(bright_bg);
-                      if(bright_bg)
-                      {
-                        XSetForeground(display, gc, XBlackPixel(display, DefaultScreen(display)));
-                      }
-                      else
-                      {
-                        XSetForeground(display, gc, XWhitePixel(display, DefaultScreen(display)));
-                      }
+                      XSetForeground(display, gc, bright_bg ? XBlackPixel(display, DefaultScreen(display)) : XWhitePixel(display, DefaultScreen(display)));
                     }
                     else if(keysym == 'h')
                     {
@@ -1325,7 +1416,7 @@ int main(int argc, char** argv)
                     {
                       bflip(linear_sampling);
                       for(i32 img_idx = 0;
-                          img_idx < img_count;
+                          img_idx < total_img_count;
                           ++img_idx)
                       {
                         glBindTexture(GL_TEXTURE_2D, img_entries[img_idx].texture_id);
@@ -1357,8 +1448,12 @@ int main(int argc, char** argv)
                     }
                     else if(ctrl_held && keysym == 'c')
                     {
-                      clipboard_str = img_entries[viewing_img_idx].path;
-                      XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
+                      // TODO: Copy list of marked images if there are any.
+                      if(filtered_img_count)
+                      {
+                        clipboard_str = img_entries[filtered_img_idxs[viewing_filtered_img_idx]].path;
+                        XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
+                      }
                     }
                     else if(keysym == 'x')
                     {
@@ -1661,7 +1756,7 @@ int main(int argc, char** argv)
             b32 mouse_in_sidebar = (!hide_sidebar && mouse_x < sidebar_width);
             if(mouse_in_sidebar && hovered_thumbnail_idx != -1 && (mouse_btn_went_down == 1 || lmb_held))
             {
-              viewing_img_idx = hovered_thumbnail_idx;
+              viewing_filtered_img_idx = hovered_thumbnail_idx;
 
               dirty = true;
             }
@@ -1674,7 +1769,7 @@ int main(int argc, char** argv)
 
               if(alt_held)
               {
-                viewing_img_idx -= scroll_y_ticks;
+                viewing_filtered_img_idx -= scroll_y_ticks;
               }
 
               if(!alt_held)
@@ -1697,7 +1792,7 @@ int main(int argc, char** argv)
                   {
                     sidebar_scroll_rows -= scroll_y;
                     sidebar_scroll_rows = clamp(0,
-                        (img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
+                        (filtered_img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
                         sidebar_scroll_rows);
                   }
                 }
@@ -1782,8 +1877,15 @@ int main(int argc, char** argv)
 
             i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
 
-            viewing_img_idx = i32_wrap_upto(viewing_img_idx, img_count);
-            img_entry_t* img = &img_entries[viewing_img_idx];
+            viewing_filtered_img_idx = i32_wrap_upto(viewing_filtered_img_idx, filtered_img_count);
+            i32 viewing_img_idx = -1;
+            img_entry_t dummy_img = {0};
+            img_entry_t* img = &dummy_img;
+            if(filtered_img_count > 0)
+            {
+              viewing_img_idx = filtered_img_idxs[viewing_filtered_img_idx];
+              img = &img_entries[viewing_img_idx];
+            }
 
             if(last_viewing_img_idx != viewing_img_idx && img->load_state == LOAD_STATE_LOADED_INTO_RAM)
             {
@@ -1791,26 +1893,27 @@ int main(int argc, char** argv)
               txt[0] = 0;
               i32 txt_len = snprintf(txt, sizeof(txt), "%s [%d/%d] %dx%d %s",
                   PROGRAM_NAME,
-                  viewing_img_idx + 1, img_count,
+                  viewing_img_idx + 1, total_img_count,
                   img->w, img->h,
                   img->path.data);
               set_title(display, window, (u8*)txt, txt_len);
 
-#if 1
+              if(show_info)
+              {
 #define p(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
-              puts("");
-              puts(txt);
-              p(generation_parameters);
-              p(positive_prompt);
-              p(negative_prompt);
-              p(seed);
-              p(batch_size);
-              p(model);
-              p(sampler);
-              p(sampling_steps);
-              p(cfg);
+                puts("");
+                puts(txt);
+                p(generation_parameters);
+                p(positive_prompt);
+                p(negative_prompt);
+                p(seed);
+                p(batch_size);
+                p(model);
+                p(sampler);
+                p(sampling_steps);
+                p(cfg);
 #undef p
-#endif
+              }
 
               scroll_thumbnail_into_view = true;
 
@@ -1819,7 +1922,7 @@ int main(int argc, char** argv)
 
             if(scroll_thumbnail_into_view)
             {
-              i32 thumbnail_row = viewing_img_idx / thumbnail_columns;
+              i32 thumbnail_row = viewing_filtered_img_idx / thumbnail_columns;
 
               // TODO: Fix this so clicking on the first or last row doesn't mess up.
               // i32 extra_rows = (win_h >= 2 * thumbnail_h) ? 1 : 0;
@@ -1834,16 +1937,18 @@ int main(int argc, char** argv)
             i32 first_visible_row = (i32)sidebar_scroll_rows;
             i32 one_past_last_visible_row = (i32)(sidebar_scroll_rows + win_h / thumbnail_h + 1);
             i32 first_visible_thumbnail_idx = max(0, first_visible_row * thumbnail_columns);
-            i32 last_visible_thumbnail_idx = min(img_count, one_past_last_visible_row * thumbnail_columns) - 1;
+            i32 last_visible_thumbnail_idx = min(filtered_img_count, one_past_last_visible_row * thumbnail_columns) - 1;
             if(0
-                || viewing_img_idx != shared_loader_data->viewing_img_idx
+                || viewing_filtered_img_idx != shared_loader_data->viewing_filtered_img_idx
                 || first_visible_thumbnail_idx != shared_loader_data->first_visible_thumbnail_idx
                 || last_visible_thumbnail_idx != shared_loader_data->last_visible_thumbnail_idx
+                || filtered_img_count != shared_loader_data->filtered_img_count
               )
             {
-              shared_loader_data->viewing_img_idx = viewing_img_idx;
+              shared_loader_data->viewing_filtered_img_idx = viewing_filtered_img_idx;
               shared_loader_data->first_visible_thumbnail_idx = first_visible_thumbnail_idx;
               shared_loader_data->last_visible_thumbnail_idx = last_visible_thumbnail_idx;
+              shared_loader_data->filtered_img_count = filtered_img_count;
               for_count(i, loader_count) { sem_post(&loader_semaphores[i]); }
             }
 
@@ -1930,15 +2035,15 @@ int main(int argc, char** argv)
               glEnable(GL_TEXTURE_2D);
               glColor3f(1.0f, 1.0f, 1.0f);
               hovered_thumbnail_idx = -1;
-              for(i32 img_idx = first_visible_thumbnail_idx;
-                  img_idx <= last_visible_thumbnail_idx;
-                  ++img_idx)
+              for(i32 filtered_idx = first_visible_thumbnail_idx;
+                  filtered_idx <= last_visible_thumbnail_idx;
+                  ++filtered_idx)
               {
-                img_entry_t* thumb = &img_entries[img_idx];
+                img_entry_t* thumb = &img_entries[filtered_img_idxs[filtered_idx]];
                 still_loading |= upload_img_texture(thumb, linear_sampling, &vram_bytes_used);
 
-                i32 sidebar_col = img_idx % thumbnail_columns;
-                i32 sidebar_row = img_idx / thumbnail_columns;
+                i32 sidebar_col = filtered_idx % thumbnail_columns;
+                i32 sidebar_row = filtered_idx / thumbnail_columns;
 
                 r32 box_x0 = sidebar_col * thumbnail_w;
                 r32 box_y1 = win_h - ((r32)sidebar_row - sidebar_scroll_rows) * thumbnail_h;
@@ -1949,14 +2054,14 @@ int main(int argc, char** argv)
                     prev_mouse_x >= box_x0 && prev_mouse_x < box_x1 &&
                     prev_mouse_y >= box_y0 && prev_mouse_y < box_y1)
                 {
-                  hovered_thumbnail_idx = img_idx;
+                  hovered_thumbnail_idx = filtered_idx;
                 }
 
-                if(img_idx == viewing_img_idx || img_idx == hovered_thumbnail_idx)
+                if(filtered_idx == viewing_filtered_img_idx || filtered_idx == hovered_thumbnail_idx)
                 {
                   glDisable(GL_TEXTURE_2D);
 
-                  r32 gray = (img_idx == viewing_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
+                  r32 gray = (filtered_idx == viewing_filtered_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
                   glColor3f(gray, gray, gray);
 
                   glBegin(GL_QUADS);
@@ -1965,9 +2070,6 @@ int main(int argc, char** argv)
                   glVertex2f(box_x1, box_y1);
                   glVertex2f(box_x0, box_y1);
                   glEnd();
-
-                  glEnable(GL_TEXTURE_2D);
-                  glColor3f(1.0f, 1.0f, 1.0f);
                 }
 
                 if(thumb->texture_id)
@@ -1975,7 +2077,9 @@ int main(int argc, char** argv)
                   r32 tex_w = thumb->w;
                   r32 tex_h = thumb->h;
 
+                  glEnable(GL_TEXTURE_2D);
                   glBindTexture(GL_TEXTURE_2D, thumb->texture_id);
+                  glColor3f(1.0f, 1.0f, 1.0f);
 
                   r32 mag = 1.0f;
                   if(thumbnail_w != 0 && thumbnail_h != 0)
@@ -2003,6 +2107,28 @@ int main(int argc, char** argv)
                   glTexCoord2f(u1, v1); glVertex2f(x1, y0);
                   glTexCoord2f(u1, v0); glVertex2f(x1, y1);
                   glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+                  glEnd();
+                }
+
+                if(thumb->flags & IMG_FLAG_MARKED)
+                {
+                  glDisable(GL_TEXTURE_2D);
+                  glLineWidth(2.0f);
+                  glColor3f(0.0f, 0.0f, 0.0f);
+                  glBegin(GL_LINE_STRIP);
+                  glVertex2f(lerp(box_x0, box_x1, 0.1f) + 2, lerp(box_y0, box_y1, 0.7f) - 2);
+                  glVertex2f(lerp(box_x0, box_x1, 0.1f) + 2, lerp(box_y0, box_y1, 0.9f) - 2);
+                  glVertex2f(lerp(box_x0, box_x1, 0.2f) + 2, lerp(box_y0, box_y1, 0.8f) - 2);
+                  glVertex2f(lerp(box_x0, box_x1, 0.3f) + 2, lerp(box_y0, box_y1, 0.9f) - 2);
+                  glVertex2f(lerp(box_x0, box_x1, 0.3f) + 2, lerp(box_y0, box_y1, 0.7f) - 2);
+                  glEnd();
+                  glColor3f(0.2f, 1.0f, 0.2f);
+                  glBegin(GL_LINE_STRIP);
+                  glVertex2f(lerp(box_x0, box_x1, 0.1f),     lerp(box_y0, box_y1, 0.7f));
+                  glVertex2f(lerp(box_x0, box_x1, 0.1f),     lerp(box_y0, box_y1, 0.9f));
+                  glVertex2f(lerp(box_x0, box_x1, 0.2f),     lerp(box_y0, box_y1, 0.8f));
+                  glVertex2f(lerp(box_x0, box_x1, 0.3f),     lerp(box_y0, box_y1, 0.9f));
+                  glVertex2f(lerp(box_x0, box_x1, 0.3f),     lerp(box_y0, box_y1, 0.7f));
                   glEnd();
                 }
               }
