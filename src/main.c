@@ -449,26 +449,51 @@ internal void* loader_fun(void* raw_data)
                 else if(str_eq_zstr(key, "parameters"))
                 {
                   // AUTOMATIC1111/stable-diffusion-webui.
+                  // Be careful with newlines and misleading labels in the
+                  // positive and negative prompts; use the last found keywords.
 
                   u8* p = value_start;
-
-                  img->positive_prompt.data = p;
-                  // TODO: Advance until negative prompt, or "Steps:"!
-                  //       (The promt might have newlines in it.)
-                  while(p < value_end && *p != '\n') { ++p; }
-                  img->positive_prompt.size = p - img->positive_prompt.data;
+                  u8* negative_prompt_label_start = 0;
+                  u8* steps_label_start = value_end;
 
                   while(p < value_end)
                   {
+                    u8* p_prev = p;
                     if(0) {}
-                    else if(advance_if_prefix_matches(&p, value_end, "Negative prompt: "))
+                    else if(advance_if_prefix_matches(&p, value_end, "\nNegative prompt: "))
                     {
-                      str_t v = {p};
-                      while(p < value_end && *p != '\n') { ++p; }
-                      v.size = p - v.data;
-
-                      img->negative_prompt = v;
+                      negative_prompt_label_start = p_prev;
+                      img->negative_prompt.data = p;
                     }
+                    else if(advance_if_prefix_matches(&p, value_end, "\nSteps: "))
+                    {
+                      steps_label_start = p_prev;
+                      img->sampling_steps.data = p;
+                    }
+
+                    ++p;
+                  }
+
+                  if(negative_prompt_label_start)
+                  {
+                    img->positive_prompt = str_from_span(value_start, negative_prompt_label_start);
+                  }
+                  else
+                  {
+                    img->positive_prompt = str_from_span(value_start, steps_label_start);
+                  }
+
+                  if(img->negative_prompt.data)
+                  {
+                    img->negative_prompt.size = steps_label_start - img->negative_prompt.data;
+                  }
+
+                  p = steps_label_start;
+
+                  while(p < value_end)
+                  {
+                    u8* p_prev = p;
+                    if(0) {}
                     else if(advance_if_prefix_matches(&p, value_end, "Steps: "))
                     {
                       str_t v = {p};

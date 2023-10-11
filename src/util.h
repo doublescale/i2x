@@ -104,6 +104,11 @@ internal str_t wrap_str(char* z)
   return result;
 }
 
+internal str_t str_from_span(u8* start, u8* end)
+{
+  return (str_t){ start, end - start };
+}
+
 internal b32 str_eq(str_t a, str_t b)
 {
   b32 result = true;
