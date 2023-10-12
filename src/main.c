@@ -332,15 +332,18 @@ internal void* loader_fun(void* raw_data)
             b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
             if(tEXt_header || iTXt_header)
             {
-              if(ptr + 4 + chunk_size <= data_end)
+              u8* key_start = ptr + 4;
+              u8* value_end = ptr + 4 + chunk_size;
+
+              if(value_end <= data_end)
               {
                 i32 key_len = 0;
-                while(ptr[4 + key_len] != 0 && ptr + 4 + key_len <= data_end)
+                while(key_start[key_len] != 0 && key_start + key_len + 1 < value_end)
                 {
                   ++key_len;
                 }
 
-                u8* value_start = ptr + 4 + key_len + 1;
+                u8* value_start = key_start + key_len + 1;
                 // https://www.w3.org/TR/2003/REC-PNG-20031110/#11iTXt
                 if(iTXt_header)
                 {
@@ -351,13 +354,10 @@ internal void* loader_fun(void* raw_data)
                   ++value_start;
                 }
 
-                i32 value_len = chunk_size - (value_start - ptr) - 1;
-
-                str_t key = { ptr + 4, key_len };
-                str_t value = { value_start, value_len };
+                str_t key = { key_start, key_len };
+                str_t value = str_from_span(value_start, value_end);
                 // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
 
-                u8* value_end = value.data + value.size;
                 if(str_eq_zstr(key, "prompt"))
                 {
                   // comfyanonymous/ComfyUI JSON.
