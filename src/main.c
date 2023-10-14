@@ -1690,6 +1690,9 @@ int main(int argc, char** argv)
 
                   b32 respond_ok = false;
 
+                  b32 any_marked = false;
+                  for_count(i, total_img_count) { any_marked = any_marked || (img_entries[i].flags & IMG_FLAG_MARKED); }
+
                   if(request->property != None && clipboard_str.data != 0)
                   {
                     if(request->target == atom_targets)
@@ -1706,50 +1709,73 @@ int main(int argc, char** argv)
                     }
                     else if(request->target == atom_uri_list)
                     {
-                      char* full_path = realpath((char*)clipboard_str.data, 0);
-                      if(full_path)
+                      for(i32 img_idx = 0;
+                          img_idx < total_img_count;
+                          ++img_idx)
                       {
-                        // URI-encode the path.
-                        u8 buf[4096];
-                        u8* buf_end = buf + array_count(buf);
-                        u8* buf_ptr = buf;
-
-                        *buf_ptr++ = 'f';
-                        *buf_ptr++ = 'i';
-                        *buf_ptr++ = 'l';
-                        *buf_ptr++ = 'e';
-                        *buf_ptr++ = ':';
-                        *buf_ptr++ = '/';
-                        *buf_ptr++ = '/';
-
-                        for(char* path_ptr = full_path;
-                            *path_ptr && buf_ptr + 3 < buf_end;
-                            ++path_ptr)
+                        char* path = 0;
+                        if(any_marked)
                         {
-                          u8 c = *path_ptr;
-                          if((c >= 'A' && c <= 'Z') ||
-                              (c >= 'a' && c <= 'z') ||
-                              (c >= '0' && c <= '9') ||
-                              c == '-' || c == '_' || c == '.' || c == '~' || c == '/')
+                          if(!(img_entries[img_idx].flags & IMG_FLAG_MARKED)) { continue; }
+                          path = (char*)img_entries[img_idx].path.data;
+                        }
+                        else
+                        {
+                          path = (char*)clipboard_str.data;
+                        }
+                        char* full_path = realpath(path, 0);
+
+                        if(full_path)
+                        {
+                          // URI-encode the path.
+                          u8 buf[4096];
+                          u8* buf_end = buf + array_count(buf);
+                          u8* buf_ptr = buf;
+
+                          if(respond_ok)
                           {
-                            *buf_ptr++ = c;
+                            *buf_ptr++ = '\n';
                           }
-                          else
+
+                          *buf_ptr++ = 'f';
+                          *buf_ptr++ = 'i';
+                          *buf_ptr++ = 'l';
+                          *buf_ptr++ = 'e';
+                          *buf_ptr++ = ':';
+                          *buf_ptr++ = '/';
+                          *buf_ptr++ = '/';
+
+                          for(char* path_ptr = full_path;
+                              *path_ptr && buf_ptr + 3 < buf_end;
+                              ++path_ptr)
                           {
-                            char* hex = "0123456789ABCDEF";
-                            *buf_ptr++ = '%';
-                            *buf_ptr++ = hex[c >> 4];
-                            *buf_ptr++ = hex[c & 0xF];
+                            u8 c = *path_ptr;
+                            if((c >= 'A' && c <= 'Z') ||
+                                (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') ||
+                                c == '-' || c == '_' || c == '.' || c == '~' || c == '/')
+                            {
+                              *buf_ptr++ = c;
+                            }
+                            else
+                            {
+                              char* hex = "0123456789ABCDEF";
+                              *buf_ptr++ = '%';
+                              *buf_ptr++ = hex[c >> 4];
+                              *buf_ptr++ = hex[c & 0xF];
+                            }
                           }
+
+                          free(full_path);
+
+                          XChangeProperty(display, request->requestor, request->property,
+                              atom_uri_list, 8, respond_ok ? PropModeAppend : PropModeReplace,
+                              buf, buf_ptr - buf);
+
+                          respond_ok = true;
                         }
 
-                        free(full_path);
-
-                        XChangeProperty(display, request->requestor, request->property,
-                            atom_uri_list, 8, PropModeReplace,
-                            buf, buf_ptr - buf);
-
-                        respond_ok = true;
+                        if(!any_marked) { break; }
                       }
                     }
                     else if(request->target == atom_utf8)
