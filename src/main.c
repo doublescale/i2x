@@ -1673,12 +1673,6 @@ int main(int argc, char** argv)
                 case SelectionRequest:
                 {
                   XSelectionRequestEvent* request = (XSelectionRequestEvent*)&event.xselectionrequest;
-                  // if(event.xselectionrequest.
-                  char* property_name = XGetAtomName(display, request->property);
-                  char* target_name = XGetAtomName(display, request->target);
-                  printf("SelectionRequest target: %s, property: %s\n", target_name, property_name);
-                  if(property_name) { XFree(property_name); }
-                  if(target_name) { XFree(target_name); }
 
                   XSelectionEvent response = {0};
                   response.type = SelectionNotify;
@@ -1785,6 +1779,14 @@ int main(int argc, char** argv)
                           clipboard_str.data, clipboard_str.size);
 
                       respond_ok = true;
+                    }
+                    else
+                    {
+                      char* property_name = XGetAtomName(display, request->property);
+                      char* target_name = XGetAtomName(display, request->target);
+                      printf("Unhandled SelectionRequest target: %s, property: %s\n", target_name, property_name);
+                      if(property_name) { XFree(property_name); }
+                      if(target_name) { XFree(target_name); }
                     }
                   }
 
