@@ -784,6 +784,9 @@ typedef struct
 
   b32 vsync;
 
+  img_entry_t* img_entries;
+  i32 total_img_count;
+
   i32* filtered_img_idxs;
   i32 filtered_img_count;
 
@@ -805,6 +808,21 @@ internal void clamp_sidebar_scroll_rows(state_t* state)
   state->sidebar_scroll_rows = max(0,
       min((state->filtered_img_count + state->thumbnail_columns - 1) / state->thumbnail_columns - 1,
         state->sidebar_scroll_rows));
+}
+
+internal void set_or_unset_filtered_img_flag(state_t* state, i32 filtered_idx, img_flags_t flags, b32 set)
+{
+  if(filtered_idx >= 0 && filtered_idx < state->filtered_img_count)
+  {
+    if(set)
+    {
+      state->img_entries[state->filtered_img_idxs[filtered_idx]].flags |= flags;
+    }
+    else
+    {
+      state->img_entries[state->filtered_img_idxs[filtered_idx]].flags &= ~flags;
+    }
+  }
 }
 
 int main(int argc, char** argv)
@@ -1002,12 +1020,12 @@ int main(int argc, char** argv)
         // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-        i32 total_img_count = max(1, argc - 1);
-        img_entry_t* img_entries = malloc_array(total_img_count, img_entry_t);
-        zero_bytes(total_img_count * sizeof(img_entry_t), img_entries);
+        state->total_img_count = max(1, argc - 1);
+        state->img_entries = malloc_array(state->total_img_count, img_entry_t);
+        zero_bytes(state->total_img_count * sizeof(img_entry_t), state->img_entries);
 
-        state->filtered_img_idxs = malloc_array(total_img_count, i32);
-        state->filtered_img_count = total_img_count;
+        state->filtered_img_idxs = malloc_array(state->total_img_count, i32);
+        state->filtered_img_count = state->total_img_count;
 
         GLuint test_texture_id = 0;
         glGenTextures(1, &test_texture_id);
@@ -1021,10 +1039,10 @@ int main(int argc, char** argv)
         glGenerateMipmap(GL_TEXTURE_2D);
 
         for(i32 img_idx = 0;
-            img_idx < total_img_count;
+            img_idx < state->total_img_count;
             ++img_idx)
         {
-          img_entry_t* img = &img_entries[img_idx];
+          img_entry_t* img = &state->img_entries[img_idx];
 
           if(argc > 1)
           {
@@ -1045,8 +1063,8 @@ int main(int argc, char** argv)
         sem_t* loader_semaphores = malloc_array(loader_count, sem_t);
 
         zero_struct(*shared_loader_data);
-        shared_loader_data->total_img_count = total_img_count;
-        shared_loader_data->img_entries = img_entries;
+        shared_loader_data->total_img_count = state->total_img_count;
+        shared_loader_data->img_entries = state->img_entries;
         shared_loader_data->filtered_img_count = state->filtered_img_count;
         shared_loader_data->filtered_img_idxs = state->filtered_img_idxs;
         shared_loader_data->test_texture_id = test_texture_id;
@@ -1448,16 +1466,16 @@ int main(int argc, char** argv)
                     else if(ctrl_held && keysym == 'a')
                     {
                       b32 none_were_marked = true;
-                      for_count(i, total_img_count)
+                      for_count(i, state->total_img_count)
                       {
-                        none_were_marked = none_were_marked && !(img_entries[i].flags & IMG_FLAG_MARKED);
-                        img_entries[i].flags &= ~IMG_FLAG_MARKED;
+                        none_were_marked = none_were_marked && !(state->img_entries[i].flags & IMG_FLAG_MARKED);
+                        state->img_entries[i].flags &= ~IMG_FLAG_MARKED;
                       }
                       if(none_were_marked)
                       {
-                        for_count(i, total_img_count)
+                        for_count(i, state->total_img_count)
                         {
-                          img_entries[i].flags |= IMG_FLAG_MARKED;
+                          state->img_entries[i].flags |= IMG_FLAG_MARKED;
                         }
                       }
                     }
@@ -1465,19 +1483,19 @@ int main(int argc, char** argv)
                     {
                       if(state->filtered_img_count)
                       {
-                        img_entries[state->filtered_img_idxs[viewing_filtered_img_idx]].flags ^= IMG_FLAG_MARKED;
+                        state->img_entries[state->filtered_img_idxs[viewing_filtered_img_idx]].flags ^= IMG_FLAG_MARKED;
                       }
                     }
                     else if(keysym == 'f')
                     {
                       i32 prev_viewing_idx = state->filtered_img_idxs[viewing_filtered_img_idx];
 
-                      if(state->filtered_img_count == total_img_count)
+                      if(state->filtered_img_count == state->total_img_count)
                       {
                         state->filtered_img_count = 0;
-                        for_count(idx, total_img_count)
+                        for_count(idx, state->total_img_count)
                         {
-                          if(img_entries[idx].flags & IMG_FLAG_MARKED)
+                          if(state->img_entries[idx].flags & IMG_FLAG_MARKED)
                           {
                             if(prev_viewing_idx >= idx)
                             {
@@ -1490,10 +1508,11 @@ int main(int argc, char** argv)
                       }
                       else
                       {
-                        for_count(i, total_img_count) { state->filtered_img_idxs[i] = i; }
-                        state->filtered_img_count = total_img_count;
+                        for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
+                        state->filtered_img_count = state->total_img_count;
                         viewing_filtered_img_idx = prev_viewing_idx;
                       }
+                      scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == 'a')
                     {
@@ -1516,10 +1535,10 @@ int main(int argc, char** argv)
                     {
                       bflip(linear_sampling);
                       for(i32 img_idx = 0;
-                          img_idx < total_img_count;
+                          img_idx < state->total_img_count;
                           ++img_idx)
                       {
-                        glBindTexture(GL_TEXTURE_2D, img_entries[img_idx].texture_id);
+                        glBindTexture(GL_TEXTURE_2D, state->img_entries[img_idx].texture_id);
                         if(linear_sampling)
                         {
                           glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -1551,7 +1570,7 @@ int main(int argc, char** argv)
                       // TODO: Copy list of marked images if there are any.
                       if(state->filtered_img_count)
                       {
-                        clipboard_str = img_entries[state->filtered_img_idxs[viewing_filtered_img_idx]].path;
+                        clipboard_str = state->img_entries[state->filtered_img_idxs[viewing_filtered_img_idx]].path;
                         XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
                       }
                     }
@@ -1788,7 +1807,7 @@ int main(int argc, char** argv)
                   b32 respond_ok = false;
 
                   b32 any_marked = false;
-                  for_count(i, total_img_count) { any_marked = any_marked || (img_entries[i].flags & IMG_FLAG_MARKED); }
+                  for_count(i, state->total_img_count) { any_marked = any_marked || (state->img_entries[i].flags & IMG_FLAG_MARKED); }
 
                   if(request->property != None && clipboard_str.data != 0)
                   {
@@ -1807,14 +1826,14 @@ int main(int argc, char** argv)
                     else if(request->target == atom_uri_list)
                     {
                       for(i32 img_idx = 0;
-                          img_idx < total_img_count;
+                          img_idx < state->total_img_count;
                           ++img_idx)
                       {
                         char* path = 0;
                         if(any_marked)
                         {
-                          if(!(img_entries[img_idx].flags & IMG_FLAG_MARKED)) { continue; }
-                          path = (char*)img_entries[img_idx].path.data;
+                          if(!(state->img_entries[img_idx].flags & IMG_FLAG_MARKED)) { continue; }
+                          path = (char*)state->img_entries[img_idx].path.data;
                         }
                         else
                         {
@@ -1955,6 +1974,13 @@ int main(int argc, char** argv)
               else if(mouse_in_sidebar)
               {
                 hovered_interaction = sidebar_interaction;
+
+                state->dragging_start_value = 0;
+                if(hovered_thumbnail_idx != -1)
+                {
+                  state->dragging_start_value =
+                    (state->img_entries[state->filtered_img_idxs[hovered_thumbnail_idx]].flags & IMG_FLAG_MARKED);
+                }
               }
               else
               {
@@ -1975,9 +2001,27 @@ int main(int argc, char** argv)
             {
               if(hovered_thumbnail_idx != -1)
               {
+                b32 set_mark = !state->dragging_start_value;
+
+                if(shift_held)
+                {
+                  i32 step = hovered_thumbnail_idx >= viewing_filtered_img_idx ? 1 : -1;
+                  for(i32 idx = viewing_filtered_img_idx;
+                      idx != hovered_thumbnail_idx;
+                      idx += step)
+                  {
+                    set_or_unset_filtered_img_flag(state, idx, IMG_FLAG_MARKED, set_mark);
+                  }
+                  set_or_unset_filtered_img_flag(state, hovered_thumbnail_idx, IMG_FLAG_MARKED, set_mark);
+                }
+                else if(ctrl_held)
+                {
+                  set_or_unset_filtered_img_flag(state, hovered_thumbnail_idx, IMG_FLAG_MARKED, set_mark);
+                }
+
                 viewing_filtered_img_idx = hovered_thumbnail_idx;
-                dirty = true;
               }
+              dirty = true;
             }
             else if(interaction_eq(current_interaction, sidebar_resize_interaction))
             {
@@ -2108,7 +2152,7 @@ int main(int argc, char** argv)
             if(state->filtered_img_count > 0)
             {
               viewing_img_idx = state->filtered_img_idxs[viewing_filtered_img_idx];
-              img = &img_entries[viewing_img_idx];
+              img = &state->img_entries[viewing_img_idx];
             }
 
             if(last_viewing_img_idx != viewing_img_idx && img->load_state == LOAD_STATE_LOADED_INTO_RAM)
@@ -2117,7 +2161,7 @@ int main(int argc, char** argv)
               txt[0] = 0;
               i32 txt_len = snprintf(txt, sizeof(txt), "%s [%d/%d] %dx%d %s",
                   PROGRAM_NAME,
-                  viewing_img_idx + 1, total_img_count,
+                  viewing_img_idx + 1, state->total_img_count,
                   img->w, img->h,
                   img->path.data);
               set_title(display, window, (u8*)txt, txt_len);
@@ -2265,7 +2309,7 @@ int main(int argc, char** argv)
                   filtered_idx <= last_visible_thumbnail_idx;
                   ++filtered_idx)
               {
-                img_entry_t* thumb = &img_entries[state->filtered_img_idxs[filtered_idx]];
+                img_entry_t* thumb = &state->img_entries[state->filtered_img_idxs[filtered_idx]];
                 still_loading |= upload_img_texture(thumb, linear_sampling, &vram_bytes_used);
 
                 i32 sidebar_col = filtered_idx % state->thumbnail_columns;
