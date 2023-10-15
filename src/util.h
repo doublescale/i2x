@@ -206,13 +206,16 @@ internal str_t read_file(char* path)
   }
   else
   {
-    if(fseek(fd, 0, SEEK_END) == -1)
+    // This *must* be an int, not a long, otherwise the "-1" that ftell returns on error is wrong.
+    int tell_pos = 0;
+
+    if(fseek(fd, 0, SEEK_END) == -1 || (tell_pos = ftell(fd)) == -1)
     {
       fprintf(stderr, "Could not seek to end of file '%s'\n", path);
     }
     else
     {
-      result.size = ftell(fd);
+      result.size = tell_pos;
       fseek(fd, 0L, SEEK_SET);
       result.data = malloc_array(result.size + 1, u8);
 

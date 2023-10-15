@@ -4,6 +4,7 @@
 #endif
 
 #include <assert.h>
+#include <dirent.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
@@ -12,6 +13,8 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -785,6 +788,7 @@ typedef struct
   b32 vsync;
 
   img_entry_t* img_entries;
+  i32 total_img_capacity;
   i32 total_img_count;
 
   i32* filtered_img_idxs;
@@ -852,6 +856,11 @@ internal void set_or_unset_filtered_img_flag(state_t* state, i32 filtered_idx, i
       get_filtered_img(state, filtered_idx)->flags &= ~flags;
     }
   }
+}
+
+internal int compare_img_entries(const void* void_a, const void* void_b, void* void_data)
+{
+  return strcmp((char*)((img_entry_t*)void_a)->path.data, (char*)((img_entry_t*)void_b)->path.data);
 }
 
 int main(int argc, char** argv)
@@ -1049,12 +1058,11 @@ int main(int argc, char** argv)
         // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-        state->total_img_count = max(1, argc - 1);
-        state->img_entries = malloc_array(state->total_img_count, img_entry_t);
-        zero_bytes(state->total_img_count * sizeof(img_entry_t), state->img_entries);
+        state->total_img_capacity = max(argc - 1, 128 * 1024);
+        state->img_entries = malloc_array(state->total_img_capacity, img_entry_t);
+        zero_bytes(state->total_img_capacity * sizeof(img_entry_t), state->img_entries);
 
-        state->filtered_img_idxs = malloc_array(state->total_img_count, i32);
-        state->filtered_img_count = state->total_img_count;
+        state->filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
 
         GLuint test_texture_id = 0;
         glGenTextures(1, &test_texture_id);
@@ -1067,23 +1075,54 @@ int main(int argc, char** argv)
             test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
         glGenerateMipmap(GL_TEXTURE_2D);
 
-        for(i32 img_idx = 0;
-            img_idx < state->total_img_count;
-            ++img_idx)
+        for(i32 argv_idx = 1;
+            argv_idx < argc;
+            ++argv_idx)
         {
-          img_entry_t* img = &state->img_entries[img_idx];
+          char* arg = argv[argv_idx];
+          b32 is_a_dir = false;
+          DIR* dir = opendir(arg);
 
-          if(argc > 1)
+          if(dir)
           {
-            img->path = wrap_str(argv[img_idx + 1]);
-          }
-          else
-          {
-            img->path = str("<TEST IMAGE>");
+            i32 first_img_idx = state->total_img_count;
+            struct dirent* dirent;
+            while((dirent = readdir(dir)))
+            {
+              is_a_dir = true;
+              char* path = dirent->d_name;
+              if(!zstr_eq(path, ".") && !zstr_eq(path, ".."))
+              {
+                char* full_path = 0;
+                if(asprintf(&full_path, "%s/%s", arg, path) != -1)
+                {
+                  i32 img_idx = state->total_img_count++;
+                  img_entry_t* img = &state->img_entries[img_idx];
+                  img->path = wrap_str(full_path);
+                }
+              }
+            }
+
+            i32 num_files_in_dir = state->total_img_count - first_img_idx;
+            qsort_r(&state->img_entries[first_img_idx], num_files_in_dir, sizeof(img_entry_t),
+                compare_img_entries, 0);
           }
 
-          state->filtered_img_idxs[img_idx] = img_idx;
+          if(!is_a_dir)
+          {
+            i32 img_idx = state->total_img_count++;
+            img_entry_t* img = &state->img_entries[img_idx];
+            img->path = wrap_str(arg);
+          }
         }
+
+        for(i32 idx = 0;
+            idx < state->total_img_count;
+            ++idx)
+        {
+          state->filtered_img_idxs[idx] = idx;
+        }
+        state->filtered_img_count = state->total_img_count;
 
         pthread_t loader_threads[7] = {0};
         i32 loader_count = array_count(loader_threads);
