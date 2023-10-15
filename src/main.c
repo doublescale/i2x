@@ -16,7 +16,6 @@
 #include <unistd.h>
 
 // https://www.x.org/releases/current/doc/libX11/libX11/libX11.html
-// TODO: Only define what's necessary.
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #define XK_MISCELLANY
@@ -758,6 +757,56 @@ internal b32 upload_img_texture(img_entry_t* img, b32 linear_sampling, i64* vram
   return result;
 }
 
+typedef struct
+{
+  void* ptr;
+} ui_interaction_t;
+
+internal b32 interaction_is_empty(ui_interaction_t a)
+{
+  return a.ptr == 0;
+}
+
+internal b32 interaction_eq(ui_interaction_t a, ui_interaction_t b)
+{
+  return a.ptr == b.ptr;
+}
+
+internal b32 interaction_allowed(ui_interaction_t current, ui_interaction_t target)
+{
+  return current.ptr == 0 || current.ptr == target.ptr;
+}
+
+typedef struct
+{
+  i32 win_w;
+  i32 win_h;
+
+  b32 vsync;
+
+  i32* filtered_img_idxs;
+  i32 filtered_img_count;
+
+  b32 zoom_from_original_size;  // If false, fit to window instead.
+
+  b32 hide_sidebar;
+  i32 sidebar_width;
+  r32 sidebar_scroll_rows;
+  i32 thumbnail_columns;
+
+  r32 dragging_start_x;
+  r32 dragging_start_y;
+  i32 dragging_start_value;
+  b32 mouse_moved_since_dragging_start;
+} state_t;
+
+internal void clamp_sidebar_scroll_rows(state_t* state)
+{
+  state->sidebar_scroll_rows = max(0,
+      min((state->filtered_img_count + state->thumbnail_columns - 1) / state->thumbnail_columns - 1,
+        state->sidebar_scroll_rows));
+}
+
 int main(int argc, char** argv)
 {
   Display* display = XOpenDisplay(0);
@@ -875,11 +924,13 @@ int main(int argc, char** argv)
         XFree(visual_info);
         GLXWindow glx_window = glXCreateWindow(display, glx_config, window, 0);
 
-        b32 vsync = true;
+        state_t _state = {0};
+        state_t* state = &_state;
+        state->vsync = true;
 
         // TODO: Check if GLX_EXT_swap_control is in the extensions string first.
         // Enable VSync.
-        glXSwapIntervalEXT(display, glx_window, vsync);
+        glXSwapIntervalEXT(display, glx_window, state->vsync);
 
         if(xi_available)
         {
@@ -955,8 +1006,8 @@ int main(int argc, char** argv)
         img_entry_t* img_entries = malloc_array(total_img_count, img_entry_t);
         zero_bytes(total_img_count * sizeof(img_entry_t), img_entries);
 
-        i32* filtered_img_idxs = malloc_array(total_img_count, i32);
-        i32 filtered_img_count = total_img_count;
+        state->filtered_img_idxs = malloc_array(total_img_count, i32);
+        state->filtered_img_count = total_img_count;
 
         GLuint test_texture_id = 0;
         glGenTextures(1, &test_texture_id);
@@ -984,7 +1035,7 @@ int main(int argc, char** argv)
             img->path = str("<TEST IMAGE>");
           }
 
-          filtered_img_idxs[img_idx] = img_idx;
+          state->filtered_img_idxs[img_idx] = img_idx;
         }
 
         pthread_t loader_threads[7] = {0};
@@ -996,8 +1047,8 @@ int main(int argc, char** argv)
         zero_struct(*shared_loader_data);
         shared_loader_data->total_img_count = total_img_count;
         shared_loader_data->img_entries = img_entries;
-        shared_loader_data->filtered_img_count = filtered_img_count;
-        shared_loader_data->filtered_img_idxs = filtered_img_idxs;
+        shared_loader_data->filtered_img_count = state->filtered_img_count;
+        shared_loader_data->filtered_img_idxs = state->filtered_img_idxs;
         shared_loader_data->test_texture_id = test_texture_id;
 
         for(i32 loader_idx = 0;
@@ -1011,9 +1062,8 @@ int main(int argc, char** argv)
           pthread_create(&loader_threads[loader_idx], 0, loader_fun, &loader_data[loader_idx]);
         }
 
-        i32 win_w = WINDOW_INIT_W;
-        i32 win_h = WINDOW_INIT_H;
-        GLuint texture_id = 0;
+        state->win_w = WINDOW_INIT_W;
+        state->win_h = WINDOW_INIT_H;
         i64 vram_bytes_used = 0;
 
         r32 time = 0;
@@ -1031,15 +1081,13 @@ int main(int argc, char** argv)
         b32 linear_sampling = true;
         b32 alpha_blend = true;
         b32 bright_bg = false;
-        b32 extra_toggles[10] = {0};
+        b32 show_fps = false;
         r32 zoom = 0;
         r32 offset_x = 0;
         r32 offset_y = 0;
-        b32 hide_sidebar = false;
-        i32 sidebar_width = 310;
-        r32 sidebar_scroll_rows = 0;
-        r32 thumbnail_w = 150.0f;
-        r32 thumbnail_h = thumbnail_w;
+        state->hide_sidebar = false;
+        state->sidebar_width = 310;
+        state->thumbnail_columns = 2;
         i32 hovered_thumbnail_idx = -1;
         b32 show_info = true;
         i32 info_height = 40;
@@ -1057,8 +1105,6 @@ int main(int argc, char** argv)
         r32 offset_scroll_scale = 0.125f;
         r32 zoom_scroll_scale = 0.25f;
 
-        r32 zoom_start_x = 0;
-        r32 zoom_start_y = 0;
         r32 prev_mouse_x = 0;
         r32 prev_mouse_y = 0;
         b32 lmb_held = false;
@@ -1070,10 +1116,16 @@ int main(int argc, char** argv)
         b32 has_focus = false;
         i32 dirty_frames = 1;
 
+        ui_interaction_t hovered_interaction = {0};
+        ui_interaction_t current_interaction = {0};
+        ui_interaction_t mainview_interaction = { &offset_x };
+        ui_interaction_t sidebar_interaction = { &viewing_filtered_img_idx };
+        ui_interaction_t sidebar_resize_interaction = { &state->sidebar_width };
+
         while(!quitting)
         {
 #if 1
-          if(vsync)
+          if(state->vsync)
           {
             // TODO: Check for this in GLX extension string before using it.
             glXDelayBeforeSwapNV(display, glx_window, 0.002f);
@@ -1083,7 +1135,7 @@ int main(int argc, char** argv)
           b32 scroll_thumbnail_into_view = false;
           b32 dirty = false;
 
-          if(!vsync) { dirty = true; }
+          if(!state->vsync) { dirty = true; }
 
           while(XPending(display))
           {
@@ -1095,7 +1147,10 @@ int main(int argc, char** argv)
             r32 scroll_x = 0;
             r32 scroll_y = 0;
             i32 mouse_btn_went_down = 0;
-            i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
+            i32 mouse_btn_went_up = 0;
+            r32 effective_sidebar_width = max(0, min(state->win_w - 10, state->sidebar_width));
+            r32 thumbnail_w = (r32)effective_sidebar_width / (r32)state->thumbnail_columns;
+            r32 thumbnail_h = thumbnail_w;
 
             XEvent event;
             XNextEvent(display, &event);
@@ -1118,11 +1173,8 @@ int main(int argc, char** argv)
                     shift_held = (mods & 1);
                     ctrl_held = (mods & 4);
                     alt_held = (mods & 8);
-                    lmb_held = (button_mask & 2);
-                    mmb_held = (button_mask & 4);
-                    rmb_held = (button_mask & 8);
                     mouse_x = (r32)devev->event_x;
-                    mouse_y = (r32)win_h - (r32)devev->event_y - 1.0f;
+                    mouse_y = (r32)state->win_h - (r32)devev->event_y - 1.0f;
 
 #if 0
                     printf("%s %d:%d detail %d flags %d mods %d r %.2f,%.2f e %.2f,%.2f btns %d\n",
@@ -1151,39 +1203,66 @@ int main(int argc, char** argv)
                     }
 #endif
 
-                    if(event.xcookie.evtype == XI_ButtonPress)
+                    if(event.xcookie.evtype == XI_Motion)
                     {
-                      mouse_btn_went_down = button;
-                      if(button == 4)
+                      lmb_held = (button_mask & 2);
+                      mmb_held = (button_mask & 4);
+                      rmb_held = (button_mask & 8);
+                    }
+                    else
+                    {
+                      b32 went_down = (event.xcookie.evtype == XI_ButtonPress);
+                      if(button == 1)
                       {
-                        scroll_y_ticks += 1;
+                        lmb_held = went_down;
                       }
-                      else if(button == 5)
+                      else if(button == 2)
                       {
-                        scroll_y_ticks -= 1;
+                        mmb_held = went_down;
                       }
-                      if(!(devev->flags & XIPointerEmulated))
+                      else if(button == 3)
                       {
+                        rmb_held = went_down;
+                      }
+
+                      if(went_down)
+                      {
+                        mouse_btn_went_down = button;
                         if(button == 4)
                         {
-                          scroll_y += 1.0f;
+                          scroll_y_ticks += 1;
                         }
                         else if(button == 5)
                         {
-                          scroll_y -= 1.0f;
+                          scroll_y_ticks -= 1;
                         }
-                        else if(button == 6)
+                        if(!(devev->flags & XIPointerEmulated))
                         {
-                          scroll_x -= 1.0f;
+                          if(button == 4)
+                          {
+                            scroll_y += 1.0f;
+                          }
+                          else if(button == 5)
+                          {
+                            scroll_y -= 1.0f;
+                          }
+                          else if(button == 6)
+                          {
+                            scroll_x -= 1.0f;
+                          }
+                          else if(button == 7)
+                          {
+                            scroll_x += 1.0f;
+                          }
                         }
-                        else if(button == 7)
-                        {
-                          scroll_x += 1.0f;
-                        }
-                      }
 
-                      zoom_start_x = mouse_x;
-                      zoom_start_y = mouse_y;
+                        state->dragging_start_x = mouse_x;
+                        state->dragging_start_y = mouse_y;
+                      }
+                      else
+                      {
+                        mouse_btn_went_up = button;
+                      }
                     }
 
                     // TODO: This probably needs to happen for absolute pointers, e.g. tablet devices.
@@ -1320,17 +1399,17 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == XK_Up)
                     {
-                      if(viewing_filtered_img_idx - thumbnail_columns >= 0)
+                      if(viewing_filtered_img_idx - state->thumbnail_columns >= 0)
                       {
-                        viewing_filtered_img_idx -= thumbnail_columns;
+                        viewing_filtered_img_idx -= state->thumbnail_columns;
                       }
                       scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_Down)
                     {
-                      if(viewing_filtered_img_idx + thumbnail_columns < filtered_img_count)
+                      if(viewing_filtered_img_idx + state->thumbnail_columns < state->filtered_img_count)
                       {
-                        viewing_filtered_img_idx += thumbnail_columns;
+                        viewing_filtered_img_idx += state->thumbnail_columns;
                       }
                       scroll_thumbnail_into_view = true;
                     }
@@ -1341,34 +1420,30 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == XK_End)
                     {
-                      viewing_filtered_img_idx = filtered_img_count - 1;
+                      viewing_filtered_img_idx = state->filtered_img_count - 1;
                       scroll_thumbnail_into_view = true;
                     }
                     else if(alt_held && keysym == XK_Page_Up)
                     {
-                      viewing_filtered_img_idx -= thumbnail_columns * (r32)(i32)((r32)win_h / thumbnail_h);
-                      viewing_filtered_img_idx = clamp(0, filtered_img_count - 1, viewing_filtered_img_idx);
+                      viewing_filtered_img_idx -= state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, viewing_filtered_img_idx);
                       scroll_thumbnail_into_view = true;
                     }
                     else if(alt_held && keysym == XK_Page_Down)
                     {
-                      viewing_filtered_img_idx += thumbnail_columns * (r32)(i32)((r32)win_h / thumbnail_h);
-                      viewing_filtered_img_idx = clamp(0, filtered_img_count - 1, viewing_filtered_img_idx);
+                      viewing_filtered_img_idx += state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, viewing_filtered_img_idx);
                       scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_Page_Up)
                     {
-                      sidebar_scroll_rows -= (r32)(i32)((r32)win_h / thumbnail_h);
-                      sidebar_scroll_rows = clamp(0,
-                          (filtered_img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
-                          sidebar_scroll_rows);
+                      state->sidebar_scroll_rows -= (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      clamp_sidebar_scroll_rows(state);
                     }
                     else if(keysym == XK_Page_Down)
                     {
-                      sidebar_scroll_rows += (r32)(i32)((r32)win_h / thumbnail_h);
-                      sidebar_scroll_rows = clamp(0,
-                          (filtered_img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
-                          sidebar_scroll_rows);
+                      state->sidebar_scroll_rows += (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      clamp_sidebar_scroll_rows(state);
                     }
                     else if(ctrl_held && keysym == 'a')
                     {
@@ -1388,35 +1463,35 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 'm')
                     {
-                      if(filtered_img_count)
+                      if(state->filtered_img_count)
                       {
-                        img_entries[filtered_img_idxs[viewing_filtered_img_idx]].flags ^= IMG_FLAG_MARKED;
+                        img_entries[state->filtered_img_idxs[viewing_filtered_img_idx]].flags ^= IMG_FLAG_MARKED;
                       }
                     }
                     else if(keysym == 'f')
                     {
-                      i32 prev_viewing_idx = filtered_img_idxs[viewing_filtered_img_idx];
+                      i32 prev_viewing_idx = state->filtered_img_idxs[viewing_filtered_img_idx];
 
-                      if(filtered_img_count == total_img_count)
+                      if(state->filtered_img_count == total_img_count)
                       {
-                        filtered_img_count = 0;
+                        state->filtered_img_count = 0;
                         for_count(idx, total_img_count)
                         {
                           if(img_entries[idx].flags & IMG_FLAG_MARKED)
                           {
                             if(prev_viewing_idx >= idx)
                             {
-                              viewing_filtered_img_idx = filtered_img_count;
+                              viewing_filtered_img_idx = state->filtered_img_count;
                             }
 
-                            filtered_img_idxs[filtered_img_count++] = idx;
+                            state->filtered_img_idxs[state->filtered_img_count++] = idx;
                           }
                         }
                       }
                       else
                       {
-                        for_count(i, total_img_count) { filtered_img_idxs[i] = i; }
-                        filtered_img_count = total_img_count;
+                        for_count(i, total_img_count) { state->filtered_img_idxs[i] = i; }
+                        state->filtered_img_count = total_img_count;
                         viewing_filtered_img_idx = prev_viewing_idx;
                       }
                     }
@@ -1431,7 +1506,7 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 'h')
                     {
-                      bflip(hide_sidebar);
+                      bflip(state->hide_sidebar);
                     }
                     else if(keysym == 'i')
                     {
@@ -1467,24 +1542,52 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 'v')
                     {
-                      bflip(vsync);
+                      bflip(state->vsync);
 
-                      glXSwapIntervalEXT(display, glx_window, (int)vsync);
+                      glXSwapIntervalEXT(display, glx_window, (int)state->vsync);
                     }
                     else if(ctrl_held && keysym == 'c')
                     {
                       // TODO: Copy list of marked images if there are any.
-                      if(filtered_img_count)
+                      if(state->filtered_img_count)
                       {
-                        clipboard_str = img_entries[filtered_img_idxs[viewing_filtered_img_idx]].path;
+                        clipboard_str = img_entries[state->filtered_img_idxs[viewing_filtered_img_idx]].path;
                         XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
                       }
+                    }
+                    else if(keysym == 'z')
+                    {
+                      zoom = 0;
+                      offset_x = 0;
+                      offset_y = 0;
+                      state->zoom_from_original_size = true;
                     }
                     else if(keysym == 'x')
                     {
                       zoom = 0;
                       offset_x = 0;
                       offset_y = 0;
+                      state->zoom_from_original_size = false;
+                    }
+                    else if(keysym == '1')
+                    {
+                      zoom = 0;
+                      state->zoom_from_original_size = true;
+                    }
+                    else if(keysym == '2')
+                    {
+                      zoom = shift_held ? -1 : 1;
+                      state->zoom_from_original_size = true;
+                    }
+                    else if(keysym == '3')
+                    {
+                      zoom = shift_held ? -log2f(3.0f) : log2f(3.0f);
+                      state->zoom_from_original_size = true;
+                    }
+                    else if(keysym == '4')
+                    {
+                      zoom = shift_held ? -2 : 2;
+                      state->zoom_from_original_size = true;
                     }
                     else if(keysym == '0')
                     {
@@ -1498,9 +1601,9 @@ int main(int argc, char** argv)
                     {
                       zoom += 0.25f;
                     }
-                    else if(keysym >= '0' && keysym <= '9')
+                    else if(keysym == '5')
                     {
-                      bflip(extra_toggles[keysym - '0']);
+                      bflip(show_fps);
                     }
                   }
                   else
@@ -1537,7 +1640,7 @@ int main(int argc, char** argv)
                   mmb_held = (event.xbutton.state & 0x200);
                   rmb_held = (event.xbutton.state & 0x400);
                   mouse_x = event.xbutton.x;
-                  mouse_y = win_h - event.xbutton.y - 1;
+                  mouse_y = state->win_h - event.xbutton.y - 1;
 
 #if 0
                   printf("state %#x button %u %s\n",
@@ -1566,8 +1669,8 @@ int main(int argc, char** argv)
                       scroll_x += 1.0f;
                     }
 
-                    zoom_start_x = mouse_x;
-                    zoom_start_y = mouse_y;
+                    state->dragging_start_x = mouse_x;
+                    state->dragging_start_y = mouse_y;
                   }
                 } break;
 
@@ -1581,7 +1684,7 @@ int main(int argc, char** argv)
                   mmb_held = (event.xmotion.state & 0x200);
                   rmb_held = (event.xmotion.state & 0x400);
                   mouse_x = event.xbutton.x;
-                  mouse_y = win_h - event.xbutton.y - 1;
+                  mouse_y = state->win_h - event.xbutton.y - 1;
 
                   mouse_delta_x += mouse_x - prev_mouse_x;
                   mouse_delta_y += mouse_y - prev_mouse_y;
@@ -1614,11 +1717,11 @@ int main(int argc, char** argv)
 
                 case ConfigureNotify:
                 {
-                  win_w = event.xconfigure.width;
-                  win_h = event.xconfigure.height;
+                  state->win_w = event.xconfigure.width;
+                  state->win_h = event.xconfigure.height;
 
-                  mouse_x = 0.5f * (r32)win_w;
-                  mouse_y = 0.5f * (r32)win_h;
+                  mouse_x = 0.5f * (r32)state->win_w;
+                  mouse_y = 0.5f * (r32)state->win_h;
                 } break;
 
                 case Expose:
@@ -1806,16 +1909,87 @@ int main(int argc, char** argv)
             }
 
             // Handle mouse events.
-            b32 mouse_in_sidebar = (!hide_sidebar && mouse_x < sidebar_width);
-            if(mouse_in_sidebar && hovered_thumbnail_idx != -1 && (mouse_btn_went_down == 1 || lmb_held))
-            {
-              viewing_filtered_img_idx = hovered_thumbnail_idx;
 
-              dirty = true;
+            if(interaction_eq(current_interaction, mainview_interaction) &&
+                !state->mouse_moved_since_dragging_start)
+            {
+              if(mouse_btn_went_up == 1)
+              {
+                viewing_filtered_img_idx += 1;
+                dirty = true;
+              }
+              else if(mouse_btn_went_up == 2)
+              {
+                viewing_filtered_img_idx -= 1;
+                dirty = true;
+              }
+            }
+
+            if(mouse_delta_x != 0 || mouse_delta_y != 0)
+            {
+              state->mouse_moved_since_dragging_start = true;
+            }
+
+            if(!lmb_held && !mmb_held && !rmb_held)
+            {
+              zero_struct(current_interaction);
+            }
+
+            b32 mouse_on_sidebar_edge =
+              (!state->hide_sidebar &&
+               mouse_x >= effective_sidebar_width && mouse_x < effective_sidebar_width + 10);
+            b32 mouse_in_sidebar =
+              (!state->hide_sidebar && !mouse_on_sidebar_edge && mouse_x < effective_sidebar_width);
+
+            if(interaction_is_empty(current_interaction))
+            {
+              if(!has_focus)
+              {
+                zero_struct(hovered_interaction);
+              }
+              else if(mouse_on_sidebar_edge)
+              {
+                hovered_interaction = sidebar_resize_interaction;
+                state->dragging_start_value = effective_sidebar_width;
+              }
+              else if(mouse_in_sidebar)
+              {
+                hovered_interaction = sidebar_interaction;
+              }
+              else
+              {
+                hovered_interaction = mainview_interaction;
+              }
+
+              if(mouse_btn_went_down)
+              {
+                current_interaction = hovered_interaction;
+
+                state->dragging_start_x = mouse_x;
+                state->dragging_start_y = mouse_y;
+                state->mouse_moved_since_dragging_start = false;
+              }
+            }
+
+            if(interaction_eq(current_interaction, sidebar_interaction) && lmb_held)
+            {
+              if(hovered_thumbnail_idx != -1)
+              {
+                viewing_filtered_img_idx = hovered_thumbnail_idx;
+                dirty = true;
+              }
+            }
+            else if(interaction_eq(current_interaction, sidebar_resize_interaction))
+            {
+              if(lmb_held)
+              {
+                state->sidebar_width = state->dragging_start_value + (i32)(mouse_x - state->dragging_start_x);
+                dirty = true;
+              }
             }
             else if(mouse_delta_x || mouse_delta_y || scroll_x || scroll_y || scroll_y_ticks || mouse_btn_went_down)
             {
-              r32 win_min_side = min(win_w, win_h);
+              r32 win_min_side = min(state->win_w, state->win_h);
               r32 exp_zoom_before = exp2f(zoom);
               r32 offset_per_scroll = offset_scroll_scale / exp_zoom_before;
               r32 zoom_delta = 0;
@@ -1831,22 +2005,17 @@ int main(int argc, char** argv)
                 {
                   if(ctrl_held)
                   {
-                    if(scroll_y != 0)
-                    {
-                      thumbnail_w *= exp2f(scroll_y);
-                      thumbnail_h = thumbnail_w;
-                      scroll_thumbnail_into_view = true;
-                    }
+                    state->thumbnail_columns -= scroll_y_ticks;
+                    state->thumbnail_columns = clamp(1, 64, state->thumbnail_columns);
+                    scroll_thumbnail_into_view = true;
                   }
                   else if(shift_held)
                   {
                   }
                   else
                   {
-                    sidebar_scroll_rows -= scroll_y;
-                    sidebar_scroll_rows = clamp(0,
-                        (filtered_img_count + thumbnail_columns - 1) / thumbnail_columns - 1,
-                        sidebar_scroll_rows);
+                    state->sidebar_scroll_rows -= scroll_y;
+                    clamp_sidebar_scroll_rows(state);
                   }
                 }
                 else
@@ -1869,11 +2038,11 @@ int main(int argc, char** argv)
 
               if(zoom_delta != 0.0f)
               {
-                zoom_start_x = mouse_x;
-                zoom_start_y = mouse_y;
+                state->dragging_start_x = mouse_x;
+                state->dragging_start_y = mouse_y;
               }
 
-              if(lmb_held || mmb_held)
+              if(interaction_eq(current_interaction, mainview_interaction))
               {
                 if(ctrl_held || mmb_held)
                 {
@@ -1884,8 +2053,8 @@ int main(int argc, char** argv)
                   offset_x += mouse_delta_x / (exp_zoom_before * win_min_side);
                   offset_y += mouse_delta_y / (exp_zoom_before * win_min_side);
 
-                  zoom_start_x = mouse_x;
-                  zoom_start_y = mouse_y;
+                  state->dragging_start_x = mouse_x;
+                  state->dragging_start_y = mouse_y;
                 }
               }
 
@@ -1894,12 +2063,12 @@ int main(int argc, char** argv)
                 zoom += zoom_delta;
                 r32 exp_zoom_after = exp2f(zoom);
 
-                r32 center_mouse_x = zoom_start_x - 0.5f * win_w;
-                r32 center_mouse_y = zoom_start_y - 0.5f * win_h;
+                r32 center_mouse_x = state->dragging_start_x - 0.5f * state->win_w;
+                r32 center_mouse_y = state->dragging_start_y - 0.5f * state->win_h;
 
-                if(!hide_sidebar)
+                if(!state->hide_sidebar)
                 {
-                  center_mouse_x -= 0.5f * (r32)sidebar_width;
+                  center_mouse_x -= 0.5f * (r32)effective_sidebar_width;
                 }
                 if(show_info)
                 {
@@ -1928,15 +2097,17 @@ int main(int argc, char** argv)
           {
             --dirty_frames;
 
-            i32 thumbnail_columns = max(1, (i32)((r32)sidebar_width / thumbnail_w));
+            r32 effective_sidebar_width = max(0, min(state->win_w - 10, state->sidebar_width));
+            r32 thumbnail_w = (r32)effective_sidebar_width / (r32)state->thumbnail_columns;
+            r32 thumbnail_h = thumbnail_w;
 
-            viewing_filtered_img_idx = i32_wrap_upto(viewing_filtered_img_idx, filtered_img_count);
+            viewing_filtered_img_idx = i32_wrap_upto(viewing_filtered_img_idx, state->filtered_img_count);
             i32 viewing_img_idx = -1;
             img_entry_t dummy_img = {0};
             img_entry_t* img = &dummy_img;
-            if(filtered_img_count > 0)
+            if(state->filtered_img_count > 0)
             {
-              viewing_img_idx = filtered_img_idxs[viewing_filtered_img_idx];
+              viewing_img_idx = state->filtered_img_idxs[viewing_filtered_img_idx];
               img = &img_entries[viewing_img_idx];
             }
 
@@ -1953,19 +2124,19 @@ int main(int argc, char** argv)
 
               if(show_info)
               {
-#define p(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
+#define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
                 puts("");
                 puts(txt);
-                p(generation_parameters);
-                p(positive_prompt);
-                p(negative_prompt);
-                p(seed);
-                p(batch_size);
-                p(model);
-                p(sampler);
-                p(sampling_steps);
-                p(cfg);
-#undef p
+                P(generation_parameters);
+                P(positive_prompt);
+                P(negative_prompt);
+                P(seed);
+                P(batch_size);
+                P(model);
+                P(sampler);
+                P(sampling_steps);
+                P(cfg);
+#undef P
               }
 
               scroll_thumbnail_into_view = true;
@@ -1975,33 +2146,33 @@ int main(int argc, char** argv)
 
             if(scroll_thumbnail_into_view)
             {
-              i32 thumbnail_row = viewing_filtered_img_idx / thumbnail_columns;
+              i32 thumbnail_row = viewing_filtered_img_idx / state->thumbnail_columns;
 
               // TODO: Fix this so clicking on the first or last row doesn't mess up.
-              // i32 extra_rows = (win_h >= 2 * thumbnail_h) ? 1 : 0;
+              // i32 extra_rows = (state->win_h >= 2 * thumbnail_h) ? 1 : 0;
               i32 extra_rows = 0;
 
-              sidebar_scroll_rows = clamp(
-                  max(0, thumbnail_row + 1 - win_h / thumbnail_h + extra_rows),
+              state->sidebar_scroll_rows = clamp(
+                  max(0, thumbnail_row + 1 - state->win_h / thumbnail_h + extra_rows),
                   thumbnail_row - extra_rows,
-                  sidebar_scroll_rows);
+                  state->sidebar_scroll_rows);
             }
 
-            i32 first_visible_row = (i32)sidebar_scroll_rows;
-            i32 one_past_last_visible_row = (i32)(sidebar_scroll_rows + win_h / thumbnail_h + 1);
-            i32 first_visible_thumbnail_idx = max(0, first_visible_row * thumbnail_columns);
-            i32 last_visible_thumbnail_idx = min(filtered_img_count, one_past_last_visible_row * thumbnail_columns) - 1;
+            i32 first_visible_row = (i32)state->sidebar_scroll_rows;
+            i32 one_past_last_visible_row = (i32)(state->sidebar_scroll_rows + state->win_h / thumbnail_h + 1);
+            i32 first_visible_thumbnail_idx = max(0, first_visible_row * state->thumbnail_columns);
+            i32 last_visible_thumbnail_idx = min(state->filtered_img_count, one_past_last_visible_row * state->thumbnail_columns) - 1;
             if(0
                 || viewing_filtered_img_idx != shared_loader_data->viewing_filtered_img_idx
                 || first_visible_thumbnail_idx != shared_loader_data->first_visible_thumbnail_idx
                 || last_visible_thumbnail_idx != shared_loader_data->last_visible_thumbnail_idx
-                || filtered_img_count != shared_loader_data->filtered_img_count
+                || state->filtered_img_count != shared_loader_data->filtered_img_count
               )
             {
               shared_loader_data->viewing_filtered_img_idx = viewing_filtered_img_idx;
               shared_loader_data->first_visible_thumbnail_idx = first_visible_thumbnail_idx;
               shared_loader_data->last_visible_thumbnail_idx = last_visible_thumbnail_idx;
-              shared_loader_data->filtered_img_count = filtered_img_count;
+              shared_loader_data->filtered_img_count = state->filtered_img_count;
               for_count(i, loader_count) { sem_post(&loader_semaphores[i]); }
             }
 
@@ -2030,7 +2201,7 @@ int main(int argc, char** argv)
             }
 #endif
 
-            glViewport(0, 0, win_w, win_h);
+            glViewport(0, 0, state->win_w, state->win_h);
             glDisable(GL_SCISSOR_TEST);
             {
               r32 bg_gray = bright_bg ? 0.9f : 0.1f;
@@ -2039,12 +2210,12 @@ int main(int argc, char** argv)
             glClear(GL_COLOR_BUFFER_BIT);
             glEnable(GL_SCISSOR_TEST);
 
-            if(win_w != 0 && win_h != 0)
+            if(state->win_w != 0 && state->win_h != 0)
             {
               glMatrixMode(GL_PROJECTION);
               r32 matrix[16] = { // Column-major!
-                2.0f / win_w, 0.0f, 0.0f, 0.0f,
-                0.0f, 2.0f / win_h, 0.0f, 0.0f,
+                2.0f / state->win_w, 0.0f, 0.0f, 0.0f,
+                0.0f, 2.0f / state->win_h, 0.0f, 0.0f,
                 0.0f, 0.0f, 1.0f, 0.0f,
                 -1.0f, -1.0f, 0.0f, 1.0f,
               };
@@ -2053,28 +2224,30 @@ int main(int argc, char** argv)
 
             b32 still_loading = false;
 
-            if(!hide_sidebar)
+            if(!state->hide_sidebar)
             {
-              glScissor(0, 0, sidebar_width, win_h);
+              glScissor(0, 0, effective_sidebar_width, state->win_h);
 
               glDisable(GL_BLEND);
               glDisable(GL_TEXTURE_2D);
               glBegin(GL_QUADS);
-              if(bright_bg)
+              r32 sidebar_edge_gray = 0.0f;
+              if(interaction_eq(hovered_interaction, sidebar_resize_interaction))
               {
-                glColor3f(0.0f, 0.0f, 0.0f);
+                sidebar_edge_gray = bright_bg ? 0.0f : 1.0f;
               }
               else
               {
-                glColor3f(1.0f, 1.0f, 1.0f);
+                sidebar_edge_gray = bright_bg ? 0.4f : 0.6f;
               }
-              glVertex2f(sidebar_width - 2, 0);
-              glVertex2f(sidebar_width - 1, 0);
-              glVertex2f(sidebar_width - 1, win_h);
-              glVertex2f(sidebar_width - 2, win_h);
+              glColor3f(sidebar_edge_gray, sidebar_edge_gray, sidebar_edge_gray);
+              glVertex2f(effective_sidebar_width - 2, 0);
+              glVertex2f(effective_sidebar_width - 1, 0);
+              glVertex2f(effective_sidebar_width - 1, state->win_h);
+              glVertex2f(effective_sidebar_width - 2, state->win_h);
               glEnd();
 
-              glScissor(0, 0, sidebar_width - 2, win_h);
+              glScissor(0, 0, effective_sidebar_width - 2, state->win_h);
 
               if(alpha_blend)
               {
@@ -2092,20 +2265,24 @@ int main(int argc, char** argv)
                   filtered_idx <= last_visible_thumbnail_idx;
                   ++filtered_idx)
               {
-                img_entry_t* thumb = &img_entries[filtered_img_idxs[filtered_idx]];
+                img_entry_t* thumb = &img_entries[state->filtered_img_idxs[filtered_idx]];
                 still_loading |= upload_img_texture(thumb, linear_sampling, &vram_bytes_used);
 
-                i32 sidebar_col = filtered_idx % thumbnail_columns;
-                i32 sidebar_row = filtered_idx / thumbnail_columns;
+                i32 sidebar_col = filtered_idx % state->thumbnail_columns;
+                i32 sidebar_row = filtered_idx / state->thumbnail_columns;
 
                 r32 box_x0 = sidebar_col * thumbnail_w;
-                r32 box_y1 = win_h - ((r32)sidebar_row - sidebar_scroll_rows) * thumbnail_h;
+                r32 box_y1 = state->win_h - ((r32)sidebar_row - state->sidebar_scroll_rows) * thumbnail_h;
                 r32 box_x1 = box_x0 + thumbnail_w;
                 r32 box_y0 = box_y1 - thumbnail_h;
 
                 if(hovered_thumbnail_idx == -1 &&
-                    prev_mouse_x >= box_x0 && prev_mouse_x < box_x1 &&
-                    prev_mouse_y >= box_y0 && prev_mouse_y < box_y1)
+                    interaction_eq(hovered_interaction, sidebar_interaction) &&
+                    max(0, prev_mouse_x) >= box_x0 &&
+                    (prev_mouse_x < box_x1 || sidebar_col == state->thumbnail_columns - 1) &&
+                    prev_mouse_y >= box_y0 &&
+                    prev_mouse_y < box_y1
+                  )
                 {
                   hovered_thumbnail_idx = filtered_idx;
                 }
@@ -2189,10 +2366,10 @@ int main(int argc, char** argv)
 
             still_loading |= upload_img_texture(img, linear_sampling, &vram_bytes_used);
 
-            i32 image_region_x0 = hide_sidebar ? 0 : sidebar_width;
+            i32 image_region_x0 = state->hide_sidebar ? 0 : effective_sidebar_width;
             i32 image_region_y0 = show_info ? info_height : 0;
-            i32 image_region_w = win_w - image_region_x0;
-            i32 image_region_h = win_h - image_region_y0;
+            i32 image_region_w = state->win_w - image_region_x0;
+            i32 image_region_h = state->win_h - image_region_y0;
 
             // if(img->texture_id)
             {
@@ -2218,7 +2395,7 @@ int main(int argc, char** argv)
               glScissor(image_region_x0, image_region_y0, image_region_w, image_region_h);
 
               r32 mag = 1.0f;
-              if(tex_w != 0 && tex_h != 0)
+              if(!state->zoom_from_original_size && tex_w != 0 && tex_h != 0)
               {
                 mag = min((r32)image_region_w / (r32)tex_w, (r32)image_region_h / (r32)tex_h);
               }
@@ -2233,7 +2410,7 @@ int main(int argc, char** argv)
               r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
               r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
 
-              r32 win_min_side = min(win_w, win_h);
+              r32 win_min_side = min(state->win_w, state->win_h);
               x0 += win_min_side * exp_zoom * offset_x;
               y0 += win_min_side * exp_zoom * offset_y;
 
@@ -2285,7 +2462,7 @@ int main(int argc, char** argv)
 
             // TODO: Re-enable this once we don't do X11 drawing anymore.
 #if 0
-            if(vsync)
+            if(state->vsync)
             {
               // glFinish seems to reduce lag on HP laptop.
               // On desktop, it doesn't help, and brings CPU usage to 100% :/
@@ -2303,7 +2480,7 @@ int main(int argc, char** argv)
             {
               glXWaitGL();
               // XSync(display, false);
-              XDrawString(display, window, gc, image_region_x0 + 10, win_h - 10,
+              XDrawString(display, window, gc, image_region_x0 + 10, state->win_h - 10,
                   (char*)img->positive_prompt.data, img->positive_prompt.size);
               glXWaitX();
               // XSync(display, false);
@@ -2326,7 +2503,7 @@ int main(int argc, char** argv)
           i64 nsecs = nsecs_now - nsecs_last_frame;
           nsecs_last_frame = nsecs_now;
 #if 1
-          if(!vsync || extra_toggles[5])
+          if(!state->vsync || show_fps)
           {
             ++frames_since_last_print;
             nsecs_min = min(nsecs_min, nsecs);
