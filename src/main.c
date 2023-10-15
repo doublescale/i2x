@@ -1590,6 +1590,7 @@ int main(int argc, char** argv)
                         state->filtered_img_count = state->total_img_count;
                         viewing_filtered_img_idx = prev_viewing_idx;
                       }
+                      clamp_sidebar_scroll_rows(state);
                       scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == 'a')
