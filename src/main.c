@@ -867,14 +867,19 @@ internal b32 interaction_allowed(ui_interaction_t current, ui_interaction_t targ
   return current.ptr == 0 || current.ptr == target.ptr;
 }
 
+internal i32 get_scrollbar_width(state_t* state)
+{
+  return 20;
+}
+
 internal i32 get_effective_sidebar_width(state_t* state)
 {
-    return max(0, min(state->win_w - 10, state->sidebar_width));
+  return max(0, min(state->win_w - 10, state->sidebar_width));
 }
 
 internal r32 get_thumbnail_size(state_t* state)
 {
-  return (r32)get_effective_sidebar_width(state) / (r32)state->thumbnail_columns;
+  return max(1.0f, (r32)(get_effective_sidebar_width(state) - get_scrollbar_width(state) - 2) / (r32)state->thumbnail_columns);
 }
 
 internal void clamp_sidebar_scroll_rows(state_t* state)
@@ -1239,7 +1244,7 @@ int main(int argc, char** argv)
 
         reload_input_paths(state);
 
-        pthread_t loader_threads[1] = {0};
+        pthread_t loader_threads[7] = {0};
         i32 loader_count = array_count(loader_threads);
         shared_loader_data_t* shared_loader_data = malloc_array(1, shared_loader_data_t);
         loader_data_t* loader_data = malloc_array(loader_count, loader_data_t);
@@ -1319,6 +1324,7 @@ int main(int argc, char** argv)
         ui_interaction_t mainview_interaction = { &offset_x };
         ui_interaction_t sidebar_interaction = { &state->viewing_filtered_img_idx };
         ui_interaction_t sidebar_resize_interaction = { &state->sidebar_width };
+        ui_interaction_t scrollbar_interaction = { &state->sidebar_scroll_rows };
 
         while(!quitting)
         {
@@ -2193,17 +2199,37 @@ int main(int argc, char** argv)
               zero_struct(current_interaction);
             }
 
-            b32 mouse_on_sidebar_edge =
-              (!state->hide_sidebar &&
-               mouse_x >= effective_sidebar_width && mouse_x < effective_sidebar_width + 10);
-            b32 mouse_in_sidebar =
-              (!state->hide_sidebar && !mouse_on_sidebar_edge && mouse_x < effective_sidebar_width);
+            b32 mouse_on_sidebar_edge = false;
+            b32 mouse_in_sidebar = false;
+            b32 mouse_on_scrollbar = false;
+            if(!state->hide_sidebar)
+            {
+              if(mouse_x >= effective_sidebar_width - get_scrollbar_width(state)
+                  && mouse_x < effective_sidebar_width)
+              {
+                mouse_on_scrollbar = true;
+              }
+              else if(mouse_x >= effective_sidebar_width
+                  && mouse_x < effective_sidebar_width + 10)
+              {
+                mouse_on_sidebar_edge = true;
+              }
+              else if(!mouse_on_sidebar_edge && mouse_x < effective_sidebar_width)
+              {
+                mouse_in_sidebar = true;
+              }
+            }
 
             if(interaction_is_empty(current_interaction))
             {
               if(!has_focus)
               {
                 zero_struct(hovered_interaction);
+              }
+              else if(mouse_on_scrollbar)
+              {
+                hovered_interaction = scrollbar_interaction;
+                state->dragging_start_value2 = state->sidebar_scroll_rows;
               }
               else if(mouse_on_sidebar_edge)
               {
@@ -2263,6 +2289,21 @@ int main(int argc, char** argv)
                 // Do not scroll the newly selected thumbnail into view!
                 // It would mess with the extra-row padding.
               }
+              dirty = true;
+            }
+            else if(interaction_eq(current_interaction, scrollbar_interaction))
+            {
+              // TODO: Make this match the exact logic of the scrollbar visual.
+              i32 total_thumbnail_rows = (state->filtered_img_count + state->thumbnail_columns - 1) / state->thumbnail_columns + 1;
+              if(mmb_held)
+              {
+                state->sidebar_scroll_rows = (state->win_h - mouse_y) * total_thumbnail_rows / state->win_h;
+              }
+              else if(lmb_held)
+              {
+                state->sidebar_scroll_rows -= mouse_delta_y * total_thumbnail_rows / state->win_h;
+              }
+              clamp_sidebar_scroll_rows(state);
               dirty = true;
             }
             else if(interaction_eq(current_interaction, sidebar_resize_interaction))
@@ -2529,7 +2570,33 @@ int main(int argc, char** argv)
 
               glDisable(GL_BLEND);
               glDisable(GL_TEXTURE_2D);
+
               glBegin(GL_QUADS);
+
+              // Scrollbar.
+              {
+                r32 scrollbar_edge_gray = 0.5f;
+                if(interaction_eq(hovered_interaction, scrollbar_interaction))
+                {
+                  scrollbar_edge_gray = bright_bg ? 0.3f : 0.7f;
+                }
+                glColor3f(scrollbar_edge_gray, scrollbar_edge_gray, scrollbar_edge_gray);
+
+                i32 scrollbar_width = get_scrollbar_width(state);
+                i32 total_thumbnail_rows = (state->filtered_img_count + state->thumbnail_columns - 1) / state->thumbnail_columns + 1;
+                r32 scrollbar_top_ratio = state->sidebar_scroll_rows / (r32)total_thumbnail_rows;
+                r32 scrollbar_bottom_ratio = (state->sidebar_scroll_rows + state->win_h / thumbnail_h) / (r32)total_thumbnail_rows;
+                i32 scrollbar_yrange = max(2, (i32)(state->win_h * (scrollbar_bottom_ratio - scrollbar_top_ratio) + 0.5f));
+                i32 scrollbar_y1 = (i32)(state->win_h * (1 - scrollbar_top_ratio) + 0.5f);
+                i32 scrollbar_y0 = scrollbar_y1 - scrollbar_yrange;
+
+                glVertex2f(effective_sidebar_width - scrollbar_width, scrollbar_y0);
+                glVertex2f(effective_sidebar_width - 2, scrollbar_y0);
+                glVertex2f(effective_sidebar_width - 2, scrollbar_y1);
+                glVertex2f(effective_sidebar_width - scrollbar_width, scrollbar_y1);
+              }
+
+              // Resizing bar.
               r32 sidebar_edge_gray = 0.0f;
               if(interaction_eq(hovered_interaction, sidebar_resize_interaction))
               {
@@ -2539,11 +2606,13 @@ int main(int argc, char** argv)
               {
                 sidebar_edge_gray = bright_bg ? 0.4f : 0.6f;
               }
+
               glColor3f(sidebar_edge_gray, sidebar_edge_gray, sidebar_edge_gray);
               glVertex2f(effective_sidebar_width - 2, 0);
               glVertex2f(effective_sidebar_width - 1, 0);
               glVertex2f(effective_sidebar_width - 1, state->win_h);
               glVertex2f(effective_sidebar_width - 2, state->win_h);
+
               glEnd();
 
               glScissor(0, 0, effective_sidebar_width - 2, state->win_h);
