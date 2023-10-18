@@ -229,9 +229,8 @@ internal void* loader_fun(void* raw_data)
 
     // printf("Loader %d focus %d range_start %d range_end %d\n", thread_idx, viewing_filtered_img_idx, range_start_idx, range_end_idx);
 
-    i32 max_loading_idx = min(filtered_img_count + 1, 800);
-    // i32 max_loading_idx = min(filtered_img_count + 1, 40);
-    // i32 max_loading_idx = min(filtered_img_count + 1, 4000);
+    // i32 max_loading_idx = min(filtered_img_count + 1, 800);
+    i32 max_loading_idx = min(filtered_img_count + 1, 200);
     for(i32 loading_idx = 0;
         loading_idx < max_loading_idx;
         ++loading_idx)
@@ -895,6 +894,11 @@ internal void clamp_sidebar_scroll_rows(state_t* state)
   }
 }
 
+internal void clamp_thumbnail_columns(state_t* state)
+{
+  state->thumbnail_columns = clamp(1, 64, state->thumbnail_columns);
+}
+
 internal img_entry_t* get_filtered_img(state_t* state, i32 filtered_idx)
 {
   img_entry_t* result = 0;
@@ -1240,7 +1244,8 @@ int main(int argc, char** argv)
             test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
         glGenerateMipmap(GL_TEXTURE_2D);
 
-        state->inotify_fd = inotify_init1(IN_NONBLOCK);
+        state->inotify_fd = -1;
+        // state->inotify_fd = inotify_init1(IN_NONBLOCK);
 
         reload_input_paths(state);
 
@@ -1853,15 +1858,38 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == '0')
                     {
-                      zoom = 0;
+                      if(alt_held)
+                      {
+                        state->thumbnail_columns = 2;
+                      }
+                      else
+                      {
+                        zoom = 0;
+                      }
                     }
                     else if(keysym == '-')
                     {
-                      zoom -= 0.25f;
+                      if(alt_held)
+                      {
+                        state->thumbnail_columns += 1;
+                        clamp_thumbnail_columns(state);
+                      }
+                      else
+                      {
+                        zoom -= 0.25f;
+                      }
                     }
                     else if(keysym == '=')
                     {
-                      zoom += 0.25f;
+                      if(alt_held)
+                      {
+                        state->thumbnail_columns -= 1;
+                        clamp_thumbnail_columns(state);
+                      }
+                      else
+                      {
+                        zoom += 0.25f;
+                      }
                     }
                     else if(keysym == '5')
                     {
@@ -2334,7 +2362,7 @@ int main(int argc, char** argv)
 
               if(!alt_held)
               {
-                if(mouse_in_sidebar)
+                if(mouse_in_sidebar || mouse_on_scrollbar)
                 {
                   if(ctrl_held)
                   {
@@ -2346,7 +2374,7 @@ int main(int argc, char** argv)
                     r32 prev_visible_top_y = (prev_visible_idx / state->thumbnail_columns - state->sidebar_scroll_rows) * thumbnail_h;
 
                     state->thumbnail_columns -= scroll_y_ticks;
-                    state->thumbnail_columns = clamp(1, 64, state->thumbnail_columns);
+                    clamp_thumbnail_columns(state);
                     thumbnail_h = get_thumbnail_size(state);
 
                     r32 new_visible_top_y = (prev_visible_idx / state->thumbnail_columns - state->sidebar_scroll_rows) * thumbnail_h;
@@ -2364,7 +2392,8 @@ int main(int argc, char** argv)
                 }
                 else
                 {
-                  if(ctrl_held)
+                  // if(ctrl_held)
+                  if(1 || ctrl_held)
                   {
                     zoom_delta += zoom_scroll_scale * scroll_y;
                   }
@@ -2466,12 +2495,12 @@ int main(int argc, char** argv)
                   img->path.data);
               set_title(display, window, (u8*)txt, txt_len);
 
-              if(show_info)
+              // if(show_info)
               {
 #define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
                 puts("");
                 puts(txt);
-                P(generation_parameters);
+                // P(generation_parameters);
                 P(positive_prompt);
                 P(negative_prompt);
                 P(seed);
@@ -2489,12 +2518,17 @@ int main(int argc, char** argv)
             if(scroll_thumbnail_into_view)
             {
               i32 thumbnail_row = state->viewing_filtered_img_idx / state->thumbnail_columns;
+#if 1
+              state->sidebar_scroll_rows = thumbnail_row - 0.5f * state->win_h / thumbnail_h + 0.5f;
+              clamp_sidebar_scroll_rows(state);
+#else
               i32 extra_rows = (state->win_h >= 2 * thumbnail_h) ? 1 : 0;
 
               state->sidebar_scroll_rows = clamp(
                   max(0, thumbnail_row + 1 - state->win_h / thumbnail_h + extra_rows),
                   thumbnail_row - extra_rows,
                   state->sidebar_scroll_rows);
+#endif
             }
 
             i32 first_visible_row = (i32)state->sidebar_scroll_rows;
