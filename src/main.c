@@ -42,6 +42,7 @@
 // #include <GL/glext.h>
 
 #include "lib/stb_image.h"
+#include "lib/stb_truetype.h"
 
 #include "util.h"
 
@@ -643,6 +644,9 @@ typedef struct
   i64 vram_bytes_used;
   b32 linear_sampling;
 
+  GLuint test_texture_id;
+  GLuint font_texture_id;
+
   char** input_paths;
   i32 input_path_count;
 
@@ -1190,18 +1194,6 @@ int main(int argc, char** argv)
         XMapWindow(display, window);
         GC gc = DefaultGC(display, DefaultScreen(display));
 
-        // sudo pacman -S terminus-font
-        // xset +fp /usr/share/fonts/misc
-        XFontStruct* font = XLoadQueryFont(display, "-*-terminus-*-*-*-*-32-*-*-*-*-*-*-*");
-        if(font)
-        {
-          XSetFont(display, gc, font->fid);
-        }
-        else
-        {
-          fprintf(stderr, "Terminus font not available.\n");
-        }
-
         Cursor empty_cursor;
         {
           char zero = 0;
@@ -1221,8 +1213,8 @@ int main(int argc, char** argv)
 
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
 
-        // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        // glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         state->input_paths = &argv[1];
         state->input_path_count = argc - 1;
@@ -1233,9 +1225,8 @@ int main(int argc, char** argv)
 
         state->filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
 
-        GLuint test_texture_id = 0;
-        glGenTextures(1, &test_texture_id);
-        glBindTexture(GL_TEXTURE_2D, test_texture_id);
+        glGenTextures(1, &state->test_texture_id);
+        glBindTexture(GL_TEXTURE_2D, state->test_texture_id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -1244,8 +1235,53 @@ int main(int argc, char** argv)
             test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
         glGenerateMipmap(GL_TEXTURE_2D);
 
+        char* ttf_path = "/usr/share/fonts/TTF/Vera.ttf";
+        str_t ttf_contents = read_file(ttf_path);
+        stbtt_fontinfo font = {0};
+        if(ttf_contents.size > 0)
+        {
+          if(stbtt_InitFont(&font, ttf_contents.data, stbtt_GetFontOffsetForIndex(ttf_contents.data, 0)))
+          {
+            i32 char_w = 0;
+            i32 char_h = 0;
+            u8* char_texels = stbtt_GetCodepointBitmap(&font, 0, stbtt_ScaleForPixelHeight(&font, 60), 'a', &char_w, &char_h, 0, 0);
+            printf("char: %d x %d\n", char_w, char_h);
+
+            if(char_texels)
+            {
+              glGenTextures(1, &state->font_texture_id);
+              glBindTexture(GL_TEXTURE_2D, state->font_texture_id);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+#if 0
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_ALPHA);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_ALPHA);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_ALPHA);
+#endif
+#if 1
+              glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
+                  char_w, char_h, 0, GL_ALPHA, GL_UNSIGNED_BYTE, char_texels);
+#else
+              glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                  char_w, char_h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, char_texels);
+#endif
+
+              free(char_texels);
+            }
+          }
+        }
+        if(!state->font_texture_id)
+        {
+          fprintf(stderr, "Could not generate font from '%s'.\n", ttf_path);
+        }
+
+#if 0
+        state->inotify_fd = inotify_init1(IN_NONBLOCK);
+#else
         state->inotify_fd = -1;
-        // state->inotify_fd = inotify_init1(IN_NONBLOCK);
+#endif
 
         reload_input_paths(state);
 
@@ -1799,7 +1835,7 @@ int main(int argc, char** argv)
                         }
                       }
                     }
-                    else if(keysym == 't')
+                    else if(keysym == '6')
                     {
                       bflip(alpha_blend);
                     }
@@ -2709,7 +2745,7 @@ int main(int argc, char** argv)
                 r32 tex_h = thumb->h;
                 if(thumb->load_state == LOAD_STATE_LOAD_FAILED)
                 {
-                  texture_id = test_texture_id;
+                  texture_id = state->test_texture_id;
                   tex_w = test_texture_w;
                   tex_h = test_texture_h;
                 }
@@ -2785,9 +2821,16 @@ int main(int argc, char** argv)
             r32 tex_h = img->h;
             if(img->load_state == LOAD_STATE_LOAD_FAILED)
             {
-              texture_id = test_texture_id;
+              texture_id = state->test_texture_id;
               tex_w = test_texture_w;
               tex_h = test_texture_h;
+            }
+
+            // FONT DEBUG
+            {
+              texture_id = state->font_texture_id;
+              tex_w = 64;
+              tex_h = tex_w;
             }
 
             // if(texture_id)
@@ -2877,7 +2920,7 @@ int main(int argc, char** argv)
             glXSwapBuffers(display, glx_window);
 
             // TODO: Re-enable this once we don't do X11 drawing anymore.
-#if 0
+#if 1
             if(state->vsync)
             {
               // glFinish seems to reduce lag on HP laptop.
@@ -2894,13 +2937,8 @@ int main(int argc, char** argv)
 
             if(show_info)
             {
-              glXWaitGL();
-              // XSync(display, false);
-              XDrawString(display, window, gc, image_region_x0 + 10, state->win_h - 10,
-                  (char*)img->positive_prompt.data, img->positive_prompt.size);
-              glXWaitX();
-              // XSync(display, false);
-              // usleep(10000);
+              // XDrawString(display, window, gc, image_region_x0 + 10, state->win_h - 10,
+              //     (char*)img->positive_prompt.data, img->positive_prompt.size);
             }
 
             if(still_loading)

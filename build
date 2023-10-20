@@ -10,9 +10,9 @@ if [ ${OPTIMIZE:-0} -ne 0 ]; then
   extra_opts='-O3'
 fi
 
-if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb_image.o ]; then
-  echo "Building obj/stb_image.o"
-  clang -std=c11 -O3 -DSTB_IMAGE_IMPLEMENTATION -c -o obj/stb_image.o -xc lib/stb_image.h
+if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb.o ]; then
+  echo "Building obj/stb.o"
+  clang -std=c11 -O3 -c -o obj/stb.o lib/stb.c
 fi
 
-clang -g $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb_image.o src/main.c
+clang -g $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb.o src/main.c

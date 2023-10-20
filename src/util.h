@@ -202,7 +202,7 @@ internal str_t read_file(char* path)
   FILE* fd = fopen(path, "rb");
   if(fd == 0)
   {
-    fprintf(stderr, "Could not open file '%s' for reading\n", path);
+    fprintf(stderr, "Could not open file '%s' for reading.\n", path);
   }
   else
   {
@@ -211,7 +211,7 @@ internal str_t read_file(char* path)
 
     if(fseek(fd, 0, SEEK_END) == -1 || (tell_pos = ftell(fd)) == -1)
     {
-      fprintf(stderr, "Could not seek to end of file '%s'\n", path);
+      fprintf(stderr, "Could not seek to end of file '%s'.\n", path);
     }
     else
     {
@@ -221,12 +221,12 @@ internal str_t read_file(char* path)
 
       if(!result.data)
       {
-        fprintf(stderr, "Could not allocate %lu bytes for file '%s'\n", result.size, path);
+        fprintf(stderr, "Could not allocate %lu bytes for file '%s'.\n", result.size, path);
         result.size = 0;
       }
       else if(fread(result.data, 1, result.size, fd) != result.size)
       {
-        fprintf(stderr, "Could not read all of file '%s'\n", path);
+        fprintf(stderr, "Could not read all of file '%s'.\n", path);
         free(result.data);
         result.data = 0;
         result.size = 0;
