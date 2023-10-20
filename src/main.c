@@ -1654,7 +1654,7 @@ int main(int argc, char** argv)
                   if(went_down)
                   {
                     if((ctrl_held && keysym == 'q')
-                        || keysym == XK_Escape
+                        // || keysym == XK_Escape
                       )
                     {
                       quitting = true;
@@ -1909,6 +1909,7 @@ int main(int argc, char** argv)
                       {
                         state->thumbnail_columns += 1;
                         clamp_thumbnail_columns(state);
+                        clamp_sidebar_scroll_rows(state);
                       }
                       else
                       {
@@ -1921,6 +1922,7 @@ int main(int argc, char** argv)
                       {
                         state->thumbnail_columns -= 1;
                         clamp_thumbnail_columns(state);
+                        clamp_sidebar_scroll_rows(state);
                       }
                       else
                       {
@@ -2554,17 +2556,19 @@ int main(int argc, char** argv)
             if(scroll_thumbnail_into_view)
             {
               i32 thumbnail_row = state->viewing_filtered_img_idx / state->thumbnail_columns;
-#if 1
+#if 0
               state->sidebar_scroll_rows = thumbnail_row - 0.5f * state->win_h / thumbnail_h + 0.5f;
-              clamp_sidebar_scroll_rows(state);
 #else
-              i32 extra_rows = (state->win_h >= 2 * thumbnail_h) ? 1 : 0;
+              // i32 extra_rows = (state->win_h >= 2 * thumbnail_h) ? 1 : 0;
+              i32 extra_rows = (i32)(0.3f * state->win_h / thumbnail_h);
 
               state->sidebar_scroll_rows = clamp(
                   max(0, thumbnail_row + 1 - state->win_h / thumbnail_h + extra_rows),
                   thumbnail_row - extra_rows,
                   state->sidebar_scroll_rows);
 #endif
+
+              clamp_sidebar_scroll_rows(state);
             }
 
             i32 first_visible_row = (i32)state->sidebar_scroll_rows;
