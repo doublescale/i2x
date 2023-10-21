@@ -646,6 +646,8 @@ typedef struct
 
   GLuint test_texture_id;
   GLuint font_texture_id;
+  i32 chars_per_font_row;
+  i32 chars_per_font_col;
 
   char** input_paths;
   i32 input_path_count;
@@ -1192,8 +1194,8 @@ int main(int argc, char** argv)
 
         set_title(display, window, (unsigned char*)PROGRAM_NAME, sizeof(PROGRAM_NAME) - 1);
         XMapWindow(display, window);
-        GC gc = DefaultGC(display, DefaultScreen(display));
 
+#if 0
         Cursor empty_cursor;
         {
           char zero = 0;
@@ -1203,6 +1205,7 @@ int main(int argc, char** argv)
               &empty_color, &empty_color, 0, 0);
           XFreePixmap(display, empty_pixmap);
         }
+#endif
 
         Atom atom_clipboard = XInternAtom(display, "CLIPBOARD", false);
         Atom atom_targets = XInternAtom(display, "TARGETS", false);
@@ -1212,9 +1215,6 @@ int main(int argc, char** argv)
         Atom atom_mycliptarget = XInternAtom(display, "PUT_IT_HERE", false);
 
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
-
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        // glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         state->input_paths = &argv[1];
         state->input_path_count = argc - 1;
@@ -1235,41 +1235,49 @@ int main(int argc, char** argv)
             test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
         glGenerateMipmap(GL_TEXTURE_2D);
 
-        char* ttf_path = "/usr/share/fonts/TTF/Vera.ttf";
+        // char* ttf_path = "/usr/share/fonts/TTF/Vera.ttf";
+        char* ttf_path = "/usr/share/fonts/TTF/DejaVuSans.ttf";
         str_t ttf_contents = read_file(ttf_path);
         stbtt_fontinfo font = {0};
+        r32 font_scale = 0;
+        i32 font_texture_w = 512;
+        i32 font_texture_h = 512;
+        state->chars_per_font_row = 16;
+        state->chars_per_font_col = 16;
+        i32 char_w = font_texture_w / state->chars_per_font_row;
+        i32 char_h = font_texture_h / state->chars_per_font_col;
         if(ttf_contents.size > 0)
         {
           if(stbtt_InitFont(&font, ttf_contents.data, stbtt_GetFontOffsetForIndex(ttf_contents.data, 0)))
           {
-            i32 char_w = 0;
-            i32 char_h = 0;
-            u8* char_texels = stbtt_GetCodepointBitmap(&font, 0, stbtt_ScaleForPixelHeight(&font, 60), 'a', &char_w, &char_h, 0, 0);
-            printf("char: %d x %d\n", char_w, char_h);
+            u8* font_texels = malloc_array(font_texture_w * font_texture_h, u8);
+            zero_bytes(font_texture_w * font_texture_h, font_texels);
 
-            if(char_texels)
+            font_scale = stbtt_ScaleForPixelHeight(&font, 32);
+
+            for(i32 char_idx = 0;
+                char_idx < 128;
+                ++char_idx)
             {
-              glGenTextures(1, &state->font_texture_id);
-              glBindTexture(GL_TEXTURE_2D, state->font_texture_id);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-#if 0
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_ALPHA);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_ALPHA);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_ALPHA);
-#endif
-#if 1
-              glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
-                  char_w, char_h, 0, GL_ALPHA, GL_UNSIGNED_BYTE, char_texels);
-#else
-              glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                  char_w, char_h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, char_texels);
-#endif
+              i32 row = char_idx / state->chars_per_font_row;
+              i32 col = char_idx % state->chars_per_font_row;
+              i32 codepoint = char_idx;
 
-              free(char_texels);
+              stbtt_MakeCodepointBitmap(&font,
+                  font_texels + row * char_h * font_texture_w + col * char_w,
+                  char_w, char_h, font_texture_w, font_scale, font_scale, codepoint);
             }
+
+            glGenTextures(1, &state->font_texture_id);
+            glBindTexture(GL_TEXTURE_2D, state->font_texture_id);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
+                font_texture_w, font_texture_h, 0, GL_ALPHA, GL_UNSIGNED_BYTE, font_texels);
+
+            free(font_texels);
           }
         }
         if(!state->font_texture_id)
@@ -1335,8 +1343,6 @@ int main(int argc, char** argv)
         i32 hovered_thumbnail_idx = -1;
         b32 show_info = true;
         i32 info_height = 40;
-
-        XSetForeground(display, gc, bright_bg ? XBlackPixel(display, DefaultScreen(display)) : XWhitePixel(display, DefaultScreen(display)));
 
         // TODO: Split these for x/y ?
         //       Actually, just using the constant 120 might be enough.
@@ -1653,11 +1659,16 @@ int main(int argc, char** argv)
 
                   if(went_down)
                   {
-                    if((ctrl_held && keysym == 'q')
-                        // || keysym == XK_Escape
-                      )
+                    if(ctrl_held && keysym == 'q')
                     {
                       quitting = true;
+                    }
+                    else if(keysym == XK_Escape)
+                    {
+                      // TODO: Better to persist the marking-state.
+                      b32 any_marked = false;
+                      for_count(i, state->total_img_count) { any_marked = any_marked || (state->img_entries[i].flags & IMG_FLAG_MARKED); }
+                      if(!any_marked) { quitting = true; }
                     }
                     else if(keysym == XK_Shift_L || keysym == XK_Shift_R)
                     {
@@ -1805,7 +1816,6 @@ int main(int argc, char** argv)
                     else if(keysym == 'b')
                     {
                       bflip(bright_bg);
-                      XSetForeground(display, gc, bright_bg ? XBlackPixel(display, DefaultScreen(display)) : XWhitePixel(display, DefaultScreen(display)));
                     }
                     else if(keysym == 't')
                     {
@@ -2693,6 +2703,7 @@ int main(int argc, char** argv)
 
               if(alpha_blend)
               {
+                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
                 glEnable(GL_BLEND);
               }
               else
@@ -2830,25 +2841,27 @@ int main(int argc, char** argv)
               tex_h = test_texture_h;
             }
 
-            // FONT DEBUG
-            {
-              texture_id = state->font_texture_id;
-              tex_w = 64;
-              tex_h = tex_w;
-            }
-
             // if(texture_id)
             {
-              glBindTexture(GL_TEXTURE_2D, texture_id);
-
               if(alpha_blend)
               {
+                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
                 glEnable(GL_BLEND);
               }
               else
               {
                 glDisable(GL_BLEND);
               }
+
+#if 0
+              // FONT TEST
+              texture_id = state->font_texture_id;
+              tex_w = font_texture_w;
+              tex_h = font_texture_h;
+              glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+#endif
+
+              glBindTexture(GL_TEXTURE_2D, texture_id);
 
               r32 u0 = 0.0f;
               r32 v0 = 0.0f;
@@ -2912,6 +2925,59 @@ int main(int argc, char** argv)
               glEnd();
             }
 
+            if(show_info)
+            {
+              glScissor(image_region_x0, 0, image_region_w, image_region_y0);
+              glBindTexture(GL_TEXTURE_2D, alpha_blend ? state->font_texture_id : 0);
+              glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+              glEnable(GL_BLEND);
+              r32 gray = bright_bg ? 0 : 1;
+              glColor3f(gray, gray, gray);
+              glBegin(GL_QUADS);
+
+              r32 fs = 30;
+              r32 x = image_region_x0 + 0.5f * fs;
+              r32 y = 0.5f * fs;
+              str_t str = img->positive_prompt;
+              u32 last_codepoint = 0;
+              for(i32 str_idx = 0;
+                  str_idx < str.size;
+                  ++str_idx)
+              {
+                // TODO: UTF-8
+                u32 codepoint = str.data[str_idx];
+
+                i32 x_advance, left_side_bearing, ix0, iy0, ix1, iy1;
+                stbtt_GetCodepointHMetrics(&font, codepoint, &x_advance, &left_side_bearing);
+                stbtt_GetCodepointBitmapBox(&font, codepoint, font_scale, font_scale, &ix0, &iy0, &ix1, &iy1);
+
+                if(str_idx > 0)
+                {
+                  x += fs * stbtt_GetCodepointKernAdvance(&font, last_codepoint, codepoint) * font_scale / char_w;
+                }
+
+                r32 x0 = x + fs * (r32)left_side_bearing * font_scale / char_w;
+                r32 x1 = x0 + fs * (r32)(ix1 - ix0) / (r32)char_w;
+                r32 y1 = y - fs * (r32)iy0 / (r32)char_h;
+                r32 y0 = y1 - fs * (r32)(iy1 - iy0) / (r32)char_h;
+
+                r32 u0 = (r32)(codepoint % state->chars_per_font_row) / (r32)state->chars_per_font_row;
+                r32 u1 = u0 + (r32)(ix1 - ix0) / (r32)font_texture_w;
+                r32 v0 = (r32)(codepoint / state->chars_per_font_row) / (r32)state->chars_per_font_col;
+                r32 v1 = v0 + (r32)(iy1 - iy0) / (r32)font_texture_h;
+
+                glTexCoord2f(u0, v1); glVertex2f(x0, y0);
+                glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+                glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+                glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+
+                x += fs * x_advance * font_scale / char_w;
+                last_codepoint = codepoint;
+              }
+
+              glEnd();
+            }
+
 #if 0
             // https://www.khronos.org/opengl/wiki/Sync_Object#Synchronization
             // This doesn't seem to help; see glFinish below.
@@ -2938,12 +3004,6 @@ int main(int argc, char** argv)
               usleep(10000);
             }
 #endif
-
-            if(show_info)
-            {
-              // XDrawString(display, window, gc, image_region_x0 + 10, state->win_h - 10,
-              //     (char*)img->positive_prompt.data, img->positive_prompt.size);
-            }
 
             if(still_loading)
             {
