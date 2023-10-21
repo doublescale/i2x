@@ -1235,8 +1235,8 @@ int main(int argc, char** argv)
             test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
         glGenerateMipmap(GL_TEXTURE_2D);
 
-        // char* ttf_path = "/usr/share/fonts/TTF/Vera.ttf";
-        char* ttf_path = "/usr/share/fonts/TTF/DejaVuSans.ttf";
+        char* ttf_path = "/usr/share/fonts/TTF/Vera.ttf";
+        // char* ttf_path = "/usr/share/fonts/TTF/DejaVuSans.ttf";
         str_t ttf_contents = read_file(ttf_path);
         stbtt_fontinfo font = {0};
         r32 font_scale = 0;
@@ -2925,7 +2925,7 @@ int main(int argc, char** argv)
               glEnd();
             }
 
-            if(show_info)
+            if(show_info && state->font_texture_id)
             {
               glScissor(image_region_x0, 0, image_region_w, image_region_y0);
               glBindTexture(GL_TEXTURE_2D, alpha_blend ? state->font_texture_id : 0);
@@ -2935,7 +2935,7 @@ int main(int argc, char** argv)
               glColor3f(gray, gray, gray);
               glBegin(GL_QUADS);
 
-              r32 fs = 30;
+              r32 fs = 28;
               r32 x = image_region_x0 + 0.5f * fs;
               r32 y = 0.5f * fs;
               str_t str = img->positive_prompt;
