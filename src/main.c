@@ -644,6 +644,7 @@ typedef struct
   i64 vram_bytes_used;
   b32 linear_sampling;
   b32 alpha_blend;
+  b32 show_info;
 
   GLuint test_texture_id;
 
@@ -1081,6 +1082,8 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
     {
       i32 codepoint = decode_utf8(&str_ptr, str_end);
 
+      if(codepoint == '\n') { codepoint = 0x2424; }
+
       i32 x_advance, left_side_bearing;
       stbtt_GetCodepointHMetrics(&state->font, codepoint, &x_advance, &left_side_bearing);
 
@@ -1377,8 +1380,8 @@ int main(int argc, char** argv)
             test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
         glGenerateMipmap(GL_TEXTURE_2D);
 
-        state->font_texture_w = 1024;
-        state->font_texture_h = 1024;
+        state->font_texture_w = 512;
+        state->font_texture_h = 512;
         state->font_char_w = 32;
         state->font_char_h = 32;
         state->chars_per_font_row = state->font_texture_w / state->font_char_w;
@@ -1500,7 +1503,7 @@ int main(int argc, char** argv)
         state->sidebar_width = 310;
         state->thumbnail_columns = 2;
         i32 hovered_thumbnail_idx = -1;
-        b32 show_info = true;
+        state->show_info = true;
         i32 info_height = 40;
 
         // TODO: Split these for x/y ?
@@ -1982,7 +1985,7 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 'i')
                     {
-                      bflip(show_info);
+                      bflip(state->show_info);
                     }
                     else if(keysym == 'n')
                     {
@@ -2650,7 +2653,7 @@ int main(int argc, char** argv)
                 {
                   center_mouse_x -= 0.5f * (r32)effective_sidebar_width;
                 }
-                if(show_info)
+                if(state->show_info)
                 {
                   center_mouse_y -= 0.5f * (r32)info_height;
                 }
@@ -2702,7 +2705,7 @@ int main(int argc, char** argv)
                   img->path.data);
               set_title(display, window, (u8*)txt, txt_len);
 
-              // if(show_info)
+              // if(state->show_info)
               {
 #define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
                 puts("");
@@ -2986,7 +2989,7 @@ int main(int argc, char** argv)
             still_loading |= upload_img_texture(state, img);
 
             i32 image_region_x0 = state->hide_sidebar ? 0 : effective_sidebar_width;
-            i32 image_region_y0 = show_info ? info_height : 0;
+            i32 image_region_y0 = state->show_info ? info_height : 0;
             i32 image_region_w = state->win_w - image_region_x0;
             i32 image_region_h = state->win_h - image_region_y0;
 
@@ -3084,7 +3087,7 @@ int main(int argc, char** argv)
               glEnd();
             }
 
-            if(show_info)
+            if(state->show_info)
             {
               r32 gray = bright_bg ? 0 : 1;
               glColor3f(gray, gray, gray);
