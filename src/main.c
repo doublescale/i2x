@@ -643,11 +643,26 @@ typedef struct
   b32 vsync;
   i64 vram_bytes_used;
   b32 linear_sampling;
+  b32 alpha_blend;
 
   GLuint test_texture_id;
+
   GLuint font_texture_id;
   i32 chars_per_font_row;
   i32 chars_per_font_col;
+  stbtt_fontinfo font;
+  r32 stb_font_scale;
+  u8* font_texels;
+  i32 font_texture_w;
+  i32 font_texture_h;
+  i32 font_char_w;
+  i32 font_char_h;
+  u32 fixed_codepoint_range_start;
+  u32 fixed_codepoint_range_length;
+  u32* custom_codepoints;
+  i32 custom_codepoint_first_char_idx;
+  i32 custom_codepoint_count;
+  i32 next_custom_codepoint_idx;
 
   char** input_paths;
   i32 input_path_count;
@@ -1035,6 +1050,133 @@ internal void reload_input_paths(state_t* state)
   state->filtered_img_count = state->total_img_count;
 }
 
+enum
+{
+  DRAW_STR_MEASURE_ONLY = (1 << 0),
+};
+typedef u32 draw_str_flags_t;
+
+internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor, r32 y_scale, r32 start_x, r32 y, str_t str)
+{
+  r32 x = start_x;
+  b32 measure_only = (flags & DRAW_STR_MEASURE_ONLY);
+
+  if(state->font_texture_id)
+  {
+    if(!measure_only)
+    {
+      glBindTexture(GL_TEXTURE_2D, state->alpha_blend ? state->font_texture_id : 0);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      glEnable(GL_BLEND);
+    }
+
+    r32 x_scale = x_scale_factor * y_scale;
+
+    u8* str_end = str.data + str.size;
+    i32 last_codepoint = 0;
+
+    for(u8* str_ptr = str.data;
+        str_ptr < str_end;
+       )
+    {
+      i32 codepoint = decode_utf8(&str_ptr, str_end);
+
+      i32 x_advance, left_side_bearing;
+      stbtt_GetCodepointHMetrics(&state->font, codepoint, &x_advance, &left_side_bearing);
+
+      if(str_ptr != str.data)
+      {
+        x += x_scale * stbtt_GetCodepointKernAdvance(&state->font, last_codepoint, codepoint) * state->stb_font_scale / state->font_char_w;
+      }
+
+      if(!measure_only)
+      {
+        i32 char_idx = codepoint - state->fixed_codepoint_range_start;
+        if(char_idx < 0 || char_idx >= state->fixed_codepoint_range_length)
+        {
+          char_idx = 0;
+          for(i32 custom_idx = 0;
+              custom_idx < state->custom_codepoint_count;
+              ++custom_idx)
+          {
+            if(state->custom_codepoints[custom_idx] == codepoint)
+            {
+              char_idx = custom_idx + state->fixed_codepoint_range_length;
+              break;
+            }
+          }
+
+          if(!char_idx)
+          {
+            char_idx = state->next_custom_codepoint_idx + state->fixed_codepoint_range_length;
+            state->custom_codepoints[state->next_custom_codepoint_idx] = codepoint;
+
+            i32 row = char_idx / state->chars_per_font_row;
+            i32 col = char_idx % state->chars_per_font_row;
+
+            // printf("uploading codepoint %d\n", codepoint);
+            // printf("  char_idx %d, row %d, col %d\n", char_idx, row, col);
+
+#if 1
+            u8* texels_start = state->font_texels + row * state->font_char_h * state->font_texture_w + col * state->font_char_w;
+            for_count(j, state->font_char_h)
+            {
+              for_count(i, state->font_char_w)
+              {
+                texels_start[j * state->font_texture_w + i] = 0;
+              }
+            }
+            stbtt_MakeCodepointBitmap(&state->font, texels_start,
+                state->font_char_w, state->font_char_h, state->font_texture_w, state->stb_font_scale, state->stb_font_scale, codepoint);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, state->font_texture_w);
+            glTexSubImage2D(GL_TEXTURE_2D, 0,
+                col * state->font_char_w, row * state->font_char_h, state->font_char_w, state->font_char_h,
+                GL_ALPHA, GL_UNSIGNED_BYTE, texels_start);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+#else
+            u8* tmp_texels = malloc_array(state->font_char_w * state->font_char_h, u8);
+            zero_bytes(state->font_char_w * state->font_char_h, tmp_texels);
+            stbtt_MakeCodepointBitmap(&state->font, tmp_texels,
+                state->font_char_w, state->font_char_h, state->font_char_w, state->stb_font_scale, state->stb_font_scale, codepoint);
+            glTexSubImage2D(GL_TEXTURE_2D, 0,
+                col * state->font_char_w, row * state->font_char_h, state->font_char_w, state->font_char_h,
+                GL_ALPHA, GL_UNSIGNED_BYTE, tmp_texels);
+            free(tmp_texels);
+#endif
+
+            state->next_custom_codepoint_idx = (state->next_custom_codepoint_idx + 1) % state->custom_codepoint_count;
+          }
+        }
+
+        i32 ix0, iy0, ix1, iy1;
+        stbtt_GetCodepointBitmapBox(&state->font, codepoint, state->stb_font_scale, state->stb_font_scale, &ix0, &iy0, &ix1, &iy1);
+
+        r32 x0 = x + x_scale * (r32)left_side_bearing * state->stb_font_scale / state->font_char_w;
+        r32 x1 = x0 + x_scale * (r32)(ix1 - ix0) / (r32)state->font_char_w;
+        r32 y1 = y - y_scale * (r32)iy0 / (r32)state->font_char_h;
+        r32 y0 = y1 - y_scale * (r32)(iy1 - iy0) / (r32)state->font_char_h;
+
+        r32 u0 = (r32)(char_idx % state->chars_per_font_row) / (r32)state->chars_per_font_row;
+        r32 u1 = u0 + (r32)(ix1 - ix0) / (r32)state->font_texture_w;
+        r32 v0 = (r32)(char_idx / state->chars_per_font_row) / (r32)state->chars_per_font_col;
+        r32 v1 = v0 + (r32)(iy1 - iy0) / (r32)state->font_texture_h;
+
+        glBegin(GL_QUADS);
+        glTexCoord2f(u0, v1); glVertex2f(x0, y0);
+        glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+        glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+        glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+        glEnd();
+      }
+
+      x += x_scale * x_advance * state->stb_font_scale / state->font_char_w;
+      last_codepoint = codepoint;
+    }
+  }
+
+  return x - start_x;
+}
+
 int main(int argc, char** argv)
 {
   Display* display = XOpenDisplay(0);
@@ -1235,54 +1377,71 @@ int main(int argc, char** argv)
             test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
         glGenerateMipmap(GL_TEXTURE_2D);
 
-        char* ttf_path = "/usr/share/fonts/TTF/Vera.ttf";
-        // char* ttf_path = "/usr/share/fonts/TTF/DejaVuSans.ttf";
-        str_t ttf_contents = read_file(ttf_path);
-        stbtt_fontinfo font = {0};
-        r32 font_scale = 0;
-        i32 font_texture_w = 512;
-        i32 font_texture_h = 512;
-        state->chars_per_font_row = 16;
-        state->chars_per_font_col = 16;
-        i32 char_w = font_texture_w / state->chars_per_font_row;
-        i32 char_h = font_texture_h / state->chars_per_font_col;
-        if(ttf_contents.size > 0)
+        state->font_texture_w = 1024;
+        state->font_texture_h = 1024;
+        state->font_char_w = 32;
+        state->font_char_h = 32;
+        state->chars_per_font_row = state->font_texture_w / state->font_char_w;
+        state->chars_per_font_col = state->font_texture_h / state->font_char_h;
+        state->fixed_codepoint_range_start = 32;  // ' '
+        state->fixed_codepoint_range_length = 127 - state->fixed_codepoint_range_start;  // '~'
+        state->custom_codepoint_count = state->chars_per_font_row * state->chars_per_font_col - state->fixed_codepoint_range_length;
+        state->custom_codepoints = malloc_array(state->custom_codepoint_count, u32);
+        for_count(i, state->custom_codepoint_count) { state->custom_codepoints[i] = ' '; }
+        // TODO: Pack a font into the executable.
+        char* ttf_paths[] = {
+          "/usr/share/fonts/TTF/DejaVuSans.ttf",
+          "/usr/share/fonts/TTF/Vera.ttf",
+        };
+        for(i32 ttf_idx = 0;
+            ttf_idx < array_count(ttf_paths) && !state->font_texture_id;
+            ++ttf_idx)
         {
-          if(stbtt_InitFont(&font, ttf_contents.data, stbtt_GetFontOffsetForIndex(ttf_contents.data, 0)))
+          char* ttf_path = ttf_paths[ttf_idx];
+          str_t ttf_contents = read_file(ttf_path);
+
+          if(ttf_contents.size > 0)
           {
-            u8* font_texels = malloc_array(font_texture_w * font_texture_h, u8);
-            zero_bytes(font_texture_w * font_texture_h, font_texels);
-
-            font_scale = stbtt_ScaleForPixelHeight(&font, 32);
-
-            for(i32 char_idx = 0;
-                char_idx < 128;
-                ++char_idx)
+            if(stbtt_InitFont(&state->font, ttf_contents.data, stbtt_GetFontOffsetForIndex(ttf_contents.data, 0)))
             {
-              i32 row = char_idx / state->chars_per_font_row;
-              i32 col = char_idx % state->chars_per_font_row;
-              i32 codepoint = char_idx;
+              state->font_texels = malloc_array(state->font_texture_w * state->font_texture_h, u8);
+              zero_bytes(state->font_texture_w * state->font_texture_h, state->font_texels);
 
-              stbtt_MakeCodepointBitmap(&font,
-                  font_texels + row * char_h * font_texture_w + col * char_w,
-                  char_w, char_h, font_texture_w, font_scale, font_scale, codepoint);
+              state->stb_font_scale = stbtt_ScaleForPixelHeight(&state->font, 32);
+
+              for(i32 char_idx = 0;
+                  char_idx < state->fixed_codepoint_range_length;
+                  ++char_idx)
+              {
+                i32 row = char_idx / state->chars_per_font_row;
+                i32 col = char_idx % state->chars_per_font_row;
+
+                i32 codepoint = state->fixed_codepoint_range_start + char_idx;
+
+                stbtt_MakeCodepointBitmap(&state->font,
+                    state->font_texels + row * state->font_char_h * state->font_texture_w + col * state->font_char_w,
+                    state->font_char_w, state->font_char_h, state->font_texture_w, state->stb_font_scale, state->stb_font_scale, codepoint);
+              }
+
+              glGenTextures(1, &state->font_texture_id);
+              glBindTexture(GL_TEXTURE_2D, state->font_texture_id);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+              glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
+                  state->font_texture_w, state->font_texture_h, 0, GL_ALPHA, GL_UNSIGNED_BYTE, state->font_texels);
             }
-
-            glGenTextures(1, &state->font_texture_id);
-            glBindTexture(GL_TEXTURE_2D, state->font_texture_id);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
-                font_texture_w, font_texture_h, 0, GL_ALPHA, GL_UNSIGNED_BYTE, font_texels);
-
-            free(font_texels);
+            else
+            {
+              free(ttf_contents.data);
+            }
           }
-        }
-        if(!state->font_texture_id)
-        {
-          fprintf(stderr, "Could not generate font from '%s'.\n", ttf_path);
+
+          if(!state->font_texture_id)
+          {
+            fprintf(stderr, "Could not generate font from '%s'.\n", ttf_path);
+          }
         }
 
 #if 0
@@ -1331,7 +1490,7 @@ int main(int argc, char** argv)
         str_t clipboard_str = {0};
         b32 border_sampling = true;
         state->linear_sampling = true;
-        b32 alpha_blend = true;
+        state->alpha_blend = true;
         b32 bright_bg = false;
         b32 show_fps = false;
         r32 zoom = 0;
@@ -1847,7 +2006,7 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == '6')
                     {
-                      bflip(alpha_blend);
+                      bflip(state->alpha_blend);
                     }
                     else if(ctrl_held && keysym == 'v')
                     {
@@ -2701,7 +2860,7 @@ int main(int argc, char** argv)
 
               glScissor(0, 0, effective_sidebar_width - 2, state->win_h);
 
-              if(alpha_blend)
+              if(state->alpha_blend)
               {
                 glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
                 glEnable(GL_BLEND);
@@ -2843,7 +3002,7 @@ int main(int argc, char** argv)
 
             // if(texture_id)
             {
-              if(alpha_blend)
+              if(state->alpha_blend)
               {
                 glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
                 glEnable(GL_BLEND);
@@ -2856,8 +3015,8 @@ int main(int argc, char** argv)
 #if 0
               // FONT TEST
               texture_id = state->font_texture_id;
-              tex_w = font_texture_w;
-              tex_h = font_texture_h;
+              tex_w = state->font_texture_w;
+              tex_h = state->font_texture_h;
               glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 #endif
 
@@ -2925,57 +3084,18 @@ int main(int argc, char** argv)
               glEnd();
             }
 
-            if(show_info && state->font_texture_id)
+            if(show_info)
             {
-              glScissor(image_region_x0, 0, image_region_w, image_region_y0);
-              glBindTexture(GL_TEXTURE_2D, alpha_blend ? state->font_texture_id : 0);
-              glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-              glEnable(GL_BLEND);
               r32 gray = bright_bg ? 0 : 1;
               glColor3f(gray, gray, gray);
-              glBegin(GL_QUADS);
+              glScissor(image_region_x0, 0, image_region_w, image_region_y0);
 
               r32 fs = 28;
               r32 x = image_region_x0 + 0.5f * fs;
               r32 y = 0.5f * fs;
               str_t str = img->positive_prompt;
-              u32 last_codepoint = 0;
-              for(i32 str_idx = 0;
-                  str_idx < str.size;
-                  ++str_idx)
-              {
-                // TODO: UTF-8
-                u32 codepoint = str.data[str_idx];
-
-                i32 x_advance, left_side_bearing, ix0, iy0, ix1, iy1;
-                stbtt_GetCodepointHMetrics(&font, codepoint, &x_advance, &left_side_bearing);
-                stbtt_GetCodepointBitmapBox(&font, codepoint, font_scale, font_scale, &ix0, &iy0, &ix1, &iy1);
-
-                if(str_idx > 0)
-                {
-                  x += fs * stbtt_GetCodepointKernAdvance(&font, last_codepoint, codepoint) * font_scale / char_w;
-                }
-
-                r32 x0 = x + fs * (r32)left_side_bearing * font_scale / char_w;
-                r32 x1 = x0 + fs * (r32)(ix1 - ix0) / (r32)char_w;
-                r32 y1 = y - fs * (r32)iy0 / (r32)char_h;
-                r32 y0 = y1 - fs * (r32)(iy1 - iy0) / (r32)char_h;
-
-                r32 u0 = (r32)(codepoint % state->chars_per_font_row) / (r32)state->chars_per_font_row;
-                r32 u1 = u0 + (r32)(ix1 - ix0) / (r32)font_texture_w;
-                r32 v0 = (r32)(codepoint / state->chars_per_font_row) / (r32)state->chars_per_font_col;
-                r32 v1 = v0 + (r32)(iy1 - iy0) / (r32)font_texture_h;
-
-                glTexCoord2f(u0, v1); glVertex2f(x0, y0);
-                glTexCoord2f(u1, v1); glVertex2f(x1, y0);
-                glTexCoord2f(u1, v0); glVertex2f(x1, y1);
-                glTexCoord2f(u0, v0); glVertex2f(x0, y1);
-
-                x += fs * x_advance * font_scale / char_w;
-                last_codepoint = codepoint;
-              }
-
-              glEnd();
+              // str_t str = str("hörß űő²°C äíö®´¹³¤€^ ̛ ̛’ôæœ©·ñçµ ̇¿¿¡¯£¸¼˘½’ ĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŦŧŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽžſ ±ëîÓÐ¶");
+              r32 x_len = draw_str(state, 0, 1, fs, x, y, str);
             }
 
 #if 0
@@ -2989,7 +3109,6 @@ int main(int argc, char** argv)
 
             glXSwapBuffers(display, glx_window);
 
-            // TODO: Re-enable this once we don't do X11 drawing anymore.
 #if 1
             if(state->vsync)
             {

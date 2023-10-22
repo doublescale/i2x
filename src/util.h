@@ -328,6 +328,72 @@ internal b32 is_utf32_glyph_wide(u32 codepoint)
   return codepoint > 0xFFFF;
 }
 
+static const u32 replacement_character_codepoint = 0xFFFD;
+
+internal u32 decode_utf8(u8** start, u8* end)
+{
+  u8 c = **start;
+  u32 codepoint = 0;
+  i32 extra_byte_count = 0;
+  if(c & 0x80)
+  {
+    if((c & 0xE0) == 0xC0)
+    {
+      codepoint = (c & 0x1F);
+      extra_byte_count = 1;
+    }
+    else if((c & 0xF0) == 0xE0)
+    {
+      codepoint = (c & 0x0F);
+      extra_byte_count = 2;
+    }
+    else if((c & 0xF8) == 0xF0)
+    {
+      codepoint = (c & 0x07);
+      extra_byte_count = 3;
+    }
+    else
+    {
+      // Invalid non-continuation byte.
+      codepoint = replacement_character_codepoint;
+    }
+
+    if(*start + extra_byte_count < end)
+    {
+      b32 invalid_continuation = false;
+      for(i32 extra_byte_idx = 0;
+          extra_byte_idx < extra_byte_count;
+          ++extra_byte_idx)
+      {
+        ++*start;
+        c = **start;
+        invalid_continuation = !is_utf8_continuation_byte(c);
+        if(invalid_continuation)
+        {
+          // Expected continuation byte, but didn't get it.
+          --*start;
+          codepoint = replacement_character_codepoint;
+          break;
+        }
+        codepoint = (codepoint << 6) | (c & 0x3F);
+      }
+    }
+    else
+    {
+      // Expected more bytes.
+      codepoint = replacement_character_codepoint;
+    }
+  }
+  else
+  {
+    // ASCII.
+    codepoint = (u32)c;
+  }
+  ++*start;
+
+  return codepoint;
+}
+
 internal u8 to_lower(u8 c)
 {
   u8 result = c;
