@@ -1361,14 +1361,71 @@ int main(int argc, char** argv)
 
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
 
-        state->input_paths = &argv[1];
+#if 0
+        state->inotify_fd = inotify_init1(IN_NONBLOCK);
+#else
+        state->inotify_fd = -1;
+#endif
+
         state->input_path_count = argc - 1;
+        state->input_paths = malloc_array(state->input_path_count, char*);
+        for(i32 input_idx = 0;
+            input_idx < state->input_path_count;
+            ++input_idx)
+        {
+          state->input_paths[input_idx] = argv[input_idx + 1];
+        }
+        str_t open_single_directory_on = {0};
+        if(state->input_path_count == 1)
+        {
+          char* arg = state->input_paths[0];
+          DIR* dir = opendir(arg);
+          if(dir)
+          {
+            closedir(dir);
+          }
+          else
+          {
+            char* arg_dir_end = arg + zstr_length(arg);
+            while(arg_dir_end > arg + 1 && arg_dir_end[0] != '/')
+            {
+              --arg_dir_end;
+            }
+
+            open_single_directory_on = wrap_str(arg);
+            if(arg_dir_end[0] != '/')
+            {
+              state->input_paths[0] = ".";
+            }
+            else
+            {
+              state->input_paths[0] = strndup(arg, arg_dir_end - arg);
+            }
+
+            printf("Opening single directory '%s' at '%.*s'\n",
+                state->input_paths[0],
+                (int)open_single_directory_on.size, open_single_directory_on.data);
+          }
+        }
 
         state->total_img_capacity = max(state->input_path_count, 128 * 1024);
         state->img_entries = malloc_array(state->total_img_capacity, img_entry_t);
         zero_bytes(state->total_img_capacity * sizeof(img_entry_t), state->img_entries);
-
         state->filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
+
+        reload_input_paths(state);
+
+        if(open_single_directory_on.size)
+        {
+          for_count(img_idx, state->total_img_count)
+          {
+            if(str_has_suffix(state->img_entries[img_idx].path, open_single_directory_on))
+            {
+              state->viewing_filtered_img_idx = img_idx;
+              break;
+            }
+          }
+        }
 
         glGenTextures(1, &state->test_texture_id);
         glBindTexture(GL_TEXTURE_2D, state->test_texture_id);
@@ -1447,14 +1504,6 @@ int main(int argc, char** argv)
           }
         }
 
-#if 0
-        state->inotify_fd = inotify_init1(IN_NONBLOCK);
-#else
-        state->inotify_fd = -1;
-#endif
-
-        reload_input_paths(state);
-
         pthread_t loader_threads[7] = {0};
         i32 loader_count = array_count(loader_threads);
         shared_loader_data_t* shared_loader_data = malloc_array(1, shared_loader_data_t);
@@ -1527,6 +1576,7 @@ int main(int argc, char** argv)
         b32 alt_held = false;
         b32 has_focus = false;
         i32 dirty_frames = 1;
+        b32 scroll_thumbnail_into_view = !!open_single_directory_on.size;
 
         ui_interaction_t hovered_interaction = {0};
         ui_interaction_t current_interaction = {0};
@@ -1545,7 +1595,6 @@ int main(int argc, char** argv)
           }
 #endif
 
-          b32 scroll_thumbnail_into_view = false;
           b32 dirty = false;
           b32 reloaded_paths = false;
 
@@ -2727,6 +2776,7 @@ int main(int argc, char** argv)
 
             if(scroll_thumbnail_into_view)
             {
+              scroll_thumbnail_into_view = false;
               i32 thumbnail_row = state->viewing_filtered_img_idx / state->thumbnail_columns;
 #if 0
               state->sidebar_scroll_rows = thumbnail_row - 0.5f * state->win_h / thumbnail_h + 0.5f;

@@ -181,15 +181,27 @@ internal i32 zstr_length(const char* txt)
   return result;
 }
 
-internal str_t str_remove_suffix(str_t input, str_t suffix)
+internal b32 str_has_suffix(str_t input, str_t suffix)
 {
+  b32 result = false;
+
   if(input.size >= suffix.size)
   {
     str_t input_suffix = { input.data + input.size - suffix.size, suffix.size };
     if(str_eq(input_suffix, suffix))
     {
-      input.size -= suffix.size;
+      result = true;
     }
+  }
+
+  return result;
+}
+
+internal str_t str_remove_suffix(str_t input, str_t suffix)
+{
+  if(str_has_suffix(input, suffix))
+  {
+    input.size -= suffix.size;
   }
 
   return input;
