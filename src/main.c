@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <locale.h>
 #include <math.h>
 #include <poll.h>
 #include <pthread.h>
@@ -409,6 +410,10 @@ typedef struct
 
   i32* filtered_img_idxs;
   i32 filtered_img_count;
+
+  b32 searching;
+  str_t search_str;
+  i32 search_str_capacity;
 
   i32 viewing_filtered_img_idx;
 
@@ -1092,6 +1097,43 @@ int main(int argc, char** argv)
         Atom atom_uri_list = XInternAtom(display, "text/uri-list", false);
         Atom atom_mycliptarget = XInternAtom(display, "PUT_IT_HERE", false);
 
+#if 1
+        // This is needed for XmbLookupString to return UTF-8.
+        if(!setlocale(LC_ALL, "en_US.UTF-8"))
+        {
+          fprintf(stderr, "Could not set locale to \"en_US.UTF-8\".\n");
+          setlocale(LC_ALL, "");
+        }
+#endif
+        // printf("%d\n", XSupportsLocale());
+#if 0
+        // This says that this is needed for dead keys, but apparently not?
+        // https://stackoverflow.com/a/18288346
+        if(!XSetLocaleModifiers("@im=none"))
+        {
+          fprintf(stderr, "XSetLocaleModifiers(\"@im=none\") failed.\n");
+        }
+#endif
+        XIM x_input_method = XOpenIM(display, 0, 0, 0);
+        // puts(XLocaleOfIM(x_input_method));
+        XIC x_input_context = 0;
+        if(x_input_method)
+        {
+          x_input_context = XCreateIC(x_input_method,
+              XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+              XNClientWindow, window,
+              NULL);
+          if(!x_input_context)
+          {
+            fprintf(stderr, "X Input Context could not be created!\n");
+          }
+        }
+        else
+        {
+          fprintf(stderr, "X Input Method could not be opened!\n");
+        }
+        // XSetICFocus(x_input_context);
+
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
 
 #if 0
@@ -1573,6 +1615,8 @@ int main(int argc, char** argv)
         i32 hovered_thumbnail_idx = -1;
         state->show_info = true;
         i32 info_height = 40;
+        state->search_str_capacity = 1024;
+        state->search_str.data = malloc_array(state->search_str_capacity, u8);
 
         // TODO: Split these for x/y ?
         //       Actually, just using the constant 120 might be enough.
@@ -1616,6 +1660,7 @@ int main(int argc, char** argv)
 
           b32 dirty = false;
           b32 reloaded_paths = false;
+          b32 search_changed = false;
 
           if(!state->vsync) { dirty = true; }
 
@@ -1674,6 +1719,9 @@ int main(int argc, char** argv)
 
             XEvent event;
             XNextEvent(display, &event);
+
+            // This is needed for XIM to handle combining keys, like ` + a = à.
+            if(XFilterEvent(&event, None)) { continue; }
 
             if(event.xcookie.type == GenericEvent && event.xcookie.extension == xi_opcode)
             {
@@ -1892,6 +1940,65 @@ int main(int argc, char** argv)
                     if(ctrl_held && keysym == 'q')
                     {
                       quitting = true;
+                    }
+                    else if(ctrl_held && keysym == 'f')
+                    {
+                      bflip(state->searching);
+                      search_changed = true;
+                    }
+                    else if(state->searching)
+                    {
+                      if(keysym == XK_Escape || keysym == XK_Return)
+                      {
+                        state->searching = false;
+                        search_changed = true;
+                      }
+                      else if(keysym == XK_BackSpace)
+                      {
+                        if(state->search_str.size > 0)
+                        {
+                          while(state->search_str.size > 0 && is_utf8_continuation_byte(state->search_str.data[state->search_str.size - 1]))
+                          {
+                            --state->search_str.size;
+                          } 
+                          if(state->search_str.size > 0)
+                          {
+                            --state->search_str.size;
+                          }
+                          search_changed = true;
+                        }
+                      }
+                      else if(ctrl_held && keysym == 'u')
+                      {
+                        if(state->search_str.size > 0)
+                        {
+                          state->search_str.size = 0;
+                          search_changed = true;
+                        }
+                      }
+                      else
+                      {
+                        Status xmb_lookup_status = 0;
+                        char* result_buffer = (char*)&state->search_str.data[state->search_str.size];
+                        // int xmb_lookup_rc = Xutf8LookupString(x_input_context, &event.xkey,
+                        int xmb_lookup_rc = XmbLookupString(x_input_context, &event.xkey,
+                            result_buffer,
+                            state->search_str_capacity - state->search_str.size,
+                            0, &xmb_lookup_status);
+                        // printf("%d %d\n", xmb_lookup_status, xmb_lookup_rc);
+                        if(xmb_lookup_status != XBufferOverflow && xmb_lookup_rc > 0)
+                        {
+#if 0
+                          printf("\n");
+                          for_count(i, xmb_lookup_rc)
+                          {
+                            printf("0x%04x '%c'\n", (u8)result_buffer[i], (u8)result_buffer[i]);
+                          }
+#endif
+                          state->search_str.size += xmb_lookup_rc;
+                          search_changed = true;
+                        }
+                      }
                     }
                     else if(keysym == XK_Escape)
                     {
@@ -2737,6 +2844,11 @@ int main(int argc, char** argv)
             prev_mouse_y = mouse_y;
           }
 
+          if(search_changed)
+          {
+            dirty = true;
+          }
+
           if(dirty)
           {
             // Increase this to play out animations and such after events stop.
@@ -3156,18 +3268,53 @@ int main(int argc, char** argv)
               glEnd();
             }
 
+            r32 fs = 28;
+            r32 text_gray = bright_bg ? 0 : 1;
+
             if(state->show_info)
             {
-              r32 gray = bright_bg ? 0 : 1;
-              glColor3f(gray, gray, gray);
               glScissor(image_region_x0, 0, image_region_w, image_region_y0);
+              glColor3f(text_gray, text_gray, text_gray);
 
-              r32 fs = 28;
               r32 x = image_region_x0 + 0.5f * fs;
               r32 y = 0.5f * fs;
               str_t str = img->positive_prompt;
               // str_t str = str("hörß űő²°C äíö®´¹³¤€^ ̛ ̛’ôæœ©·ñçµ ̇¿¿¡¯£¸¼˘½’ ĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŦŧŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽžſ ±ëîÓÐ¶");
-              r32 x_len = draw_str(state, 0, 1, fs, x, y, str);
+              draw_str(state, 0, 1, fs, x, y, str);
+            }
+
+            if(state->searching)
+            {
+              glScissor(0, 0, state->win_w, state->win_h);
+              r32 x0 = image_region_x0 + 0.5f * fs;
+              r32 y = state->win_h - 1.5f * fs;
+              for(i32 pass = 1;
+                  pass <= 2;
+                  ++pass)
+              {
+                draw_str_flags_t flags = (pass == 1) ? DRAW_STR_MEASURE_ONLY : 0;
+                r32 x = x0;
+
+                x += draw_str(state, flags, 1, fs, x, y, str("Search: "));
+                x += draw_str(state, flags, 1, fs, x, y, state->search_str);
+                x += draw_str(state, flags, 1, fs, x, y, str("|"));
+
+                if(pass == 1)
+                {
+                  // Background rectangle.
+                  glColor3f(1 - text_gray, 1 - text_gray, 1 - text_gray);
+                  glBindTexture(GL_TEXTURE_2D, 0);
+                  glDisable(GL_BLEND);
+                  glBegin(GL_QUADS);
+                  glVertex2f(x0 - 0.3f * fs, y - 0.5f * fs);
+                  glVertex2f(x  + 0.3f * fs, y - 0.5f * fs);
+                  glVertex2f(x  + 0.3f * fs, y + fs);
+                  glVertex2f(x0 - 0.3f * fs, y + fs);
+                  glEnd();
+
+                  glColor3f(text_gray, text_gray, text_gray);
+                }
+              }
             }
 
 #if 0
