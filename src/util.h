@@ -104,6 +104,9 @@ internal str_t wrap_str(char* z)
   return result;
 }
 
+// For printf.
+#define PF_STR(x) (int)((x).size), (x).data
+
 internal str_t str_from_span(u8* start, u8* end)
 {
   return (str_t){ start, end > start ? end - start : 0 };
