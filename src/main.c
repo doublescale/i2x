@@ -2846,7 +2846,45 @@ int main(int argc, char** argv)
 
           if(search_changed)
           {
+            if(state->search_str.size == 0)
+            {
+              for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
+              state->filtered_img_count = state->total_img_count;
+              state->viewing_filtered_img_idx = 0; // prev_viewing_idx;
+            }
+            else
+            {
+              state->filtered_img_count = 0;
+              state->viewing_filtered_img_idx = 0; // prev_viewing_idx;
+
+              str_t query = state->search_str;
+              for_count(img_idx, state->total_img_count)
+              {
+                img_entry_t* img = &state->img_entries[img_idx];
+                str_t prompt = img->positive_prompt;
+                u8* prompt_end = prompt.data + prompt.size;
+                b32 overall_match = false;
+                for(i32 offset = 0;
+                    offset <= (i32)prompt.size - (i32)query.size && !overall_match;
+                    ++offset)
+                {
+                  str_t prompt_substr = { prompt.data + offset, query.size };
+
+                  if(str_eq(prompt_substr, query))
+                  {
+                    overall_match = true;
+                  }
+                }
+
+                if(overall_match)
+                {
+                  state->filtered_img_idxs[state->filtered_img_count++] = img_idx;
+                }
+              }
+            }
+
             dirty = true;
+            scroll_thumbnail_into_view = true;
           }
 
           if(dirty)
