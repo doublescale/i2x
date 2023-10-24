@@ -387,7 +387,7 @@ typedef struct
   i64 vram_bytes_used;
   b32 linear_sampling;
   b32 alpha_blend;
-  b32 show_info;
+  i32 show_info;
 
   GLuint test_texture_id;
 
@@ -396,6 +396,8 @@ typedef struct
   i32 chars_per_font_col;
   stbtt_fontinfo font;
   r32 stb_font_scale;
+  r32 font_ascent;
+  r32 font_descent;
   u8* font_texels;
   i32 font_texture_w;
   i32 font_texture_h;
@@ -432,6 +434,8 @@ typedef struct
   i32 sidebar_width;
   r32 sidebar_scroll_rows;
   i32 thumbnail_columns;
+
+  i32 info_panel_width;
 
   r32 dragging_start_x;
   r32 dragging_start_y;
@@ -784,301 +788,301 @@ internal void reload_input_paths(state_t* state)
           IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_DELETE_SELF /* | IN_MODIFY */ | IN_MOVE_SELF | IN_MOVED_FROM | IN_MOVED_TO
           | IN_EXCL_UNLINK /* | IN_ONLYDIR */);
     }
+  }
 
-    for(i32 img_idx = 0;
-        img_idx < state->total_img_count;
-        ++img_idx)
+  for(i32 img_idx = 0;
+      img_idx < state->total_img_count;
+      ++img_idx)
+  {
+    img_entry_t* img = &state->img_entries[img_idx];
+
+    if(img->file_header_data.size)
     {
-      img_entry_t* img = &state->img_entries[img_idx];
+      free(img->file_header_data.data);
+      zero_struct(img->file_header_data);
+    }
 
-      if(img->file_header_data.size)
+    int fd = open((char*)img->path.data, O_RDONLY);
+    if(fd == -1) { continue; }
+    size_t bytes_to_read = 4 * 1024;
+    img->file_header_data.data = malloc_array(bytes_to_read, u8);
+    ssize_t bytes_actually_read = read(fd, img->file_header_data.data, bytes_to_read);
+    close(fd);
+    if(bytes_actually_read == -1) { continue; }
+    img->file_header_data.size = bytes_actually_read;
+
+    // Look for PNG metadata.
+    if(img->file_header_data.size >= 16)
+    {
+      u8* ptr = img->file_header_data.data;
+      u8* data_end = img->file_header_data.data + img->file_header_data.size;
+      b32 bad = false;
+
+      // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
+      bad |= (*ptr++ != 0x89);
+      bad |= (*ptr++ != 'P');
+      bad |= (*ptr++ != 'N');
+      bad |= (*ptr++ != 'G');
+      bad |= (*ptr++ != 0x0d);
+      bad |= (*ptr++ != 0x0a);
+      bad |= (*ptr++ != 0x1a);
+      bad |= (*ptr++ != 0x0a);
+
+      while(!bad)
       {
-        free(img->file_header_data.data);
-        zero_struct(img->file_header_data);
-      }
+        // Convert big-endian to little-endian.
+        u32 chunk_size = 0;
+        chunk_size |= *ptr++;
+        chunk_size <<= 8;
+        chunk_size |= *ptr++;
+        chunk_size <<= 8;
+        chunk_size |= *ptr++;
+        chunk_size <<= 8;
+        chunk_size |= *ptr++;
 
-      int fd = open((char*)img->path.data, O_RDONLY);
-      if(fd == -1) { continue; }
-      size_t bytes_to_read = 4 * 1024;
-      img->file_header_data.data = malloc_array(bytes_to_read, u8);
-      ssize_t bytes_actually_read = read(fd, img->file_header_data.data, bytes_to_read);
-      close(fd);
-      if(bytes_actually_read == -1) { continue; }
-      img->file_header_data.size = bytes_actually_read;
-
-      // Look for PNG metadata.
-      if(img->file_header_data.size >= 16)
-      {
-        u8* ptr = img->file_header_data.data;
-        u8* data_end = img->file_header_data.data + img->file_header_data.size;
-        b32 bad = false;
-
-        // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
-        bad |= (*ptr++ != 0x89);
-        bad |= (*ptr++ != 'P');
-        bad |= (*ptr++ != 'N');
-        bad |= (*ptr++ != 'G');
-        bad |= (*ptr++ != 0x0d);
-        bad |= (*ptr++ != 0x0a);
-        bad |= (*ptr++ != 0x1a);
-        bad |= (*ptr++ != 0x0a);
-
-        while(!bad)
+        // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+        b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
+        b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
+        if(tEXt_header || iTXt_header)
         {
-          // Convert big-endian to little-endian.
-          u32 chunk_size = 0;
-          chunk_size |= *ptr++;
-          chunk_size <<= 8;
-          chunk_size |= *ptr++;
-          chunk_size <<= 8;
-          chunk_size |= *ptr++;
-          chunk_size <<= 8;
-          chunk_size |= *ptr++;
+          u8* key_start = ptr + 4;
+          u8* value_end = ptr + 4 + chunk_size;
 
-          // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
-          b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
-          b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
-          if(tEXt_header || iTXt_header)
+          if(value_end <= data_end)
           {
-            u8* key_start = ptr + 4;
-            u8* value_end = ptr + 4 + chunk_size;
-
-            if(value_end <= data_end)
+            i32 key_len = 0;
+            while(key_start[key_len] != 0 && key_start + key_len + 1 < value_end)
             {
-              i32 key_len = 0;
-              while(key_start[key_len] != 0 && key_start + key_len + 1 < value_end)
+              ++key_len;
+            }
+
+            u8* value_start = key_start + key_len + 1;
+            // https://www.w3.org/TR/2003/REC-PNG-20031110/#11iTXt
+            if(iTXt_header)
+            {
+              value_start += 2;
+              while(*value_start) { ++value_start; }
+              ++value_start;
+              while(*value_start) { ++value_start; }
+              ++value_start;
+            }
+
+            str_t key = { key_start, key_len };
+            str_t value = str_from_span(value_start, value_end);
+            // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+            if(str_eq_zstr(key, "prompt"))
+            {
+              // comfyanonymous/ComfyUI JSON.
+              // TODO: Tokenize properly, or string contents might get mistaken for object keys,
+              //       like {"seed": "tricky \"seed:"}
+
+              for(u8* p = value_start;
+                  p < value_end;
+                 )
               {
-                ++key_len;
-              }
-
-              u8* value_start = key_start + key_len + 1;
-              // https://www.w3.org/TR/2003/REC-PNG-20031110/#11iTXt
-              if(iTXt_header)
-              {
-                value_start += 2;
-                while(*value_start) { ++value_start; }
-                ++value_start;
-                while(*value_start) { ++value_start; }
-                ++value_start;
-              }
-
-              str_t key = { key_start, key_len };
-              str_t value = str_from_span(value_start, value_end);
-              // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
-
-              if(str_eq_zstr(key, "prompt"))
-              {
-                // comfyanonymous/ComfyUI JSON.
-                // TODO: Tokenize properly, or string contents might get mistaken for object keys,
-                //       like {"seed": "tricky \"seed:"}
-
-                for(u8* p = value_start;
-                    p < value_end;
-                   )
+                if(0) {}
+                else if(advance_if_prefix_matches(&p, value_end, "\"seed\"")
+                    || advance_if_prefix_matches(&p, value_end, "\"noise_seed\""))
                 {
-                  if(0) {}
-                  else if(advance_if_prefix_matches(&p, value_end, "\"seed\"")
-                      || advance_if_prefix_matches(&p, value_end, "\"noise_seed\""))
-                  {
-                    while(p < value_end && !is_digit(*p)) { ++p; }
-                    str_t v = {p};
-                    while(p < value_end && is_digit(*p)) { ++p; }
-                    v.size = p - v.data;
+                  while(p < value_end && !is_digit(*p)) { ++p; }
+                  str_t v = {p};
+                  while(p < value_end && is_digit(*p)) { ++p; }
+                  v.size = p - v.data;
 
-                    img->seed = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "\"steps\""))
-                  {
-                    while(p < value_end && !is_digit(*p)) { ++p; }
-                    str_t v = {p};
-                    while(p < value_end && is_digit(*p)) { ++p; }
-                    v.size = p - v.data;
-
-                    img->sampling_steps = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "\"cfg\""))
-                  {
-                    while(p < value_end && !(is_digit(*p) || *p == '.')) { ++p; }
-                    str_t v = {p};
-                    while(p < value_end && (is_digit(*p) || *p == '.')) { ++p; }
-                    v.size = p - v.data;
-
-                    img->cfg = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
-                  {
-                    while(p < value_end && *p != '"') { ++p; }
-                    ++p;
-                    str_t v = {p};
-                    while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
-                    v.size = p - v.data;
-
-                    img->sampler = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
-                  {
-                    while(p < value_end && *p != '"') { ++p; }
-                    ++p;
-                    str_t v = {p};
-                    while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
-                    v.size = p - v.data;
-
-                    v = str_remove_suffix(v, str(".ckpt"));
-                    v = str_remove_suffix(v, str(".safetensors"));
-
-                    img->model = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
-                  {
-                    while(p < value_end && !is_digit(*p)) { ++p; }
-                    str_t v = {p};
-                    while(p < value_end && is_digit(*p)) { ++p; }
-                    v.size = p - v.data;
-
-                    img->batch_size = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
-                  {
-                    while(p < value_end && *p != '"') { ++p; }
-                    ++p;
-                    str_t v = {p};
-                    while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
-                    v.size = p - v.data;
-
-                    if(!img->positive_prompt.data) { img->positive_prompt = v; }
-                    else if(!img->negative_prompt.data) { img->negative_prompt = v; }
-                  }
-                  else
-                  {
-                    ++p;
-                  }
+                  img->seed = v;
                 }
-              }
-              else if(str_eq_zstr(key, "parameters"))
-              {
-                // AUTOMATIC1111/stable-diffusion-webui.
-                // Be careful with newlines and misleading labels in the
-                // positive and negative prompts; use the last found keywords.
-
-                u8* p = value_start;
-                u8* negative_prompt_label_start = 0;
-                u8* steps_label_start = value_end;
-
-                while(p < value_end)
+                else if(advance_if_prefix_matches(&p, value_end, "\"steps\""))
                 {
-                  u8* p_prev = p;
-                  if(0) {}
-                  else if(advance_if_prefix_matches(&p, value_end, "\nNegative prompt: "))
-                  {
-                    negative_prompt_label_start = p_prev;
-                    img->negative_prompt.data = p;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "\nSteps: "))
-                  {
-                    steps_label_start = p_prev;
-                    img->sampling_steps.data = p;
-                  }
+                  while(p < value_end && !is_digit(*p)) { ++p; }
+                  str_t v = {p};
+                  while(p < value_end && is_digit(*p)) { ++p; }
+                  v.size = p - v.data;
 
+                  img->sampling_steps = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "\"cfg\""))
+                {
+                  while(p < value_end && !(is_digit(*p) || *p == '.')) { ++p; }
+                  str_t v = {p};
+                  while(p < value_end && (is_digit(*p) || *p == '.')) { ++p; }
+                  v.size = p - v.data;
+
+                  img->cfg = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
+                {
+                  while(p < value_end && *p != '"') { ++p; }
                   ++p;
-                }
+                  str_t v = {p};
+                  while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
+                  v.size = p - v.data;
 
-                if(negative_prompt_label_start)
+                  img->sampler = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
                 {
-                  img->positive_prompt = str_from_span(value_start, negative_prompt_label_start);
+                  while(p < value_end && *p != '"') { ++p; }
+                  ++p;
+                  str_t v = {p};
+                  while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
+                  v.size = p - v.data;
+
+                  v = str_remove_suffix(v, str(".ckpt"));
+                  v = str_remove_suffix(v, str(".safetensors"));
+
+                  img->model = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
+                {
+                  while(p < value_end && !is_digit(*p)) { ++p; }
+                  str_t v = {p};
+                  while(p < value_end && is_digit(*p)) { ++p; }
+                  v.size = p - v.data;
+
+                  img->batch_size = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
+                {
+                  while(p < value_end && *p != '"') { ++p; }
+                  ++p;
+                  str_t v = {p};
+                  while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
+                  v.size = p - v.data;
+
+                  if(!img->positive_prompt.data) { img->positive_prompt = v; }
+                  else if(!img->negative_prompt.data) { img->negative_prompt = v; }
                 }
                 else
                 {
-                  img->positive_prompt = str_from_span(value_start, steps_label_start);
-                }
-
-                if(img->negative_prompt.data)
-                {
-                  img->negative_prompt.size = steps_label_start - img->negative_prompt.data;
-                }
-
-                p = steps_label_start;
-
-                while(p < value_end)
-                {
-                  u8* p_prev = p;
-                  if(0) {}
-                  else if(advance_if_prefix_matches(&p, value_end, "Steps: "))
-                  {
-                    str_t v = {p};
-                    while(p < value_end && *p != ',') { ++p; }
-                    v.size = p - v.data;
-
-                    img->sampling_steps = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "Sampler: "))
-                  {
-                    str_t v = {p};
-                    while(p < value_end && *p != ',') { ++p; }
-                    v.size = p - v.data;
-
-                    img->sampler = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "CFG scale: "))
-                  {
-                    str_t v = {p};
-                    while(p < value_end && *p != ',') { ++p; }
-                    v.size = p - v.data;
-
-                    img->cfg = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "Seed: "))
-                  {
-                    str_t v = {p};
-                    while(p < value_end && *p != ',') { ++p; }
-                    v.size = p - v.data;
-
-                    img->seed = v;
-                  }
-                  else if(advance_if_prefix_matches(&p, value_end, "Model: "))
-                  {
-                    str_t v = {p};
-                    while(p < value_end && *p != ',') { ++p; }
-                    v.size = p - v.data;
-
-                    img->model = v;
-                  }
-
                   ++p;
                 }
               }
+            }
+            else if(str_eq_zstr(key, "parameters"))
+            {
+              // AUTOMATIC1111/stable-diffusion-webui.
+              // Be careful with newlines and misleading labels in the
+              // positive and negative prompts; use the last found keywords.
 
-              if(!img->generation_parameters.size)
+              u8* p = value_start;
+              u8* negative_prompt_label_start = 0;
+              u8* steps_label_start = value_end;
+
+              while(p < value_end)
               {
-                img->generation_parameters = value;
+                u8* p_prev = p;
+                if(0) {}
+                else if(advance_if_prefix_matches(&p, value_end, "\nNegative prompt: "))
+                {
+                  negative_prompt_label_start = p_prev;
+                  img->negative_prompt.data = p;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "\nSteps: "))
+                {
+                  steps_label_start = p_prev;
+                  img->sampling_steps.data = p;
+                }
+
+                ++p;
+              }
+
+              if(negative_prompt_label_start)
+              {
+                img->positive_prompt = str_from_span(value_start, negative_prompt_label_start);
+              }
+              else
+              {
+                img->positive_prompt = str_from_span(value_start, steps_label_start);
+              }
+
+              if(img->negative_prompt.data)
+              {
+                img->negative_prompt.size = steps_label_start - img->negative_prompt.data;
+              }
+
+              p = steps_label_start;
+
+              while(p < value_end)
+              {
+                u8* p_prev = p;
+                if(0) {}
+                else if(advance_if_prefix_matches(&p, value_end, "Steps: "))
+                {
+                  str_t v = {p};
+                  while(p < value_end && *p != ',') { ++p; }
+                  v.size = p - v.data;
+
+                  img->sampling_steps = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "Sampler: "))
+                {
+                  str_t v = {p};
+                  while(p < value_end && *p != ',') { ++p; }
+                  v.size = p - v.data;
+
+                  img->sampler = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "CFG scale: "))
+                {
+                  str_t v = {p};
+                  while(p < value_end && *p != ',') { ++p; }
+                  v.size = p - v.data;
+
+                  img->cfg = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "Seed: "))
+                {
+                  str_t v = {p};
+                  while(p < value_end && *p != ',') { ++p; }
+                  v.size = p - v.data;
+
+                  img->seed = v;
+                }
+                else if(advance_if_prefix_matches(&p, value_end, "Model: "))
+                {
+                  str_t v = {p};
+                  while(p < value_end && *p != ',') { ++p; }
+                  v.size = p - v.data;
+
+                  img->model = v;
+                }
+
+                ++p;
               }
             }
-            else
+
+            if(!img->generation_parameters.size)
             {
-              bad = true;
+              img->generation_parameters = value;
             }
           }
-
-          ptr += 4 + chunk_size + 4;
-
-          bad |= (ptr + 8 >= data_end);
+          else
+          {
+            bad = true;
+          }
         }
+
+        ptr += 4 + chunk_size + 4;
+
+        bad |= (ptr + 8 >= data_end);
       }
+    }
 
 #if 0
-      printf("\n%.*s\n", PF_STR(img->path));
+    printf("\n%.*s\n", PF_STR(img->path));
 #define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
-      // P(generation_parameters);
-      P(positive_prompt);
-      P(negative_prompt);
-      P(seed);
-      P(batch_size);
-      P(model);
-      P(sampler);
-      P(sampling_steps);
-      P(cfg);
+    // P(generation_parameters);
+    P(positive_prompt);
+    P(negative_prompt);
+    P(seed);
+    P(batch_size);
+    P(model);
+    P(sampler);
+    P(sampling_steps);
+    P(cfg);
 #undef P
 #endif
-    }
   }
 
   for(i32 idx = 0;
@@ -1215,6 +1219,88 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
   }
 
   return x - start_x;
+}
+
+internal void draw_wrapped_text(state_t* state, r32 fs, r32 x0, r32 x1, r32* x, r32* y, str_t text)
+{
+  u8* text_end = text.data + text.size;
+    r32 max_word_width = x1 - x0;
+
+  for(u8* word_start = text.data;
+      word_start < text_end; // && fs * state->font_ascent + *y >= 0;
+     )
+  {
+    b32 end_line = false;
+    u8* word_end = word_start;
+    r32 word_width = 0;
+
+    while(word_end < text_end)
+    {
+      u8* prefix_end = word_end + 1;
+      if(!is_ascii(*word_end))
+      {
+        while(prefix_end < text_end && is_utf8_continuation_byte(*prefix_end))
+        {
+          ++prefix_end;
+        }
+      }
+      str_t prefix = str_from_span(word_start, prefix_end);
+      r32 prefix_width = draw_str(state, DRAW_STR_MEASURE_ONLY, 1, fs, 0, 0, prefix);
+      if(word_end > word_start && prefix_width > max_word_width)
+      {
+        break;
+      }
+      word_end = prefix_end;
+
+      if(word_end[-1] == '\n')
+      {
+        end_line = true;
+        break;
+      }
+      else if(word_end[-1] == ' ')
+      {
+        break;
+      }
+      else if(0
+          || word_end[-1] == '!'
+          || word_end[-1] == ','
+          || word_end[-1] == '-'
+          || word_end[-1] == '.'
+          || word_end[-1] == ':'
+          || word_end[-1] == ';'
+          || word_end[-1] == '?'
+          || word_end[-1] == '/'
+          || word_end[-1] == '_'
+          )
+      {
+        word_width = prefix_width;
+        break;
+      }
+
+      word_width = prefix_width;
+    }
+
+    if(*x + word_width > x1)
+    {
+      *x = x0;
+      *y -= fs;
+      while(word_start < text_end && *word_start == ' ')
+      {
+        ++word_start;
+      }
+    }
+
+    str_t word = str_from_span(word_start, word_end);
+    if(word_end[-1] == '\n') { --word.size; }
+    *x += draw_str(state, 0, 1, fs, *x, *y, word);
+    word_start = word_end;
+
+    if(end_line)
+    {
+      *x = x0;
+      *y -= fs;
+    }
+  }
 }
 
 int main(int argc, char** argv)
@@ -1540,6 +1626,11 @@ int main(int argc, char** argv)
 
               state->stb_font_scale = stbtt_ScaleForPixelHeight(&state->font, 32);
 
+              int ascent, descent, line_gap;
+              stbtt_GetFontVMetrics(&state->font, &ascent, &descent, &line_gap);
+              state->font_ascent = (r32)ascent * state->stb_font_scale / (r32)state->font_char_h;
+              state->font_descent = -(r32)descent * state->stb_font_scale / (r32)state->font_char_h;
+
               for(i32 char_idx = 0;
                   char_idx < state->fixed_codepoint_range_length;
                   ++char_idx)
@@ -1623,10 +1714,10 @@ int main(int argc, char** argv)
         state->sidebar_width = 310;
         state->thumbnail_columns = 2;
         i32 hovered_thumbnail_idx = -1;
-        state->show_info = true;
-        i32 info_height = 40;
+        state->show_info = 1;
         state->search_str_capacity = 1024;
         state->search_str.data = malloc_array(state->search_str_capacity, u8);
+        state->info_panel_width = 500;
 
         // TODO: Split these for x/y ?
         //       Actually, just using the constant 120 might be enough.
@@ -1657,6 +1748,7 @@ int main(int argc, char** argv)
         ui_interaction_t sidebar_interaction = { &state->viewing_filtered_img_idx };
         ui_interaction_t sidebar_resize_interaction = { &state->sidebar_width };
         ui_interaction_t scrollbar_interaction = { &state->sidebar_scroll_rows };
+        ui_interaction_t info_panel_resize_interaction = { &state->info_panel_width };
 
         while(!quitting)
         {
@@ -1713,8 +1805,30 @@ int main(int argc, char** argv)
             }
           }
 
-          while(XPending(display))
+          i32 info_height = 0;
+          r32 win_min_side = 0;
+          r32 fs = 0;
+          i32 effective_sidebar_width = 0;
+          i32 effective_info_panel_width = 0;
+          i32 image_region_x0 = 0;
+          i32 image_region_y0 = 0;
+          i32 image_region_w = 0;
+          i32 image_region_h = 0;
+
+          for(;;)
           {
+            win_min_side = min(state->win_w, state->win_h);
+            fs = clamp(12, 36, (26.0f / 1080.0f) * win_min_side);
+            info_height = 1.2f * fs;
+            effective_sidebar_width = get_effective_sidebar_width(state);
+            effective_info_panel_width = max(1, min(state->win_w - 10, state->info_panel_width));
+            image_region_x0 = state->hide_sidebar ? 0 : effective_sidebar_width;
+            image_region_y0 = (state->show_info == 1) ? info_height : 0;
+            image_region_w = max(0, state->win_w - image_region_x0 - (state->show_info == 2 ? effective_info_panel_width : 0));
+            image_region_h = max(0, state->win_h - image_region_y0);
+
+            if(!XPending(display)) { break; }
+
             r32 mouse_x = prev_mouse_x;
             r32 mouse_y = prev_mouse_y;
             r32 mouse_delta_x = 0;
@@ -1724,7 +1838,6 @@ int main(int argc, char** argv)
             r32 scroll_y = 0;
             i32 mouse_btn_went_down = 0;
             i32 mouse_btn_went_up = 0;
-            i32 effective_sidebar_width = get_effective_sidebar_width(state);
             r32 thumbnail_h = get_thumbnail_size(state);
 
             XEvent event;
@@ -2170,7 +2283,7 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 'i')
                     {
-                      bflip(state->show_info);
+                      state->show_info = (state->show_info + 1) % 3;
                     }
                     else if(keysym == 'n')
                     {
@@ -2192,19 +2305,9 @@ int main(int argc, char** argv)
                         }
                       }
                     }
-                    else if(keysym == '6')
-                    {
-                      bflip(state->alpha_blend);
-                    }
                     else if(ctrl_held && keysym == 'v')
                     {
                       XConvertSelection(display, atom_clipboard, atom_uri_list, atom_mycliptarget, window, CurrentTime);
-                    }
-                    else if(keysym == 'v')
-                    {
-                      bflip(state->vsync);
-
-                      glXSwapIntervalEXT(display, glx_window, (int)state->vsync);
                     }
                     else if(ctrl_held && keysym == 'c')
                     {
@@ -2297,6 +2400,15 @@ int main(int argc, char** argv)
                     else if(keysym == '5')
                     {
                       bflip(show_fps);
+                    }
+                    else if(keysym == '6')
+                    {
+                      bflip(state->alpha_blend);
+                    }
+                    else if(keysym == '7')
+                    {
+                      bflip(state->vsync);
+                      glXSwapIntervalEXT(display, glx_window, (int)state->vsync);
                     }
                   }
                   else
@@ -2633,22 +2745,31 @@ int main(int argc, char** argv)
             b32 mouse_on_sidebar_edge = false;
             b32 mouse_in_sidebar = false;
             b32 mouse_on_scrollbar = false;
-            if(!state->hide_sidebar)
+            b32 mouse_on_info_panel_edge = false;
+            b32 mouse_in_info_panel = false;
+            if(!state->hide_sidebar
+                && mouse_x >= effective_sidebar_width - get_scrollbar_width(state)
+                && mouse_x < effective_sidebar_width)
             {
-              if(mouse_x >= effective_sidebar_width - get_scrollbar_width(state)
-                  && mouse_x < effective_sidebar_width)
-              {
-                mouse_on_scrollbar = true;
-              }
-              else if(mouse_x >= effective_sidebar_width
-                  && mouse_x < effective_sidebar_width + 10)
-              {
-                mouse_on_sidebar_edge = true;
-              }
-              else if(!mouse_on_sidebar_edge && mouse_x < effective_sidebar_width)
-              {
-                mouse_in_sidebar = true;
-              }
+              mouse_on_scrollbar = true;
+            }
+            else if(!state->hide_sidebar
+                && mouse_x >= effective_sidebar_width
+                && mouse_x < effective_sidebar_width + 10)
+            {
+              mouse_on_sidebar_edge = true;
+            }
+            else if(!state->hide_sidebar && !mouse_on_sidebar_edge && mouse_x < effective_sidebar_width)
+            {
+              mouse_in_sidebar = true;
+            }
+            else if(absolute(mouse_x - (state->win_w - effective_info_panel_width)) <= 10)
+            {
+              mouse_on_info_panel_edge = true;
+            }
+            else if(mouse_x > state->win_w - effective_info_panel_width)
+            {
+              mouse_in_info_panel = true;
             }
 
             if(interaction_is_empty(current_interaction))
@@ -2678,6 +2799,15 @@ int main(int argc, char** argv)
                   state->dragging_start_value =
                     (get_filtered_img (state, hovered_thumbnail_idx)->flags & IMG_FLAG_MARKED);
                 }
+              }
+              else if(mouse_on_info_panel_edge)
+              {
+                hovered_interaction = info_panel_resize_interaction;
+                state->dragging_start_value = effective_info_panel_width;
+              }
+              else if(mouse_in_info_panel)
+              {
+                zero_struct(hovered_interaction);
               }
               else
               {
@@ -2747,9 +2877,17 @@ int main(int argc, char** argv)
                 dirty = true;
               }
             }
+            else if(interaction_eq(current_interaction, info_panel_resize_interaction))
+            {
+              if(lmb_held)
+              {
+                state->info_panel_width = state->dragging_start_value - (i32)(mouse_x - state->dragging_start_x);
+                state->info_panel_width = max(1, state->info_panel_width);
+                dirty = true;
+              }
+            }
             else if(mouse_delta_x || mouse_delta_y || scroll_x || scroll_y || scroll_y_ticks || mouse_btn_went_down)
             {
-              r32 win_min_side = min(state->win_w, state->win_h);
               r32 exp_zoom_before = exp2f(zoom);
               r32 offset_per_scroll = offset_scroll_scale / exp_zoom_before;
               r32 zoom_delta = 0;
@@ -2839,17 +2977,8 @@ int main(int argc, char** argv)
                 zoom += zoom_delta;
                 r32 exp_zoom_after = exp2f(zoom);
 
-                r32 center_mouse_x = state->dragging_start_x - 0.5f * state->win_w;
-                r32 center_mouse_y = state->dragging_start_y - 0.5f * state->win_h;
-
-                if(!state->hide_sidebar)
-                {
-                  center_mouse_x -= 0.5f * (r32)effective_sidebar_width;
-                }
-                if(state->show_info)
-                {
-                  center_mouse_y -= 0.5f * (r32)info_height;
-                }
+                r32 center_mouse_x = state->dragging_start_x - (image_region_x0 + 0.5f * image_region_w);
+                r32 center_mouse_y = state->dragging_start_y - (image_region_y0 + 0.5f * image_region_h);
 
                 offset_x += center_mouse_x / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
                 offset_y += center_mouse_y / win_min_side * (1.0f / exp_zoom_after - 1.0f / exp_zoom_before);
@@ -2888,7 +3017,7 @@ int main(int argc, char** argv)
                 {
                   str_t prompt_substr = { prompt.data + offset, query.size };
 
-                  if(str_eq(prompt_substr, query))
+                  if(str_eq_ignoring_case(prompt_substr, query))
                   {
                     overall_match = true;
                   }
@@ -2916,7 +3045,6 @@ int main(int argc, char** argv)
           {
             --dirty_frames;
 
-            i32 effective_sidebar_width = get_effective_sidebar_width(state);
             r32 thumbnail_w = get_thumbnail_size(state);
             r32 thumbnail_h = thumbnail_w;
 
@@ -3225,11 +3353,6 @@ int main(int argc, char** argv)
 
             still_loading |= upload_img_texture(state, img);
 
-            i32 image_region_x0 = state->hide_sidebar ? 0 : effective_sidebar_width;
-            i32 image_region_y0 = state->show_info ? info_height : 0;
-            i32 image_region_w = state->win_w - image_region_x0;
-            i32 image_region_h = state->win_h - image_region_y0;
-
             GLuint texture_id = img->texture_id;
             r32 tex_w = img->w;
             r32 tex_h = img->h;
@@ -3285,7 +3408,6 @@ int main(int argc, char** argv)
               r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
               r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
 
-              r32 win_min_side = min(state->win_w, state->win_h);
               x0 += win_min_side * exp_zoom * offset_x;
               y0 += win_min_side * exp_zoom * offset_y;
 
@@ -3324,19 +3446,105 @@ int main(int argc, char** argv)
               glEnd();
             }
 
-            r32 fs = 28;
             r32 text_gray = bright_bg ? 0 : 1;
 
-            if(state->show_info)
+            if(state->show_info == 1)
             {
-              glScissor(image_region_x0, 0, image_region_w, image_region_y0);
+              glScissor(image_region_x0, 0, state->win_w - image_region_x0, info_height);
+              // glScissor(0, 0, state->win_w, state->win_h);
               glColor3f(text_gray, text_gray, text_gray);
 
-              r32 x = image_region_x0 + 0.5f * fs;
-              r32 y = 0.5f * fs;
+              r32 x = image_region_x0 + 0.2f * fs;
+              r32 y = fs * (state->font_descent + 0.1f);
               str_t str = img->positive_prompt;
-              // str_t str = str("hörß űő²°C äíö®´¹³¤€^ ̛ ̛’ôæœ©·ñçµ ̇¿¿¡¯£¸¼˘½’ ĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŦŧŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽžſ ±ëîÓÐ¶");
               draw_str(state, 0, 1, fs, x, y, str);
+            }
+            if(state->show_info == 2)
+            {
+              glScissor(
+                  image_region_x0 + image_region_w, image_region_y0,
+                  effective_info_panel_width, state->win_h);
+              // glScissor(0, 0, state->win_w, state->win_h);
+
+              glBindTexture(GL_TEXTURE_2D, 0);
+              glDisable(GL_BLEND);
+              r32 edge_gray = 0.0f;
+              if(interaction_eq(hovered_interaction, info_panel_resize_interaction))
+              {
+                edge_gray = bright_bg ? 0.0f : 1.0f;
+              }
+              else
+              {
+                edge_gray = bright_bg ? 0.4f : 0.6f;
+              }
+              glColor3f(edge_gray, edge_gray, edge_gray);
+              glBegin(GL_QUADS);
+              glVertex2f(state->win_w - effective_info_panel_width,     0);
+              glVertex2f(state->win_w - effective_info_panel_width + 1, 0);
+              glVertex2f(state->win_w - effective_info_panel_width + 1, state->win_h);
+              glVertex2f(state->win_w - effective_info_panel_width,     state->win_h);
+              glEnd();
+
+              r32 label_gray = bright_bg ? 0.3f : 0.7f;
+              r32 x0 = state->win_w - effective_info_panel_width + 0.5f * fs;
+              r32 x1 = state->win_w - 0.2f * fs;
+              r32 y0 = state->win_h - fs * (state->font_ascent + 0.3f);
+              r32 x_indented = x0 + fs;
+
+              r32 x = x0;
+              r32 y = y0 + fs;
+
+#if 0
+              y -= fs;
+              x = x0;
+              glColor3f(label_gray, label_gray, label_gray);
+              x += draw_str(state, 0, 1, fs, x, y, str("Text wrap test: "));
+              glColor3f(text_gray, text_gray, text_gray);
+              draw_wrapped_text(state, fs, x_indented, x1, &x, &y,
+                  str("\n ble afawpeij afweo a fafw pwfW\npfojawpovijpvij asdiopfj\n afjiop awiof pioawefj pioawjef\n"));
+#endif
+
+              u8 tmp[256];
+              str_t resolution_str = {
+                tmp,
+                snprintf((char*)tmp, sizeof(tmp), "%dx%d", img->w, img->h)
+              };
+
+              struct
+              {
+                str_t label;
+                str_t value;
+              } labeled_values[] = {
+                { str("File: "), img->path },
+                { str("Resolution: "), resolution_str },
+                { str(""), str("") },
+                { str("Model: "), img->model },
+                { str("Sampler: "), img->sampler },
+                { str("Sampling steps: "), img->sampling_steps },
+                { str("CFG: "), img->cfg },
+                { str("Batch size: "), img->batch_size },
+                { str("Seed: "), img->seed },
+                { str("Positive prompt: "), img->positive_prompt },
+                { str("Negative prompt: "), img->negative_prompt },
+              };
+
+              for(i32 label_idx = 0;
+                  label_idx < array_count(labeled_values);
+                  ++label_idx)
+              {
+                str_t label = labeled_values[label_idx].label;
+                str_t value = labeled_values[label_idx].value;
+
+                if(label.size == 0 || value.size > 0)
+                {
+                  y -= fs;
+                  x = x0;
+                  glColor3f(label_gray, label_gray, label_gray);
+                  x += draw_str(state, 0, 1, fs, x, y, label);
+                  glColor3f(text_gray, text_gray, text_gray);
+                  draw_wrapped_text(state, fs, x_indented, x1, &x, &y, value);
+                }
+              }
             }
 
             if(state->searching)

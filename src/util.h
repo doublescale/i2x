@@ -88,179 +88,6 @@ internal b32 v3u8_eq(v3u8 a, v3u8 b)
   return a.x == b.x && a.y == b.y && a.z == b.z;
 }
 
-typedef struct
-{
-  u8* data;
-  size_t size;
-} str_t;
-#define str(x) ((str_t){ (u8*)(x), sizeof(x) - 1 })
-
-internal str_t wrap_str(char* z)
-{
-  str_t result = {0};
-  result.data = (u8*)z;
-  while(*z) { ++z; }
-  result.size = (u8*)z - result.data;
-  return result;
-}
-
-// For printf.
-#define PF_STR(x) (int)((x).size), (x).data
-
-internal str_t str_from_span(u8* start, u8* end)
-{
-  return (str_t){ start, end > start ? end - start : 0 };
-}
-
-internal b32 str_eq(str_t a, str_t b)
-{
-  b32 result = true;
-  if(a.size == b.size)
-  {
-    for(u32 i = 0;
-        i < a.size && result;
-        ++i)
-    {
-      if(a.data[i] != b.data[i])
-      {
-        result = false;
-      }
-    }
-  }
-  else
-  {
-    result = false;
-  }
-  return result;
-}
-
-internal b32 str_eq_zstr(str_t a, char* b)
-{
-  b32 result = true;
-
-  for(u64 idx = 0;
-      idx < a.size;
-      ++idx)
-  {
-    if(b[idx] == 0 || a.data[idx] != b[idx])
-    {
-      result = false;
-      break;
-    }
-  }
-
-  if(result && b[a.size] != 0)
-  {
-    result = false;
-  }
-
-  return result;
-}
-
-internal b32 zstr_eq(char* a, char* b)
-{
-  b32 result = true;
-  while(*a && *b && result)
-  {
-    result &= (*a++ == *b++);
-  }
-  result &= (*a++ == *b++);
-  return result;
-}
-
-internal i32 zstr_length(const char* txt)
-{
-  i32 result = 0;
-
-  if(txt)
-  {
-    while(*txt)
-    {
-      ++result;
-      ++txt;
-    }
-  }
-
-  return result;
-}
-
-internal b32 str_has_suffix(str_t input, str_t suffix)
-{
-  b32 result = false;
-
-  if(input.size >= suffix.size)
-  {
-    str_t input_suffix = { input.data + input.size - suffix.size, suffix.size };
-    if(str_eq(input_suffix, suffix))
-    {
-      result = true;
-    }
-  }
-
-  return result;
-}
-
-internal str_t str_remove_suffix(str_t input, str_t suffix)
-{
-  if(str_has_suffix(input, suffix))
-  {
-    input.size -= suffix.size;
-  }
-
-  return input;
-}
-
-// If successful, string is zero-terminated (not included in size).
-internal str_t read_file(char* path)
-{
-  str_t result = {0};
-  FILE* fd = fopen(path, "rb");
-  if(fd == 0)
-  {
-    fprintf(stderr, "Could not open file '%s' for reading.\n", path);
-  }
-  else
-  {
-    // This *must* be an int, not a long, otherwise the "-1" that ftell returns on error is wrong.
-    int tell_pos = 0;
-
-    if(fseek(fd, 0, SEEK_END) == -1 || (tell_pos = ftell(fd)) == -1)
-    {
-      fprintf(stderr, "Could not seek to end of file '%s'.\n", path);
-    }
-    else
-    {
-      result.size = tell_pos;
-      fseek(fd, 0L, SEEK_SET);
-      result.data = malloc_array(result.size + 1, u8);
-
-      if(!result.data)
-      {
-        fprintf(stderr, "Could not allocate %lu bytes for file '%s'.\n", result.size, path);
-        result.size = 0;
-      }
-      else if(fread(result.data, 1, result.size, fd) != result.size)
-      {
-        fprintf(stderr, "Could not read all of file '%s'.\n", path);
-        free(result.data);
-        result.data = 0;
-        result.size = 0;
-      }
-      else
-      {
-        result.data[result.size] = 0;
-      }
-    }
-  }
-
-  if(fd)
-  {
-    fclose(fd);
-  }
-
-  return result;
-}
-
 internal void zero_bytes(u64 size, void* data)
 {
   for(u64 i = 0;
@@ -428,6 +255,201 @@ internal u8 to_upper(u8 c)
   if(is_alpha(c))
   {
     result &= ~0x20;
+  }
+
+  return result;
+}
+
+typedef struct
+{
+  u8* data;
+  size_t size;
+} str_t;
+#define str(x) ((str_t){ (u8*)(x), sizeof(x) - 1 })
+
+internal str_t wrap_str(char* z)
+{
+  str_t result = {0};
+  result.data = (u8*)z;
+  while(*z) { ++z; }
+  result.size = (u8*)z - result.data;
+  return result;
+}
+
+// For printf.
+#define PF_STR(x) (int)((x).size), (x).data
+
+internal str_t str_from_span(u8* start, u8* end)
+{
+  return (str_t){ start, end > start ? end - start : 0 };
+}
+
+internal b32 str_eq(str_t a, str_t b)
+{
+  b32 result = true;
+  if(a.size == b.size)
+  {
+    for(u32 i = 0;
+        i < a.size && result;
+        ++i)
+    {
+      if(a.data[i] != b.data[i])
+      {
+        result = false;
+      }
+    }
+  }
+  else
+  {
+    result = false;
+  }
+  return result;
+}
+
+internal b32 str_eq_ignoring_case(str_t a, str_t b)
+{
+  b32 result = true;
+  if(a.size == b.size)
+  {
+    for(u32 i = 0;
+        i < a.size && result;
+        ++i)
+    {
+      if(to_lower(a.data[i]) != to_lower(b.data[i]))
+      {
+        result = false;
+      }
+    }
+  }
+  else
+  {
+    result = false;
+  }
+  return result;
+}
+
+internal b32 str_eq_zstr(str_t a, char* b)
+{
+  b32 result = true;
+
+  for(u64 idx = 0;
+      idx < a.size;
+      ++idx)
+  {
+    if(b[idx] == 0 || a.data[idx] != b[idx])
+    {
+      result = false;
+      break;
+    }
+  }
+
+  if(result && b[a.size] != 0)
+  {
+    result = false;
+  }
+
+  return result;
+}
+
+internal b32 zstr_eq(char* a, char* b)
+{
+  b32 result = true;
+  while(*a && *b && result)
+  {
+    result &= (*a++ == *b++);
+  }
+  result &= (*a++ == *b++);
+  return result;
+}
+
+internal i32 zstr_length(const char* txt)
+{
+  i32 result = 0;
+
+  if(txt)
+  {
+    while(*txt)
+    {
+      ++result;
+      ++txt;
+    }
+  }
+
+  return result;
+}
+
+internal b32 str_has_suffix(str_t input, str_t suffix)
+{
+  b32 result = false;
+
+  if(input.size >= suffix.size)
+  {
+    str_t input_suffix = { input.data + input.size - suffix.size, suffix.size };
+    if(str_eq(input_suffix, suffix))
+    {
+      result = true;
+    }
+  }
+
+  return result;
+}
+
+internal str_t str_remove_suffix(str_t input, str_t suffix)
+{
+  if(str_has_suffix(input, suffix))
+  {
+    input.size -= suffix.size;
+  }
+
+  return input;
+}
+
+// If successful, string is zero-terminated (not included in size).
+internal str_t read_file(char* path)
+{
+  str_t result = {0};
+  FILE* fd = fopen(path, "rb");
+  if(fd == 0)
+  {
+    fprintf(stderr, "Could not open file '%s' for reading.\n", path);
+  }
+  else
+  {
+    // This *must* be an int, not a long, otherwise the "-1" that ftell returns on error is wrong.
+    int tell_pos = 0;
+
+    if(fseek(fd, 0, SEEK_END) == -1 || (tell_pos = ftell(fd)) == -1)
+    {
+      fprintf(stderr, "Could not seek to end of file '%s'.\n", path);
+    }
+    else
+    {
+      result.size = tell_pos;
+      fseek(fd, 0L, SEEK_SET);
+      result.data = malloc_array(result.size + 1, u8);
+
+      if(!result.data)
+      {
+        fprintf(stderr, "Could not allocate %lu bytes for file '%s'.\n", result.size, path);
+        result.size = 0;
+      }
+      else if(fread(result.data, 1, result.size, fd) != result.size)
+      {
+        fprintf(stderr, "Could not read all of file '%s'.\n", path);
+        free(result.data);
+        result.data = 0;
+        result.size = 0;
+      }
+      else
+      {
+        result.data[result.size] = 0;
+      }
+    }
+  }
+
+  if(fd)
+  {
+    fclose(fd);
   }
 
   return result;
