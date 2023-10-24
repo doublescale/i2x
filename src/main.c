@@ -1262,15 +1262,9 @@ internal void draw_wrapped_text(state_t* state, r32 fs, r32 x0, r32 x1, r32* x, 
         break;
       }
       else if(0
-          || word_end[-1] == '!'
-          || word_end[-1] == ','
           || word_end[-1] == '-'
-          || word_end[-1] == '.'
           || word_end[-1] == ':'
-          || word_end[-1] == ';'
-          || word_end[-1] == '?'
           || word_end[-1] == '/'
-          || word_end[-1] == '_'
           )
       {
         word_width = prefix_width;
@@ -2067,14 +2061,12 @@ int main(int argc, char** argv)
                     else if(ctrl_held && keysym == 'f' || !state->searching && keysym == '/')
                     {
                       bflip(state->searching);
-                      search_changed = true;
                     }
                     else if(state->searching)
                     {
                       if(keysym == XK_Escape || keysym == XK_Return)
                       {
                         state->searching = false;
-                        search_changed = true;
                       }
                       else if(keysym == XK_BackSpace)
                       {
@@ -2993,38 +2985,97 @@ int main(int argc, char** argv)
 
           if(search_changed)
           {
+            i32 prev_viewing_idx = state->filtered_img_idxs[state->viewing_filtered_img_idx];
+
             if(state->search_str.size == 0)
             {
               for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
               state->filtered_img_count = state->total_img_count;
-              state->viewing_filtered_img_idx = 0; // prev_viewing_idx;
+              state->viewing_filtered_img_idx = prev_viewing_idx;
             }
             else
             {
               state->filtered_img_count = 0;
-              state->viewing_filtered_img_idx = 0; // prev_viewing_idx;
+              state->viewing_filtered_img_idx = 0;
 
               str_t query = state->search_str;
+              u8* query_end = query.data + query.size;
+
+              i32 query_word_count = 0;
+              str_t query_words[256];
+              for(u8 *word_start = query.data, *word_end = query.data;
+                  word_start < query_end && query_word_count < array_count(query_words);
+                 )
+              {
+                // TODO: Consider "quoted strings" as one word.
+                while(word_start < query_end &&
+                    (*word_start == ' ' ||
+                     *word_start == ','))
+                {
+                  ++word_start;
+                }
+                word_end = word_start;
+                while(word_end < query_end &&
+                    !(*word_end == ' ' ||
+                      *word_end == ','))
+                {
+                  ++word_end;
+                }
+
+                if(word_start != word_end)
+                {
+                  query_words[query_word_count++] = str_from_span(word_start, word_end);
+                }
+
+                word_start = word_end;
+              }
+
+#if 0
+              printf("\nwords:\n");
+              for(i32 word_idx = 0;
+                  word_idx < query_word_count;
+                  ++word_idx)
+              {
+                printf("  \"%.*s\"\n", PF_STR(query_words[word_idx]));
+              }
+#endif
+
               for_count(img_idx, state->total_img_count)
               {
                 img_entry_t* img = &state->img_entries[img_idx];
                 str_t prompt = img->positive_prompt;
                 u8* prompt_end = prompt.data + prompt.size;
-                b32 overall_match = false;
+
+                b32 words_matched[256];
+                for_count(i, query_word_count) { words_matched[i] = false; }
                 for(i32 offset = 0;
-                    offset <= (i32)prompt.size - (i32)query.size && !overall_match;
+                    offset <= (i32)prompt.size;
                     ++offset)
                 {
-                  str_t prompt_substr = { prompt.data + offset, query.size };
-
-                  if(str_eq_ignoring_case(prompt_substr, query))
+                  for(i32 word_idx = 0;
+                      word_idx < query_word_count;
+                      ++word_idx)
                   {
-                    overall_match = true;
+                    if(!words_matched[word_idx])
+                    {
+                      str_t prompt_substr = { prompt.data + offset, query_words[word_idx].size };
+                      if(str_eq_ignoring_case(prompt_substr, query_words[word_idx]))
+                      {
+                        words_matched[word_idx] = true;
+                      }
+                    }
                   }
                 }
 
+                b32 overall_match = true;
+                for_count(i, query_word_count) { overall_match = overall_match && words_matched[i]; }
                 if(overall_match)
                 {
+                  if(prev_viewing_idx >= img_idx)
+                  {
+                    state->viewing_filtered_img_idx = state->filtered_img_count;
+                  }
+
                   state->filtered_img_idxs[state->filtered_img_count++] = img_idx;
                 }
               }

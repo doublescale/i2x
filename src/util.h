@@ -164,12 +164,6 @@ internal b32 is_utf8_continuation_byte(u8 c)
   return (c & 0xC0) == 0x80;
 }
 
-internal b32 is_utf32_glyph_wide(u32 codepoint)
-{
-  // This is a hack and a guess; would actually need font information.
-  return codepoint > 0xFFFF;
-}
-
 static const u32 replacement_character_codepoint = 0xFFFD;
 
 internal u32 decode_utf8(u8** start, u8* end)
