@@ -673,7 +673,7 @@ internal img_entry_t* get_filtered_img(state_t* state, i32 filtered_idx)
 {
   img_entry_t* result = 0;
 
-  if(filtered_idx >= 0 && filtered_idx < max(1, state->filtered_img_count))
+  if(filtered_idx >= 0 && filtered_idx < state->filtered_img_count)
   {
     result = &state->img_entries[state->filtered_img_idxs[filtered_idx]];
   }
@@ -683,15 +683,16 @@ internal img_entry_t* get_filtered_img(state_t* state, i32 filtered_idx)
 
 internal void set_or_unset_filtered_img_flag(state_t* state, i32 filtered_idx, img_flags_t flags, b32 set)
 {
-  if(filtered_idx >= 0 && filtered_idx < state->filtered_img_count)
+  img_entry_t* img = get_filtered_img(state, filtered_idx);
+  if(img)
   {
     if(set)
     {
-      get_filtered_img(state, filtered_idx)->flags |= flags;
+      img->flags |= flags;
     }
     else
     {
-      get_filtered_img(state, filtered_idx)->flags &= ~flags;
+      img->flags &= ~flags;
     }
   }
 }
@@ -2136,7 +2137,7 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == XK_BackSpace || keysym == XK_Left || keysym == 'h')
                     {
-                      // if(state->viewing_filtered_img_idx > 0)
+                      if(state->viewing_filtered_img_idx > 0)
                       {
                         state->viewing_filtered_img_idx -= 1;
                       }
@@ -2144,7 +2145,7 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == ' ' || keysym == XK_Right || keysym == 'l')
                     {
-                      // if(state->viewing_filtered_img_idx < state->filtered_img_count - 1)
+                      if(state->viewing_filtered_img_idx < state->filtered_img_count - 1)
                       {
                         state->viewing_filtered_img_idx += 1;
                       }
@@ -2216,10 +2217,12 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 'm')
                     {
-                      if(state->filtered_img_count)
+                      img_entry_t* img = get_filtered_img(state, state->viewing_filtered_img_idx);
+                      if(img)
                       {
-                        get_filtered_img(state, state->viewing_filtered_img_idx)->flags ^= IMG_FLAG_MARKED;
+                        img->flags ^= IMG_FLAG_MARKED;
                       }
+
                       if(shift_held)
                       {
                         state->viewing_filtered_img_idx += 1;
@@ -2786,10 +2789,10 @@ int main(int argc, char** argv)
                 hovered_interaction = sidebar_interaction;
 
                 state->dragging_start_value = 0;
-                if(hovered_thumbnail_idx != -1)
+                img_entry_t* hovered_img = get_filtered_img(state, hovered_thumbnail_idx);
+                if(hovered_img)
                 {
-                  state->dragging_start_value =
-                    (get_filtered_img (state, hovered_thumbnail_idx)->flags & IMG_FLAG_MARKED);
+                  state->dragging_start_value = (hovered_img->flags & IMG_FLAG_MARKED);
                 }
               }
               else if(mouse_on_info_panel_edge)
@@ -3056,12 +3059,16 @@ int main(int argc, char** argv)
                       word_idx < query_word_count;
                       ++word_idx)
                   {
-                    if(!words_matched[word_idx])
+                    str_t query_word = query_words[word_idx];
+
+                    if(!words_matched[word_idx] && prompt.size >= query_word.size + offset)
                     {
-                      str_t prompt_substr = { prompt.data + offset, query_words[word_idx].size };
-                      if(str_eq_ignoring_case(prompt_substr, query_words[word_idx]))
+                      // TODO: If multiple query word prefixes match, pick the longest one eagerly.
+                      str_t prompt_substr = { prompt.data + offset, query_word.size };
+                      if(str_eq_ignoring_case(prompt_substr, query_word))
                       {
                         words_matched[word_idx] = true;
+                        break;
                       }
                     }
                   }
@@ -3099,7 +3106,12 @@ int main(int argc, char** argv)
             r32 thumbnail_w = get_thumbnail_size(state);
             r32 thumbnail_h = thumbnail_w;
 
+#if 1
+            state->viewing_filtered_img_idx =
+              clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
+#else
             state->viewing_filtered_img_idx = i32_wrap_upto(state->viewing_filtered_img_idx, state->filtered_img_count);
+#endif
             i32 viewing_img_idx = -1;
             img_entry_t dummy_img = {0};
             img_entry_t* img = &dummy_img;
