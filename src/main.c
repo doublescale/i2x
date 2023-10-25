@@ -3695,47 +3695,39 @@ int main(int argc, char** argv)
 #endif
 
               u8 tmp[256];
-              str_t resolution_str = { tmp };
+              str_t tmp_str = { tmp };
+
+#define SHOW_LABEL_VALUE(label, value) \
+              if(label[0] == 0 || value.size > 0) \
+              { \
+                y -= fs; \
+                x = x0; \
+                glColor3f(label_gray, label_gray, label_gray); \
+                x += draw_str(state, 0, 1, fs, x, y, str(label)); \
+                glColor3f(text_gray, text_gray, text_gray); \
+                draw_wrapped_text(state, 0, fs, x_indented, x1, &x, &y, value); \
+              }
+
+              tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
+                  state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->total_img_count);
+              SHOW_LABEL_VALUE("", tmp_str);
+              SHOW_LABEL_VALUE("", str(""));
+              SHOW_LABEL_VALUE("File: ", img->path);
               if(img->w || img->h)
               {
-                resolution_str.size = snprintf((char*)tmp, sizeof(tmp), "%dx%d", img->w, img->h);
+                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%dx%d", img->w, img->h);
               }
-
-              struct
-              {
-                str_t label;
-                str_t value;
-              } labeled_values[] = {
-                { str("File: "), img->path },
-                { str("Resolution: "), resolution_str },
-                { str(""), str("") },
-                { str("Model: "), img->model },
-                { str("Sampler: "), img->sampler },
-                { str("Sampling steps: "), img->sampling_steps },
-                { str("CFG: "), img->cfg },
-                { str("Batch size: "), img->batch_size },
-                { str("Seed: "), img->seed },
-                { str("Positive prompt: "), img->positive_prompt },
-                { str("Negative prompt: "), img->negative_prompt },
-              };
-
-              for(i32 label_idx = 0;
-                  label_idx < array_count(labeled_values);
-                  ++label_idx)
-              {
-                str_t label = labeled_values[label_idx].label;
-                str_t value = labeled_values[label_idx].value;
-
-                if(label.size == 0 || value.size > 0)
-                {
-                  y -= fs;
-                  x = x0;
-                  glColor3f(label_gray, label_gray, label_gray);
-                  x += draw_str(state, 0, 1, fs, x, y, label);
-                  glColor3f(text_gray, text_gray, text_gray);
-                  draw_wrapped_text(state, 0, fs, x_indented, x1, &x, &y, value);
-                }
-              }
+              SHOW_LABEL_VALUE("Resolution: ", tmp_str);
+              SHOW_LABEL_VALUE("", str(""));
+              SHOW_LABEL_VALUE("Model: ", img->model);
+              SHOW_LABEL_VALUE("Sampler: ", img->sampler);
+              SHOW_LABEL_VALUE("Sampling steps: ", img->sampling_steps);
+              SHOW_LABEL_VALUE("CFG: ", img->cfg);
+              SHOW_LABEL_VALUE("Batch size: ", img->batch_size);
+              SHOW_LABEL_VALUE("Seed: ", img->seed);
+              SHOW_LABEL_VALUE("Positive prompt: ", img->positive_prompt);
+              SHOW_LABEL_VALUE("Negative prompt: ", img->negative_prompt);
+#undef SHOW_LABEL_VALUE
             }
 
             if(state->searching)
