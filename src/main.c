@@ -1222,10 +1222,11 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
   return x - start_x;
 }
 
-internal void draw_wrapped_text(state_t* state, r32 fs, r32 x0, r32 x1, r32* x, r32* y, str_t text)
+internal void draw_wrapped_text(state_t* state,
+    draw_str_flags_t draw_str_flags, r32 fs, r32 x0, r32 x1, r32* x, r32* y, str_t text)
 {
   u8* text_end = text.data + text.size;
-    r32 max_word_width = x1 - x0;
+  r32 max_word_width = x1 - x0;
 
   for(u8* word_start = text.data;
       word_start < text_end; // && fs * state->font_ascent + *y >= 0;
@@ -1287,7 +1288,7 @@ internal void draw_wrapped_text(state_t* state, r32 fs, r32 x0, r32 x1, r32* x, 
 
     str_t word = str_from_span(word_start, word_end);
     if(word_end[-1] == '\n') { --word.size; }
-    *x += draw_str(state, 0, 1, fs, *x, *y, word);
+    *x += draw_str(state, draw_str_flags, 1, fs, *x, *y, word);
     word_start = word_end;
 
     if(end_line)
@@ -2096,7 +2097,7 @@ int main(int argc, char** argv)
                           search_changed = true;
                         }
                       }
-                      else
+                      else // if(!ctrl_held)
                       {
                         Status xmb_lookup_status = 0;
                         char* result_buffer = (char*)&state->search_str.data[state->search_str.size];
@@ -3636,6 +3637,7 @@ int main(int argc, char** argv)
             }
 
             r32 text_gray = bright_bg ? 0 : 1;
+            r32 label_gray = bright_bg ? 0.3f : 0.7f;
 
             if(state->show_info == 1)
             {
@@ -3674,14 +3676,13 @@ int main(int argc, char** argv)
               glVertex2f(state->win_w - effective_info_panel_width,     state->win_h);
               glEnd();
 
-              r32 label_gray = bright_bg ? 0.3f : 0.7f;
               r32 x0 = state->win_w - effective_info_panel_width + 0.5f * fs;
               r32 x1 = state->win_w - 0.2f * fs;
-              r32 y0 = state->win_h - fs * (state->font_ascent + 0.3f);
+              r32 y1 = state->win_h - fs * (state->font_ascent + 0.3f);
               r32 x_indented = x0 + fs;
 
               r32 x = x0;
-              r32 y = y0 + fs;
+              r32 y = y1 + fs;
 
 #if 0
               y -= fs;
@@ -3689,7 +3690,7 @@ int main(int argc, char** argv)
               glColor3f(label_gray, label_gray, label_gray);
               x += draw_str(state, 0, 1, fs, x, y, str("Text wrap test: "));
               glColor3f(text_gray, text_gray, text_gray);
-              draw_wrapped_text(state, fs, x_indented, x1, &x, &y,
+              draw_wrapped_text(state, 0, fs, x_indented, x1, &x, &y,
                   str("\n ble afawpeij afweo a fafw pwfW\npfojawpovijpvij asdiopfj\n afjiop awiof pioawefj pioawjef\n"));
 #endif
 
@@ -3732,7 +3733,7 @@ int main(int argc, char** argv)
                   glColor3f(label_gray, label_gray, label_gray);
                   x += draw_str(state, 0, 1, fs, x, y, label);
                   glColor3f(text_gray, text_gray, text_gray);
-                  draw_wrapped_text(state, fs, x_indented, x1, &x, &y, value);
+                  draw_wrapped_text(state, 0, fs, x_indented, x1, &x, &y, value);
                 }
               }
             }
@@ -3741,29 +3742,35 @@ int main(int argc, char** argv)
             {
               glScissor(0, 0, state->win_w, state->win_h);
               r32 x0 = image_region_x0 + 0.5f * fs;
-              r32 y = state->win_h - 1.5f * fs;
+              r32 x1 = state->win_w - 0.6f * fs;
+              r32 y1 = state->win_h - 1.5f * fs;
+              r32 x_indented = x0 + fs;
               for(i32 pass = 1;
                   pass <= 2;
                   ++pass)
               {
                 draw_str_flags_t flags = (pass == 1) ? DRAW_STR_MEASURE_ONLY : 0;
                 r32 x = x0;
+                r32 y = y1;
 
+                glColor3f(label_gray, label_gray, label_gray);
                 x += draw_str(state, flags, 1, fs, x, y, str("Search: "));
-                x += draw_str(state, flags, 1, fs, x, y, state->search_str);
+                glColor3f(text_gray, text_gray, text_gray);
+                draw_wrapped_text(state, flags, fs, x_indented, x1, &x, &y, state->search_str);
                 x += draw_str(state, flags, 1, fs, x, y, str("|"));
 
                 if(pass == 1)
                 {
                   // Background rectangle.
+                  r32 x_max = (y == y1) ? x : x1;
                   glColor3f(1 - text_gray, 1 - text_gray, 1 - text_gray);
                   glBindTexture(GL_TEXTURE_2D, 0);
                   glDisable(GL_BLEND);
                   glBegin(GL_QUADS);
-                  glVertex2f(x0 - 0.3f * fs, y - 0.5f * fs);
-                  glVertex2f(x  + 0.3f * fs, y - 0.5f * fs);
-                  glVertex2f(x  + 0.3f * fs, y + fs);
-                  glVertex2f(x0 - 0.3f * fs, y + fs);
+                  glVertex2f(x0 - 0.3f * fs, y - fs * (state->font_descent + 0.2f));
+                  glVertex2f(x_max + 0.3f * fs, y - fs * (state->font_descent + 0.2f));
+                  glVertex2f(x_max + 0.3f * fs, y1 + fs * (state->font_ascent + 0.2f));
+                  glVertex2f(x0 - 0.3f * fs, y1 + fs * (state->font_ascent + 0.2f));
                   glEnd();
 
                   glColor3f(text_gray, text_gray, text_gray);
