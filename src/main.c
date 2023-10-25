@@ -1709,7 +1709,7 @@ int main(int argc, char** argv)
         state->sidebar_width = 310;
         state->thumbnail_columns = 2;
         i32 hovered_thumbnail_idx = -1;
-        state->show_info = 1;
+        state->show_info = 2;
         state->search_str_capacity = 1024;
         state->search_str.data = malloc_array(state->search_str_capacity, u8);
         state->info_panel_width = 500;
@@ -3010,11 +3010,16 @@ int main(int argc, char** argv)
               str_t query = state->search_str;
               u8* query_end = query.data + query.size;
 
-              i32 query_word_count = 0;
-              str_t query_words[256];
+              i32 query_positive_word_count = 0;
+              i32 query_negative_word_count = 0;
+              str_t query_positive_words[256];
+              str_t query_negative_words[256];
+              // TODO: Turn a (str_t, b32) pair into a search-item structure?
+              BITSET32(exclude_positive_words, array_count(query_positive_words)) = {0};
+              BITSET32(exclude_negative_words, array_count(query_negative_words)) = {0};
               str_t query_model = {0};
               for(u8 *word_start = query.data, *word_end = query.data;
-                  word_start < query_end && query_word_count < array_count(query_words);
+                  word_start < query_end && query_positive_word_count < array_count(query_positive_words);
                  )
               {
                 // TODO: Consider "quoted strings" as one word.
@@ -3024,34 +3029,60 @@ int main(int argc, char** argv)
                 {
                   ++word_start;
                 }
+
+                b32 exclude = false;
+                if(*word_start == '-')
+                {
+                  exclude = true;
+                  ++word_start;
+                }
+
                 word_end = word_start;
 
-                b32 next_word_is_for_model = false;
+                u8* column_at = 0;
                 while(word_end < query_end &&
                     !(*word_end == ' ' ||
                       *word_end == ','))
                 {
-                  if(*word_end == ':')
+                  if(!column_at && *word_end == ':')
                   {
-                    if(str_eq(str_from_span(word_start, word_end), str("m")))
-                    {
-                      next_word_is_for_model = true;
-                      word_start = word_end + 1;
-                    }
+                    column_at = word_end;
                   }
 
                   ++word_end;
                 }
 
-                if(word_end > word_start)
+                str_t pre_column = {0};
+                str_t post_column = {0};
+                if(column_at)
                 {
-                  if(next_word_is_for_model)
+                  pre_column = str_from_span(word_start, column_at);
+                  post_column = str_from_span(column_at + 1, word_end);
+                }
+
+                if(str_eq(pre_column, str("m")))
+                {
+                  query_model = post_column;
+                }
+                else if(str_eq(pre_column, str("n")))
+                {
+                  if(post_column.size)
                   {
-                    query_model = str_from_span(word_start, word_end);
+                    if(query_negative_word_count < array_count(query_negative_words))
+                    {
+                      if(exclude) { bitset32_set(exclude_negative_words, query_negative_word_count); }
+                      query_negative_words[query_negative_word_count] = post_column;
+                      ++query_negative_word_count;
+                    }
                   }
-                  else
+                }
+                else if(word_end > word_start)
+                {
+                  if(query_positive_word_count < array_count(query_positive_words))
                   {
-                    query_words[query_word_count++] = str_from_span(word_start, word_end);
+                    if(exclude) { bitset32_set(exclude_positive_words, query_positive_word_count); }
+                    query_positive_words[query_positive_word_count] = str_from_span(word_start, word_end);
+                    ++query_positive_word_count;
                   }
                 }
 
@@ -3061,10 +3092,10 @@ int main(int argc, char** argv)
 #if 0
               printf("\nwords:\n");
               for(i32 word_idx = 0;
-                  word_idx < query_word_count;
+                  word_idx < query_positive_word_count;
                   ++word_idx)
               {
-                printf("  \"%.*s\"\n", PF_STR(query_words[word_idx]));
+                printf("  \"%.*s\"\n", PF_STR(query_positive_words[word_idx]));
               }
 #endif
 
@@ -3075,50 +3106,102 @@ int main(int argc, char** argv)
 
                 if(query_model.size > 0)
                 {
-                  b32 match_found = false;
+                  b32 model_matches = false;
                   for(i32 offset = 0;
-                      offset <= (i32)img->model.size - (i32)query_model.size && !match_found;
+                      offset <= (i32)img->model.size - (i32)query_model.size && !model_matches;
                       ++offset)
                   {
                     str_t model_substr = { img->model.data + offset, query_model.size };
                     if(str_eq_ignoring_case(model_substr, query_model))
                     {
-                      match_found = true;
+                      model_matches = true;
                     }
                   }
 
-                  overall_match = overall_match && match_found;
+                  overall_match = overall_match && model_matches;
                 }
 
-                str_t prompt = img->positive_prompt;
-                u8* prompt_end = prompt.data + prompt.size;
+                BITSET32(positive_words_matched, array_count(query_positive_words)) = {0};
+                BITSET32(negative_words_matched, array_count(query_negative_words)) = {0};
 
-                u8 words_matched[array_count(query_words)];  // TODO: Use bitset
-                for_count(i, query_word_count) { words_matched[i] = 0; }
                 for(i32 offset = 0;
-                    offset < (i32)prompt.size;
+                    offset < (i32)img->positive_prompt.size && query_positive_word_count > 0 && overall_match;
                     ++offset)
                 {
                   for(i32 word_idx = 0;
-                      word_idx < query_word_count;
+                      word_idx < query_positive_word_count;
                       ++word_idx)
                   {
-                    str_t query_word = query_words[word_idx];
+                    str_t query_positive_word = query_positive_words[word_idx];
 
-                    if(!words_matched[word_idx] && prompt.size >= query_word.size + offset)
+                    if(!bitset32_get(positive_words_matched, word_idx) &&
+                        img->positive_prompt.size >= query_positive_word.size + offset)
                     {
                       // TODO: If multiple query word prefixes match, pick the longest one eagerly.
-                      str_t prompt_substr = { prompt.data + offset, query_word.size };
-                      if(str_eq_ignoring_case(prompt_substr, query_word))
+                      str_t prompt_substr = { img->positive_prompt.data + offset, query_positive_word.size };
+                      if(str_eq_ignoring_case(prompt_substr, query_positive_word))
                       {
-                        words_matched[word_idx] = 1;
+                        // TODO: Think about whether to consider already-matched words
+                        //       earlier in the prompt for exclusion.
+                        if(bitset32_get(exclude_positive_words, word_idx))
+                        {
+                          overall_match = false;
+                        }
+                        else
+                        {
+                          bitset32_set(positive_words_matched, word_idx);
+                        }
                         break;
                       }
                     }
                   }
                 }
 
-                for_count(i, query_word_count) { overall_match = overall_match && words_matched[i]; }
+                for(i32 offset = 0;
+                    offset < (i32)img->negative_prompt.size && query_negative_word_count > 0 && overall_match;
+                    ++offset)
+                {
+                  for(i32 word_idx = 0;
+                      word_idx < query_negative_word_count;
+                      ++word_idx)
+                  {
+                    str_t query_negative_word = query_negative_words[word_idx];
+
+                    if(!bitset32_get(negative_words_matched, word_idx) &&
+                        img->negative_prompt.size >= query_negative_word.size + offset)
+                    {
+                      // TODO: If multiple query word prefixes match, pick the longest one eagerly.
+                      str_t prompt_substr = { img->negative_prompt.data + offset, query_negative_word.size };
+                      if(str_eq_ignoring_case(prompt_substr, query_negative_word))
+                      {
+                        if(bitset32_get(exclude_negative_words, word_idx))
+                        {
+                          overall_match = false;
+                        }
+                        else
+                        {
+                          bitset32_set(negative_words_matched, word_idx);
+                        }
+                        break;
+                      }
+                    }
+                  }
+                }
+
+                for_count(word_idx, query_positive_word_count)
+                {
+                  if(!bitset32_get(exclude_positive_words, word_idx))
+                  {
+                    overall_match = overall_match && bitset32_get(positive_words_matched, word_idx);
+                  }
+                }
+                for_count(word_idx, query_negative_word_count)
+                {
+                  if(!bitset32_get(exclude_negative_words, word_idx))
+                  {
+                    overall_match = overall_match && bitset32_get(negative_words_matched, word_idx);
+                  }
+                }
                 if(overall_match)
                 {
                   if(prev_viewing_idx >= img_idx)

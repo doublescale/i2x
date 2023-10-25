@@ -124,6 +124,20 @@ internal b32 bytes_eq(u64 size, void* a, void* b)
 #define zero_struct(x) zero_bytes(sizeof(x), &(x))
 #define struct_eq(a, b) (bytes_eq(sizeof(a), &(a), &(b)))
 
+#define bitset8_get(bitset, idx)  (((bitset)[(idx) >> 3] >> ((idx) & 7)) & 1)
+#define bitset8_set(bitset, idx)   ((bitset)[(idx) >> 3] |= (1 << ((idx) & 7)))
+#define bitset8_unset(bitset, idx) ((bitset)[(idx) >> 3] &= ~(1 << ((idx) & 7)))
+
+#define BITSET32(name, size)  u32 name[(((size) + 31) >> 5)]
+#define bitset32_get(bitset, idx)  (((bitset)[(idx) >> 5] >> ((idx) & 31)) & 1)
+#define bitset32_set(bitset, idx)   ((bitset)[(idx) >> 5] |= (1 << ((idx) & 31)))
+#define bitset32_unset(bitset, idx) ((bitset)[(idx) >> 5] &= ~(1 << ((idx) & 31)))
+
+#define bitset64_get(bitset, idx)  (((bitset)[(idx) >> 6] >> ((idx) & 63)) & 1)
+#define bitset64_set(bitset, idx)   ((bitset)[(idx) >> 6] |= (1ULL << ((idx) & 63)))
+#define bitset64_unset(bitset, idx) ((bitset)[(idx) >> 6] &= ~(1ULL << ((idx) & 63)))
+#define bitset64_set_atomic(bitset, idx) __sync_fetch_and_or(&(bitset)[(idx) >> 6], (1ULL << ((idx) & 63)))
+
 internal b32 is_ascii(u8 c)
 {
   return (c & 0x80) == 0;
