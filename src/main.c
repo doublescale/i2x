@@ -179,7 +179,9 @@ typedef struct
 
   b32 searching;
   str_t search_str;
-  i32 search_str_capacity;
+  i64 search_str_capacity;
+  i64 selection_start;
+  i64 selection_end;
 
   i32 viewing_filtered_img_idx;
 
@@ -294,6 +296,11 @@ internal b32 advance_if_prefix_matches(u8** input, u8* input_end, char* prefix)
   }
 
   return matches;
+}
+
+internal b32 is_word_separator_char(u8 c)
+{
+  return c == ' ' || c == '\n';
 }
 
 typedef struct
@@ -2147,6 +2154,8 @@ int main(int argc, char** argv)
                       bflip(state->searching);
                       if(state->searching)
                       {
+                        state->selection_start = state->search_str.size;
+                        state->selection_end   = state->search_str.size;
                         search_changed = true;
                       }
                     }
@@ -2156,20 +2165,118 @@ int main(int argc, char** argv)
                       {
                         state->searching = false;
                       }
+                      else if(ctrl_held && keysym == 'a')
+                      {
+                        str_t* text = &state->search_str;
+
+                        if(state->selection_start != 0 || state->selection_end != text->size)
+                        {
+                          state->selection_start = 0;
+                          state->selection_end = text->size;
+                        }
+                        else
+                        {
+                          state->selection_start = text->size;
+                          state->selection_end = 0;
+                        }
+                      }
                       else if(keysym == XK_BackSpace)
                       {
-                        if(state->search_str.size > 0)
+                        str_t* text = &state->search_str;
+
+                        i64 deletion_min = min(state->selection_start, state->selection_end);
+                        i64 deletion_max = max(state->selection_start, state->selection_end);
+                        if(deletion_min == deletion_max)
                         {
-                          while(state->search_str.size > 0 && is_utf8_continuation_byte(state->search_str.data[state->search_str.size - 1]))
+                          while(ctrl_held && deletion_min > 0 && is_word_separator_char(text->data[deletion_min - 1]))
                           {
-                            --state->search_str.size;
-                          } 
-                          if(state->search_str.size > 0)
-                          {
-                            --state->search_str.size;
+                            --deletion_min;
                           }
-                          search_changed = true;
+                          if(deletion_min > 0)
+                          {
+                            --deletion_min;
+                          }
+                          while(deletion_min > 0 &&
+                              (is_utf8_continuation_byte(text->data[deletion_min]) ||
+                               (ctrl_held && !is_word_separator_char(text->data[deletion_min - 1]))))
+                          {
+                            --deletion_min;
+                          }
                         }
+                        i64 deletion_length = deletion_max - deletion_min;
+                        for(i64 i = deletion_min;
+                            i < text->size - deletion_length;
+                            ++i)
+                        {
+                          text->data[i] = text->data[i + deletion_length];
+                        }
+                        text->size -= deletion_length;
+                        state->selection_start = deletion_min;
+                        state->selection_end = deletion_min;
+
+                        search_changed = true;
+                      }
+                      else if(keysym == XK_Left)
+                      {
+                        str_t* text = &state->search_str;
+
+                        while(ctrl_held && state->selection_end > 0 && is_word_separator_char(text->data[state->selection_end - 1]))
+                        {
+                          --state->selection_end;
+                        }
+                        if(state->selection_end > 0)
+                        {
+                          --state->selection_end;
+                        }
+                        while(state->selection_end > 0 &&
+                            (is_utf8_continuation_byte(text->data[state->selection_end]) ||
+                             (ctrl_held && !is_word_separator_char(text->data[state->selection_end - 1]))))
+                        {
+                          --state->selection_end;
+                        }
+                        if(!shift_held)
+                        {
+                          state->selection_start = state->selection_end;
+                        }
+                      }
+                      else if(keysym == XK_Right)
+                      {
+                        str_t* text = &state->search_str;
+
+                        while(ctrl_held && state->selection_end < text->size && is_word_separator_char(text->data[state->selection_end]))
+                        {
+                          ++state->selection_end;
+                        }
+                        if(state->selection_end < text->size)
+                        {
+                          ++state->selection_end;
+                        }
+                        while(state->selection_end < text->size &&
+                            (is_utf8_continuation_byte(text->data[state->selection_end]) ||
+                             (ctrl_held && !is_word_separator_char(text->data[state->selection_end]))))
+                        {
+                          ++state->selection_end;
+                        }
+                        if(!shift_held)
+                        {
+                          state->selection_start = state->selection_end;
+                        }
+                      }
+                      else if(keysym == XK_Home)
+                      {
+                        if(!shift_held)
+                        {
+                          state->selection_start = 0;
+                        }
+                        state->selection_end = 0;
+                      }
+                      else if(keysym == XK_End)
+                      {
+                        if(!shift_held)
+                        {
+                          state->selection_start = state->search_str.size;
+                        }
+                        state->selection_end = state->search_str.size;
                       }
                       else if(ctrl_held && keysym == 'u')
                       {
@@ -3831,9 +3938,29 @@ int main(int argc, char** argv)
 
                 glColor3f(label_gray, label_gray, label_gray);
                 x += draw_str(state, flags, 1, fs, x, y, str("Search: "));
+
+                i32 selection_min = min(state->selection_start, state->selection_end);
+                i32 selection_max = max(state->selection_start, state->selection_end);
+                str_t str_before_selection = { state->search_str.data, selection_min };
+                str_t str_in_selection = str_from_span(state->search_str.data + selection_min,
+                    state->search_str.data + selection_max);
+                str_t str_after_selection = str_from_span(state->search_str.data + selection_max,
+                    state->search_str.data + state->search_str.size);
+
                 glColor3f(text_gray, text_gray, text_gray);
-                draw_wrapped_text(state, flags, fs, x_indented, x1, &x, &y, state->search_str);
-                x += draw_str(state, flags, 1, fs, x, y, str("|"));
+                draw_wrapped_text(state, flags, fs, x_indented, x1, &x, &y, str_before_selection);
+                if(state->selection_end < state->selection_start)
+                {
+                  x += draw_str(state, flags, 1, fs, x, y, str("|"));
+                }
+                glColor3f(0, 1, 0);
+                draw_wrapped_text(state, flags, fs, x_indented, x1, &x, &y, str_in_selection);
+                glColor3f(text_gray, text_gray, text_gray);
+                if(state->selection_end >= state->selection_start)
+                {
+                  x += draw_str(state, flags, 1, fs, x, y, str("|"));
+                }
+                draw_wrapped_text(state, flags, fs, x_indented, x1, &x, &y, str_after_selection);
 
                 if(pass == 1)
                 {
