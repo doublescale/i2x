@@ -51,6 +51,10 @@
 #define WINDOW_INIT_H 600
 #define PROGRAM_NAME "i2x"
 
+static FILE* debug_out = 0;
+#define DEBUG_LOG(...) if(debug_out) { fprintf(debug_out, __VA_ARGS__); }
+// #define DEBUG_LOG(...)
+
 // static void (*glXSwapIntervalEXT)(Display *dpy, GLXDrawable drawable, int interval);
 
 internal u64 get_nanoseconds()
@@ -217,7 +221,7 @@ internal void xi_update_device_info(state_t* state, i32 class_count, XIAnyClassI
   // so tracking single global values for scrolling should be sufficient
   // instead of having to track them for every device separately.
 
-  // printf("  classes:\n");
+  DEBUG_LOG("  Device info classes:\n");
   for(i32 class_idx = 0;
       class_idx < class_count;
       ++class_idx)
@@ -229,13 +233,11 @@ internal void xi_update_device_info(state_t* state, i32 class_count, XIAnyClassI
     {
       XIValuatorClassInfo* valuator_class = (XIValuatorClassInfo*)class;
 
-#if 0
-      printf("    ValuatorClass\n");
-      printf("      number: %d\n", valuator_class->number);
-      printf("      min: %f\n", valuator_class->min);
-      printf("      max: %f\n", valuator_class->max);
-      printf("      value: %f\n", valuator_class->value);
-#endif
+      DEBUG_LOG("    ValuatorClass\n");
+      DEBUG_LOG("      number: %d\n", valuator_class->number);
+      DEBUG_LOG("      min: %f\n", valuator_class->min);
+      DEBUG_LOG("      max: %f\n", valuator_class->max);
+      DEBUG_LOG("      value: %f\n", valuator_class->value);
 
       if(valuator_class->number == 2)
       {
@@ -250,13 +252,12 @@ internal void xi_update_device_info(state_t* state, i32 class_count, XIAnyClassI
     if(class->type == XIScrollClass)
     {
       XIScrollClassInfo* scroll_class = (XIScrollClassInfo*)class;
-#if 0
-      printf("    ScrollClass\n");
-      printf("      number: %d\n", scroll_class->number);
-      printf("      scroll_type: %d\n", scroll_class->scroll_type);
-      printf("      increment: %f\n", scroll_class->increment);
-      printf("      flags: %d\n", scroll_class->flags);
-#endif
+
+      DEBUG_LOG("    ScrollClass\n");
+      DEBUG_LOG("      number: %d\n", scroll_class->number);
+      DEBUG_LOG("      scroll_type: %d\n", scroll_class->scroll_type);
+      DEBUG_LOG("      increment: %f\n", scroll_class->increment);
+      DEBUG_LOG("      flags: %d\n", scroll_class->flags);
 
       if(scroll_class->number == 2)
       {
@@ -1319,6 +1320,9 @@ internal void draw_wrapped_text(state_t* state,
 
 int main(int argc, char** argv)
 {
+  debug_out = fopen("/tmp/i2x-debug.log", "wb");
+  // if(!debug_out) { debug_out = stderr; }
+
   Display* display = XOpenDisplay(0);
   if(display)
   {
@@ -1908,8 +1912,7 @@ int main(int argc, char** argv)
                     // is for the root window or ours here.
                     b32 inside_window = (devev->event == window);
 
-#if 0
-                    printf("%s %d:%d detail %d flags %d mods %d r %.2f,%.2f e %.2f,%.2f btns %d\n",
+                    DEBUG_LOG("%s %d:%d detail %d flags %d mods %d r %.2f,%.2f e %.2f,%.2f btns %d\n",
                         event.xcookie.evtype == XI_ButtonPress ? "XI_ButtonPress"
                         : event.xcookie.evtype == XI_ButtonRelease ? "XI_ButtonRelease" : "XI_Motion",
                         devev->deviceid, devev->sourceid,
@@ -1917,9 +1920,9 @@ int main(int argc, char** argv)
                         devev->mods.effective,
                         devev->root_x, devev->root_y, devev->event_x, devev->event_y,
                         button_mask);
-                    printf("  valuators: mask_len %d mask 0x", devev->valuators.mask_len);
-                    for_count(i, devev->valuators.mask_len) { printf("%02x", devev->valuators.mask[i]); }
-                    printf("\n");
+                    DEBUG_LOG("  valuators: mask_len %d mask 0x", devev->valuators.mask_len);
+                    for_count(i, devev->valuators.mask_len) { DEBUG_LOG("%02x", devev->valuators.mask[i]); }
+                    DEBUG_LOG("\n");
                     {
                       r64* values = devev->valuators.values;
                       for_count(i, devev->valuators.mask_len)
@@ -1929,13 +1932,12 @@ int main(int argc, char** argv)
                           if(devev->valuators.mask[i] & (1 << b))
                           {
                             u32 idx = 8 * i + b;
-                            printf("    %u: %.2f\n", idx, *values);
+                            DEBUG_LOG("    %u: %.2f\n", idx, *values);
                             ++values;
                           }
                         }
                       }
                     }
-#endif
 
                     if(devev->valuators.mask_len >= 1)
                     {
@@ -2103,7 +2105,7 @@ int main(int argc, char** argv)
                   case XI_DeviceChanged:
                   {
                     XIDeviceChangedEvent* device = (XIDeviceChangedEvent*)event.xcookie.data;
-                    // printf("XI Device %d changed\n", device->deviceid);
+                    DEBUG_LOG("\nXI Device %d changed\n", device->deviceid);
                     xi_update_device_info(state, device->num_classes, device->classes);
                   } break;
                 }
@@ -2585,14 +2587,14 @@ int main(int argc, char** argv)
                   int device_count = 0;
                   int master_pointer_device_id = 2;
                   XIDeviceInfo* device_infos = XIQueryDevice(display, master_pointer_device_id, &device_count);
-                  // printf("\nDevices:\n");
+                  DEBUG_LOG("\nWindow got focus. Devices:\n");
                   for(i32 device_idx = 0;
                       device_idx < device_count;
                       ++device_idx)
                   {
                     XIDeviceInfo* device = &device_infos[device_idx];
-                    // printf("  deviceid: %d\n", device->deviceid);
-                    // printf("  name: %s\n", device->name);
+                    DEBUG_LOG("  deviceid: %d\n", device->deviceid);
+                    DEBUG_LOG("  name: %s\n", device->name);
                     xi_update_device_info(state, device->num_classes, device->classes);
                   }
                 } break;
@@ -3339,6 +3341,7 @@ int main(int argc, char** argv)
                   img->path.data);
               set_title(display, window, (u8*)txt, txt_len);
 
+#if 0
               // if(state->show_info)
               {
 #define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
@@ -3355,6 +3358,7 @@ int main(int argc, char** argv)
                 P(cfg);
 #undef P
               }
+#endif
 
               last_viewing_img_idx = viewing_img_idx;
             }
