@@ -196,9 +196,10 @@ typedef struct
   r32 dragging_start_value2;
   b32 mouse_moved_since_dragging_start;
 
-  r32 scroll_increment_by_source_id[64];
-  r32 last_scroll_x_valuator;
-  r32 last_scroll_y_valuator;
+  r32 xi_scroll_x_increment;
+  r32 xi_scroll_y_increment;
+  r32 xi_last_scroll_x_valuator;
+  r32 xi_last_scroll_y_valuator;
 
   img_entry_t* lru_first;
   img_entry_t* lru_last;
@@ -209,8 +210,13 @@ internal void set_title(Display* display, Window window, u8* txt, i32 txt_len)
   XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace, txt, txt_len);
 }
 
-internal void xlib_update_device_info(state_t* state, i32 class_count, XIAnyClassInfo** classes)
+internal void xi_update_device_info(state_t* state, i32 class_count, XIAnyClassInfo** classes)
 {
+  // According to my tests, X sends device change events if the user starts using a different
+  // input device (e.g. switching from touchpad to trackpoint on a laptop),
+  // so tracking single global values for scrolling should be sufficient
+  // instead of having to track them for every device separately.
+
   // printf("  classes:\n");
   for(i32 class_idx = 0;
       class_idx < class_count;
@@ -233,11 +239,11 @@ internal void xlib_update_device_info(state_t* state, i32 class_count, XIAnyClas
 
       if(valuator_class->number == 2)
       {
-        state->last_scroll_x_valuator = valuator_class->value;
+        state->xi_last_scroll_x_valuator = valuator_class->value;
       }
       if(valuator_class->number == 3)
       {
-        state->last_scroll_y_valuator = valuator_class->value;
+        state->xi_last_scroll_y_valuator = valuator_class->value;
       }
     }
 
@@ -252,16 +258,13 @@ internal void xlib_update_device_info(state_t* state, i32 class_count, XIAnyClas
       printf("      flags: %d\n", scroll_class->flags);
 #endif
 
-      if(class->sourceid >= 0 && class->sourceid < array_count(state->scroll_increment_by_source_id))
+      if(scroll_class->number == 2)
       {
-        if(state->scroll_increment_by_source_id[class->sourceid] != scroll_class->increment)
-        {
-          printf("Scroll increment for sourceid %d changed from %f to %f.\n",
-              class->sourceid,
-              state->scroll_increment_by_source_id[class->sourceid],
-              scroll_class->increment);
-          state->scroll_increment_by_source_id[class->sourceid] = scroll_class->increment;
-        }
+        state->xi_scroll_x_increment = scroll_class->increment;
+      }
+      if(scroll_class->number == 3)
+      {
+        state->xi_scroll_y_increment = scroll_class->increment;
       }
     }
   }
@@ -1725,12 +1728,8 @@ int main(int argc, char** argv)
         state->search_str.data = malloc_array(state->search_str_capacity, u8);
         state->info_panel_width = 500;
 
-        // TODO: Split these for x/y ?
-        //       Actually, just using the constant 120 might be enough.
-        //       Check if any device is configured differently, ever.
-        r32 default_scroll_increment = 120.0f;
-        for(i32 i = 0; i < array_count(state->scroll_increment_by_source_id); ++i)
-        { state->scroll_increment_by_source_id[i] = default_scroll_increment; }
+        state->xi_scroll_x_increment = 120.0f;
+        state->xi_scroll_y_increment = 120.0f;
 
         r32 offset_scroll_scale = 0.125f;
         r32 zoom_scroll_scale = 0.25f;
@@ -1863,7 +1862,6 @@ int main(int argc, char** argv)
                   case XI_Motion:
                   {
                     XIDeviceEvent* devev = (XIDeviceEvent*)event.xcookie.data;
-                    b32 inside_window = (devev->event == window);
                     u32 button = devev->detail;
                     u32 button_mask = devev->buttons.mask_len > 0 ? devev->buttons.mask[0] : 0;
                     i32 mods = devev->mods.effective;
@@ -1872,6 +1870,43 @@ int main(int argc, char** argv)
                     alt_held = (mods & 8);
                     mouse_x = (r32)devev->event_x;
                     mouse_y = (r32)state->win_h - (r32)devev->event_y - 1.0f;
+
+                    // Getting the smooth scroll deltas with XInput2 is tricky.
+                    //
+                    // XI_RawMotion does deliver them directly, but those can only be listened to
+                    // for the entire root X window, which means they're delivered even when the
+                    // window is out of focus.
+                    //
+                    // Tracking focus manually is also problematic, because (XI_)FocusIn/FocusOut
+                    // events get delivered (at least in i3) when the window gets focused but the
+                    // mouse cursor is on the title bar (among other edge cases, like another
+                    // window being on top of the focused window), even though normally the window
+                    // wouldn't be receiving mouse events in this case, which means the
+                    // window-local mouse position doesn't get delivered, leading to other problems.
+                    //
+                    // Using XI_Motion events (as probably intended) is very problematic because the
+                    // scroll values get accumulated (instead of getting delivered as deltas), even
+                    // while our window is out of focus.
+                    // Additionally, since the cumulative double-precision floating point number
+                    // could grow large and run out of precision, it can get wrapped sometimes,
+                    // allegedly.
+                    // However, because of the focusing issues with XI_RawMotion, this is still
+                    // the solution that I decided to implement here.
+                    //
+                    // The current accumulated scroll value can be queried with XIQueryDevice
+                    // (see the FocusIn event handler), and gets automatically delivered with
+                    // XI_DeviceChanged events, e.g. when the user starts using a different mouse.
+                    //
+                    // But because FocusIn gets delivered when the mouse is on the title bar,
+                    // and XI_Motion events only appear for our window when the mouse is
+                    // on the actual contents of the window, we might still lose changes to
+                    // the accumulated scroll value while the cursor is on the title bar.
+                    // For this reason, we register for XI_Motion events on both the root window
+                    // and our window, which seems to have the effect of delivering these events
+                    // while the cursor is on the title bar, but only while the window is focused,
+                    // which is what we want, but we do have to check whether the XI_Motion event
+                    // is for the root window or ours here.
+                    b32 inside_window = (devev->event == window);
 
 #if 0
                     printf("%s %d:%d detail %d flags %d mods %d r %.2f,%.2f e %.2f,%.2f btns %d\n",
@@ -1906,10 +1941,6 @@ int main(int argc, char** argv)
                     {
                       u8 mask = devev->valuators.mask[0];
                       r64* value_ptr = devev->valuators.values;
-                      r32 scroll_increment =
-                        devev->sourceid < array_count(state->scroll_increment_by_source_id)
-                        ? state->scroll_increment_by_source_id[devev->sourceid]
-                        : default_scroll_increment;
 
                       for_count(bit_idx, 4)
                       {
@@ -1917,21 +1948,21 @@ int main(int argc, char** argv)
                         {
                           if(bit_idx == 2)
                           {
-                            r32* last = &state->last_scroll_x_valuator;
+                            r32* last = &state->xi_last_scroll_x_valuator;
                             r32 delta = *value_ptr - *last;
                             if(absolute(delta < 1e6f) && inside_window)
                             {
-                              scroll_x += delta / scroll_increment;
+                              scroll_x += delta / state->xi_scroll_x_increment;
                             }
                             *last = *value_ptr;
                           }
                           else if(bit_idx == 3)
                           {
-                            r32* last = &state->last_scroll_y_valuator;
+                            r32* last = &state->xi_last_scroll_y_valuator;
                             r32 delta = *value_ptr - *last;
                             if(absolute(delta < 1e6f) && inside_window)
                             {
-                              scroll_y -= delta / scroll_increment;
+                              scroll_y -= delta / state->xi_scroll_y_increment;
                             }
                             *last = *value_ptr;
                           }
@@ -2017,13 +2048,6 @@ int main(int argc, char** argv)
                       XIRawEvent* devev = (XIRawEvent*)event.xcookie.data;
 
 #if 0
-                      r32 scroll_increment =
-                        devev->sourceid < array_count(state->scroll_increment_by_source_id)
-                        ? state->scroll_increment_by_source_id[devev->sourceid]
-                        : default_scroll_increment;
-#endif
-
-#if 0
                       printf("XI raw motion %d:%d detail %d flags %d\n",
                           devev->deviceid, devev->sourceid, devev->detail, devev->flags);
                       printf("  valuators: mask_len %d mask 0x", devev->valuators.mask_len);
@@ -2059,11 +2083,11 @@ int main(int argc, char** argv)
 #if 0
                               else if(idx == 2)
                               {
-                                scroll_x += value / scroll_increment;
+                                scroll_x += value / state->xi_scroll_x_increment;
                               }
                               else if(idx == 3)
                               {
-                                scroll_y -= value / scroll_increment;
+                                scroll_y -= value / state->xi_scroll_y_increment;
                               }
 #endif
                             }
@@ -2080,7 +2104,7 @@ int main(int argc, char** argv)
                   {
                     XIDeviceChangedEvent* device = (XIDeviceChangedEvent*)event.xcookie.data;
                     // printf("XI Device %d changed\n", device->deviceid);
-                    xlib_update_device_info(state, device->num_classes, device->classes);
+                    xi_update_device_info(state, device->num_classes, device->classes);
                   } break;
                 }
                 XFreeEventData(display, &event.xcookie);
@@ -2569,7 +2593,7 @@ int main(int argc, char** argv)
                     XIDeviceInfo* device = &device_infos[device_idx];
                     // printf("  deviceid: %d\n", device->deviceid);
                     // printf("  name: %s\n", device->name);
-                    xlib_update_device_info(state, device->num_classes, device->classes);
+                    xi_update_device_info(state, device->num_classes, device->classes);
                   }
                 } break;
 
