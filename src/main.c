@@ -197,6 +197,8 @@ typedef struct
   b32 mouse_moved_since_dragging_start;
 
   r32 scroll_increment_by_source_id[64];
+  r32 last_scroll_x_valuator;
+  r32 last_scroll_y_valuator;
 
   img_entry_t* lru_first;
   img_entry_t* lru_last;
@@ -215,18 +217,30 @@ internal void xlib_update_device_info(state_t* state, i32 class_count, XIAnyClas
       ++class_idx)
   {
     XIAnyClassInfo* class = classes[class_idx];
-#if 0
-    printf("    type: %d, sourceid: %d\n", class->type, class->sourceid);
+    // printf("    type: %d, sourceid: %d\n", class->type, class->sourceid);
+
     if(class->type == XIValuatorClass)
     {
       XIValuatorClassInfo* valuator_class = (XIValuatorClassInfo*)class;
+
+#if 0
       printf("    ValuatorClass\n");
       printf("      number: %d\n", valuator_class->number);
       printf("      min: %f\n", valuator_class->min);
       printf("      max: %f\n", valuator_class->max);
       printf("      value: %f\n", valuator_class->value);
-    }
 #endif
+
+      if(valuator_class->number == 2)
+      {
+        state->last_scroll_x_valuator = valuator_class->value;
+      }
+      if(valuator_class->number == 3)
+      {
+        state->last_scroll_y_valuator = valuator_class->value;
+      }
+    }
+
     if(class->type == XIScrollClass)
     {
       XIScrollClassInfo* scroll_class = (XIScrollClassInfo*)class;
@@ -1444,6 +1458,7 @@ int main(int argc, char** argv)
 
           zero_struct(mask);
           XISetMask(mask, XI_RawMotion);
+          XISetMask(mask, XI_Motion);  // This gets scroll events over the title bar.
 
           root_evmask.deviceid = 2;  // 2: Master pointer.
           root_evmask.mask_len = sizeof(mask);
@@ -1848,6 +1863,7 @@ int main(int argc, char** argv)
                   case XI_Motion:
                   {
                     XIDeviceEvent* devev = (XIDeviceEvent*)event.xcookie.data;
+                    b32 inside_window = (devev->event == window);
                     u32 button = devev->detail;
                     u32 button_mask = devev->buttons.mask_len > 0 ? devev->buttons.mask[0] : 0;
                     i32 mods = devev->mods.effective;
@@ -1869,20 +1885,60 @@ int main(int argc, char** argv)
                     printf("  valuators: mask_len %d mask 0x", devev->valuators.mask_len);
                     for_count(i, devev->valuators.mask_len) { printf("%02x", devev->valuators.mask[i]); }
                     printf("\n");
-                    r64* values = devev->valuators.values;
-                    for_count(i, devev->valuators.mask_len)
                     {
-                      for_count(b, 8)
+                      r64* values = devev->valuators.values;
+                      for_count(i, devev->valuators.mask_len)
                       {
-                        if(devev->valuators.mask[i] & (1 << b))
+                        for_count(b, 8)
                         {
-                          u32 idx = 8 * i + b;
-                          printf("    %u: %.2f\n", idx, *values);
-                          ++values;
+                          if(devev->valuators.mask[i] & (1 << b))
+                          {
+                            u32 idx = 8 * i + b;
+                            printf("    %u: %.2f\n", idx, *values);
+                            ++values;
+                          }
                         }
                       }
                     }
 #endif
+
+                    if(devev->valuators.mask_len >= 1)
+                    {
+                      u8 mask = devev->valuators.mask[0];
+                      r64* value_ptr = devev->valuators.values;
+                      r32 scroll_increment =
+                        devev->sourceid < array_count(state->scroll_increment_by_source_id)
+                        ? state->scroll_increment_by_source_id[devev->sourceid]
+                        : default_scroll_increment;
+
+                      for_count(bit_idx, 4)
+                      {
+                        if(mask & (1 << bit_idx))
+                        {
+                          if(bit_idx == 2)
+                          {
+                            r32* last = &state->last_scroll_x_valuator;
+                            r32 delta = *value_ptr - *last;
+                            if(absolute(delta < 1e6f) && inside_window)
+                            {
+                              scroll_x += delta / scroll_increment;
+                            }
+                            *last = *value_ptr;
+                          }
+                          else if(bit_idx == 3)
+                          {
+                            r32* last = &state->last_scroll_y_valuator;
+                            r32 delta = *value_ptr - *last;
+                            if(absolute(delta < 1e6f) && inside_window)
+                            {
+                              scroll_y -= delta / scroll_increment;
+                            }
+                            *last = *value_ptr;
+                          }
+                          ++value_ptr;
+                        }
+                      }
+                    }
 
                     if(event.xcookie.evtype == XI_Motion)
                     {
@@ -1906,43 +1962,46 @@ int main(int argc, char** argv)
                         rmb_held = went_down;
                       }
 
-                      if(went_down)
+                      if(inside_window)
                       {
-                        mouse_btn_went_down = button;
-                        if(button == 4)
+                        if(went_down)
                         {
-                          scroll_y_ticks += 1;
-                        }
-                        else if(button == 5)
-                        {
-                          scroll_y_ticks -= 1;
-                        }
-                        if(!(devev->flags & XIPointerEmulated))
-                        {
+                          mouse_btn_went_down = button;
                           if(button == 4)
                           {
-                            scroll_y += 1.0f;
+                            scroll_y_ticks += 1;
                           }
                           else if(button == 5)
                           {
-                            scroll_y -= 1.0f;
+                            scroll_y_ticks -= 1;
                           }
-                          else if(button == 6)
+                          if(!(devev->flags & XIPointerEmulated))
                           {
-                            scroll_x -= 1.0f;
+                            if(button == 4)
+                            {
+                              scroll_y += 1.0f;
+                            }
+                            else if(button == 5)
+                            {
+                              scroll_y -= 1.0f;
+                            }
+                            else if(button == 6)
+                            {
+                              scroll_x -= 1.0f;
+                            }
+                            else if(button == 7)
+                            {
+                              scroll_x += 1.0f;
+                            }
                           }
-                          else if(button == 7)
-                          {
-                            scroll_x += 1.0f;
-                          }
-                        }
 
-                        state->dragging_start_x = mouse_x;
-                        state->dragging_start_y = mouse_y;
-                      }
-                      else
-                      {
-                        mouse_btn_went_up = button;
+                          state->dragging_start_x = mouse_x;
+                          state->dragging_start_y = mouse_y;
+                        }
+                        else
+                        {
+                          mouse_btn_went_up = button;
+                        }
                       }
                     }
 
@@ -1957,10 +2016,12 @@ int main(int argc, char** argv)
                     {
                       XIRawEvent* devev = (XIRawEvent*)event.xcookie.data;
 
+#if 0
                       r32 scroll_increment =
                         devev->sourceid < array_count(state->scroll_increment_by_source_id)
                         ? state->scroll_increment_by_source_id[devev->sourceid]
                         : default_scroll_increment;
+#endif
 
 #if 0
                       printf("XI raw motion %d:%d detail %d flags %d\n",
@@ -1995,6 +2056,7 @@ int main(int argc, char** argv)
                               {
                                 mouse_delta_y -= value;
                               }
+#if 0
                               else if(idx == 2)
                               {
                                 scroll_x += value / scroll_increment;
@@ -2003,6 +2065,7 @@ int main(int argc, char** argv)
                               {
                                 scroll_y -= value / scroll_increment;
                               }
+#endif
                             }
 
                             ++values;
@@ -2090,7 +2153,7 @@ int main(int argc, char** argv)
                           search_changed = true;
                         }
                       }
-                      else // if(!ctrl_held)
+                      else if(!ctrl_held)
                       {
                         Status xmb_lookup_status = 0;
                         char* result_buffer = (char*)&state->search_str.data[state->search_str.size];
@@ -2493,6 +2556,7 @@ int main(int argc, char** argv)
                 case FocusIn:
                 {
                   has_focus = true;
+                  // printf("FocusIn\n");
 
                   int device_count = 0;
                   int master_pointer_device_id = 2;
