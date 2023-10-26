@@ -72,83 +72,6 @@ internal b32 is_directory(char* path)
   return result;
 }
 
-internal void set_title(Display* display, Window window, u8* txt, i32 txt_len)
-{
-  XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace, txt, txt_len);
-}
-
-internal void update_scroll_increments(i32 class_count, XIAnyClassInfo** classes,
-    i32 scroll_increment_count, r32* scroll_increment_by_source_id)
-{
-  // printf("  classes:\n");
-  for(i32 class_idx = 0;
-      class_idx < class_count;
-      ++class_idx)
-  {
-    XIAnyClassInfo* class = classes[class_idx];
-#if 0
-    printf("    type: %d, sourceid: %d\n", class->type, class->sourceid);
-    if(class->type == XIValuatorClass)
-    {
-      XIValuatorClassInfo* valuator_class = (XIValuatorClassInfo*)class;
-      printf("    ValuatorClass\n");
-      printf("      number: %d\n", valuator_class->number);
-      printf("      min: %f\n", valuator_class->min);
-      printf("      max: %f\n", valuator_class->max);
-      printf("      value: %f\n", valuator_class->value);
-    }
-#endif
-    if(class->type == XIScrollClass)
-    {
-      XIScrollClassInfo* scroll_class = (XIScrollClassInfo*)class;
-#if 0
-      printf("    ScrollClass\n");
-      printf("      number: %d\n", scroll_class->number);
-      printf("      scroll_type: %d\n", scroll_class->scroll_type);
-      printf("      increment: %f\n", scroll_class->increment);
-      printf("      flags: %d\n", scroll_class->flags);
-#endif
-
-      if(class->sourceid >= 0 && class->sourceid < scroll_increment_count)
-      {
-        if(scroll_increment_by_source_id[class->sourceid] != scroll_class->increment)
-        {
-          printf("Scroll increment for sourceid %d changed from %f to %f.\n",
-              class->sourceid,
-              scroll_increment_by_source_id[class->sourceid],
-              scroll_class->increment);
-          scroll_increment_by_source_id[class->sourceid] = scroll_class->increment;
-        }
-      }
-    }
-  }
-}
-
-internal b32 advance_if_prefix_matches(u8** input, u8* input_end, char* prefix)
-{
-  b32 matches = true;
-  u8* ptr = *input;
-
-  while(*prefix)
-  {
-    if(ptr >= input_end || *ptr != *prefix)
-    {
-      matches = false;
-      break;
-    }
-
-    ++prefix;
-    ++ptr;
-  }
-
-  if(matches)
-  {
-    *input = ptr;
-  }
-
-  return matches;
-}
-
 static u8 test_texels[] = {
   1, 1, 1, 255,
   255, 0, 0, 255,
@@ -207,6 +130,153 @@ typedef struct img_entry_t
   // This should stay at the end so zeroing the memory updates this last.
   volatile load_state_t load_state;
 } img_entry_t;
+
+typedef struct
+{
+  i32 win_w;
+  i32 win_h;
+
+  b32 vsync;
+  i64 vram_bytes_used;
+  b32 linear_sampling;
+  b32 alpha_blend;
+  i32 show_info;
+
+  GLuint test_texture_id;
+
+  GLuint font_texture_id;
+  i32 chars_per_font_row;
+  i32 chars_per_font_col;
+  stbtt_fontinfo font;
+  r32 stb_font_scale;
+  r32 font_ascent;
+  r32 font_descent;
+  u8* font_texels;
+  i32 font_texture_w;
+  i32 font_texture_h;
+  i32 font_char_w;
+  i32 font_char_h;
+  u32 fixed_codepoint_range_start;
+  u32 fixed_codepoint_range_length;
+  u32* custom_codepoints;
+  i32 custom_codepoint_first_char_idx;
+  i32 custom_codepoint_count;
+  i32 next_custom_codepoint_idx;
+
+  char** input_paths;
+  i32 input_path_count;
+
+  img_entry_t* img_entries;
+  i32 total_img_capacity;
+  i32 total_img_count;
+
+  i32* filtered_img_idxs;
+  i32 filtered_img_count;
+
+  b32 searching;
+  str_t search_str;
+  i32 search_str_capacity;
+
+  i32 viewing_filtered_img_idx;
+
+  int inotify_fd;
+
+  b32 zoom_from_original_size;  // If false, fit to window instead.
+
+  b32 hide_sidebar;
+  i32 sidebar_width;
+  r32 sidebar_scroll_rows;
+  i32 thumbnail_columns;
+
+  i32 info_panel_width;
+
+  r32 dragging_start_x;
+  r32 dragging_start_y;
+  i32 dragging_start_value;
+  r32 dragging_start_value2;
+  b32 mouse_moved_since_dragging_start;
+
+  r32 scroll_increment_by_source_id[64];
+
+  img_entry_t* lru_first;
+  img_entry_t* lru_last;
+} state_t;
+
+internal void set_title(Display* display, Window window, u8* txt, i32 txt_len)
+{
+  XChangeProperty(display, window, XA_WM_NAME, XA_STRING, 8, PropModeReplace, txt, txt_len);
+}
+
+internal void xlib_update_device_info(state_t* state, i32 class_count, XIAnyClassInfo** classes)
+{
+  // printf("  classes:\n");
+  for(i32 class_idx = 0;
+      class_idx < class_count;
+      ++class_idx)
+  {
+    XIAnyClassInfo* class = classes[class_idx];
+#if 0
+    printf("    type: %d, sourceid: %d\n", class->type, class->sourceid);
+    if(class->type == XIValuatorClass)
+    {
+      XIValuatorClassInfo* valuator_class = (XIValuatorClassInfo*)class;
+      printf("    ValuatorClass\n");
+      printf("      number: %d\n", valuator_class->number);
+      printf("      min: %f\n", valuator_class->min);
+      printf("      max: %f\n", valuator_class->max);
+      printf("      value: %f\n", valuator_class->value);
+    }
+#endif
+    if(class->type == XIScrollClass)
+    {
+      XIScrollClassInfo* scroll_class = (XIScrollClassInfo*)class;
+#if 0
+      printf("    ScrollClass\n");
+      printf("      number: %d\n", scroll_class->number);
+      printf("      scroll_type: %d\n", scroll_class->scroll_type);
+      printf("      increment: %f\n", scroll_class->increment);
+      printf("      flags: %d\n", scroll_class->flags);
+#endif
+
+      if(class->sourceid >= 0 && class->sourceid < array_count(state->scroll_increment_by_source_id))
+      {
+        if(state->scroll_increment_by_source_id[class->sourceid] != scroll_class->increment)
+        {
+          printf("Scroll increment for sourceid %d changed from %f to %f.\n",
+              class->sourceid,
+              state->scroll_increment_by_source_id[class->sourceid],
+              scroll_class->increment);
+          state->scroll_increment_by_source_id[class->sourceid] = scroll_class->increment;
+        }
+      }
+    }
+  }
+}
+
+internal b32 advance_if_prefix_matches(u8** input, u8* input_end, char* prefix)
+{
+  b32 matches = true;
+  u8* ptr = *input;
+
+  while(*prefix)
+  {
+    if(ptr >= input_end || *ptr != *prefix)
+    {
+      matches = false;
+      break;
+    }
+
+    ++prefix;
+    ++ptr;
+  }
+
+  if(matches)
+  {
+    *input = ptr;
+  }
+
+  return matches;
+}
 
 typedef struct
 {
@@ -377,75 +447,6 @@ internal void* loader_fun(void* raw_data)
 
   return 0;
 }
-
-typedef struct
-{
-  i32 win_w;
-  i32 win_h;
-
-  b32 vsync;
-  i64 vram_bytes_used;
-  b32 linear_sampling;
-  b32 alpha_blend;
-  i32 show_info;
-
-  GLuint test_texture_id;
-
-  GLuint font_texture_id;
-  i32 chars_per_font_row;
-  i32 chars_per_font_col;
-  stbtt_fontinfo font;
-  r32 stb_font_scale;
-  r32 font_ascent;
-  r32 font_descent;
-  u8* font_texels;
-  i32 font_texture_w;
-  i32 font_texture_h;
-  i32 font_char_w;
-  i32 font_char_h;
-  u32 fixed_codepoint_range_start;
-  u32 fixed_codepoint_range_length;
-  u32* custom_codepoints;
-  i32 custom_codepoint_first_char_idx;
-  i32 custom_codepoint_count;
-  i32 next_custom_codepoint_idx;
-
-  char** input_paths;
-  i32 input_path_count;
-
-  img_entry_t* img_entries;
-  i32 total_img_capacity;
-  i32 total_img_count;
-
-  i32* filtered_img_idxs;
-  i32 filtered_img_count;
-
-  b32 searching;
-  str_t search_str;
-  i32 search_str_capacity;
-
-  i32 viewing_filtered_img_idx;
-
-  int inotify_fd;
-
-  b32 zoom_from_original_size;  // If false, fit to window instead.
-
-  b32 hide_sidebar;
-  i32 sidebar_width;
-  r32 sidebar_scroll_rows;
-  i32 thumbnail_columns;
-
-  i32 info_panel_width;
-
-  r32 dragging_start_x;
-  r32 dragging_start_y;
-  i32 dragging_start_value;
-  r32 dragging_start_value2;
-  b32 mouse_moved_since_dragging_start;
-
-  img_entry_t* lru_first;
-  img_entry_t* lru_last;
-} state_t;
 
 internal void unload_texture(state_t* state, img_entry_t* unload)
 {
@@ -1426,33 +1427,27 @@ int main(int argc, char** argv)
 
         if(xi_available)
         {
-          XIEventMask evmasks[2];
-          u8 mask1[(XI_LASTEVENT + 7) / 8] = {0};
-          u8 mask2[(XI_LASTEVENT + 7) / 8] = {0};
-
-          // XISetMask(mask1, XI_KeyPress);
-          // XISetMask(mask1, XI_KeyRelease);
-
-          evmasks[0].deviceid = XIAllMasterDevices;
-          evmasks[0].mask_len = sizeof(mask1);
-          evmasks[0].mask = mask1;
-
-          XISetMask(mask2, XI_ButtonPress);
-          XISetMask(mask2, XI_ButtonRelease);
-          XISetMask(mask2, XI_Motion);
-          XISetMask(mask2, XI_DeviceChanged);
-
-          evmasks[1].deviceid = 2;  // 2: Master pointer.
-          evmasks[1].mask_len = sizeof(mask2);
-          evmasks[1].mask = mask2;
-
-          XISelectEvents(display, window, evmasks, 2);
-
+          XIEventMask window_evmask;
           XIEventMask root_evmask;
-          XISetMask(mask1, XI_RawMotion);
-          root_evmask.deviceid = 2;
-          root_evmask.mask_len = sizeof(mask1);
-          root_evmask.mask = mask1;
+          u8 mask[(XI_LASTEVENT + 7) / 8];
+
+          zero_struct(mask);
+          XISetMask(mask, XI_ButtonPress);
+          XISetMask(mask, XI_ButtonRelease);
+          XISetMask(mask, XI_Motion);
+          XISetMask(mask, XI_DeviceChanged);
+
+          window_evmask.deviceid = 2;  // 2: Master pointer.
+          window_evmask.mask_len = sizeof(mask);
+          window_evmask.mask = mask;
+          XISelectEvents(display, window, &window_evmask, 1);
+
+          zero_struct(mask);
+          XISetMask(mask, XI_RawMotion);
+
+          root_evmask.deviceid = 2;  // 2: Master pointer.
+          root_evmask.mask_len = sizeof(mask);
+          root_evmask.mask = mask;
           XISelectEvents(display, root_window, &root_evmask, 1);
         }
 
@@ -1719,9 +1714,8 @@ int main(int argc, char** argv)
         //       Actually, just using the constant 120 might be enough.
         //       Check if any device is configured differently, ever.
         r32 default_scroll_increment = 120.0f;
-        r32 scroll_increment_by_source_id[64];
-        for(i32 i = 0; i < array_count(scroll_increment_by_source_id); ++i)
-        { scroll_increment_by_source_id[i] = default_scroll_increment; }
+        for(i32 i = 0; i < array_count(state->scroll_increment_by_source_id); ++i)
+        { state->scroll_increment_by_source_id[i] = default_scroll_increment; }
 
         r32 offset_scroll_scale = 0.125f;
         r32 zoom_scroll_scale = 0.25f;
@@ -1964,8 +1958,8 @@ int main(int argc, char** argv)
                       XIRawEvent* devev = (XIRawEvent*)event.xcookie.data;
 
                       r32 scroll_increment =
-                        devev->sourceid < array_count(scroll_increment_by_source_id)
-                        ? scroll_increment_by_source_id[devev->sourceid]
+                        devev->sourceid < array_count(state->scroll_increment_by_source_id)
+                        ? state->scroll_increment_by_source_id[devev->sourceid]
                         : default_scroll_increment;
 
 #if 0
@@ -2023,8 +2017,7 @@ int main(int argc, char** argv)
                   {
                     XIDeviceChangedEvent* device = (XIDeviceChangedEvent*)event.xcookie.data;
                     // printf("XI Device %d changed\n", device->deviceid);
-                    update_scroll_increments(device->num_classes, device->classes,
-                        array_count(scroll_increment_by_source_id), scroll_increment_by_source_id);
+                    xlib_update_device_info(state, device->num_classes, device->classes);
                   } break;
                 }
                 XFreeEventData(display, &event.xcookie);
@@ -2512,8 +2505,7 @@ int main(int argc, char** argv)
                     XIDeviceInfo* device = &device_infos[device_idx];
                     // printf("  deviceid: %d\n", device->deviceid);
                     // printf("  name: %s\n", device->name);
-                    update_scroll_increments(device->num_classes, device->classes,
-                        array_count(scroll_increment_by_source_id), scroll_increment_by_source_id);
+                    xlib_update_device_info(state, device->num_classes, device->classes);
                   }
                 } break;
 
