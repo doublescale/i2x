@@ -477,7 +477,7 @@ internal b32 str_replace_selection(i64 str_capacity, str_t* str,
   {
     if(str_length_change > 0)
     {
-      // Move characters after the insertion to the right.
+      // Move bytes after the insertion to the right.
       for(i64 move_idx = str->size + str_length_change - 1;
           move_idx >= selection_max + str_length_change;
           --move_idx)
@@ -486,7 +486,7 @@ internal b32 str_replace_selection(i64 str_capacity, str_t* str,
       }
     }
 
-    // Insert new characters.
+    // Insert new bytes.
     for(i64 new_idx = 0;
         new_idx < new_contents.size;
         ++new_idx)
@@ -496,7 +496,7 @@ internal b32 str_replace_selection(i64 str_capacity, str_t* str,
 
     if(str_length_change < 0)
     {
-      // Move characters after the insertion to the left.
+      // Move bytes after the insertion to the left.
       i64 length_reduction = -str_length_change;
       for(i64 move_idx = selection_max - length_reduction;
           move_idx < str->size - length_reduction;
@@ -1534,6 +1534,7 @@ int main(int argc, char** argv)
     b32 xi_available = false;
     int xi_opcode = 0;
 #if 1
+    if(!getenv("I2X_DISABLE_XINPUT2"))
     {
       int query_event = 0;
       int query_error = 0;
@@ -2831,18 +2832,21 @@ int main(int argc, char** argv)
                   has_focus = true;
                   // printf("FocusIn\n");
 
-                  int device_count = 0;
-                  int master_pointer_device_id = 2;
-                  XIDeviceInfo* device_infos = XIQueryDevice(display, master_pointer_device_id, &device_count);
-                  DEBUG_LOG("\nWindow got focus. Devices:\n");
-                  for(i32 device_idx = 0;
-                      device_idx < device_count;
-                      ++device_idx)
+                  if(xi_available)
                   {
-                    XIDeviceInfo* device = &device_infos[device_idx];
-                    DEBUG_LOG("  deviceid: %d\n", device->deviceid);
-                    DEBUG_LOG("  name: %s\n", device->name);
-                    xi_update_device_info(state, device->num_classes, device->classes);
+                    int device_count = 0;
+                    int master_pointer_device_id = 2;
+                    XIDeviceInfo* device_infos = XIQueryDevice(display, master_pointer_device_id, &device_count);
+                    DEBUG_LOG("\nWindow got focus. Devices:\n");
+                    for(i32 device_idx = 0;
+                        device_idx < device_count;
+                        ++device_idx)
+                    {
+                      XIDeviceInfo* device = &device_infos[device_idx];
+                      DEBUG_LOG("  deviceid: %d\n", device->deviceid);
+                      DEBUG_LOG("  name: %s\n", device->name);
+                      xi_update_device_info(state, device->num_classes, device->classes);
+                    }
                   }
                 } break;
 
@@ -3350,10 +3354,8 @@ int main(int argc, char** argv)
                   word_start < query_end && query_positive_word_count < array_count(query_positive_words);
                  )
               {
-                // TODO: Consider "quoted strings" as one word.
-                while(word_start < query_end &&
-                    (*word_start == ' ' ||
-                     *word_start == ','))
+                // TODO: Consider "quoted strings" as one word.  Or maybe use {braces}?
+                while(word_start < query_end && *word_start == ' ')
                 {
                   ++word_start;
                 }

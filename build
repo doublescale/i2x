@@ -8,6 +8,8 @@ extra_opts=''
 
 if [ ${OPTIMIZE:-0} -ne 0 ]; then
   extra_opts='-O3'
+else
+  extra_opts='-g'
 fi
 
 if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb.o ]; then
@@ -15,4 +17,8 @@ if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb.o ]; then
   clang -std=c11 -O3 -c -o obj/stb.o lib/stb.c
 fi
 
-clang -g $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb.o src/main.c
+clang $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb.o src/main.c
+
+if [ ${OPTIMIZE:-0} -ne 0 ]; then
+  strip i2x
+fi
