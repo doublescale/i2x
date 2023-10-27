@@ -3342,6 +3342,22 @@ int main(int argc, char** argv)
               str_t query = state->search_str;
               u8* query_end = query.data + query.size;
 
+              enum
+              {
+                SEARCH_MATCHED = (1 << 0),
+                SEARCH_EXCLUDE = (1 << 1),
+              };
+              typedef u32 search_flags_t;
+
+              typedef struct search_flags_t
+              {
+                str_t word;
+                search_flags_t flags;
+
+                struct search_flags_t* next;
+                struct search_flags_t* next_alternative;
+              } search_item_t;
+
               i32 query_positive_word_count = 0;
               i32 query_negative_word_count = 0;
               str_t query_positive_words[256];
