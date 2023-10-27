@@ -2954,11 +2954,11 @@ int main(int argc, char** argv)
             {
               mouse_in_sidebar = true;
             }
-            else if(absolute(mouse_x - (state->win_w - effective_info_panel_width)) <= 10)
+            else if(state->show_info == 2 && absolute(mouse_x - (state->win_w - effective_info_panel_width)) <= 10)
             {
               mouse_on_info_panel_edge = true;
             }
-            else if(mouse_x > state->win_w - effective_info_panel_width)
+            else if(state->show_info == 2 && mouse_x > state->win_w - effective_info_panel_width)
             {
               mouse_in_info_panel = true;
             }
