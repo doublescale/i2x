@@ -177,13 +177,14 @@ typedef struct
   i32* filtered_img_idxs;
   i32 filtered_img_count;
 
+  i32 viewing_filtered_img_idx;
+
   b32 searching;
   str_t search_str;
   i64 search_str_capacity;
+  i32 img_idx_viewed_before_search;
   i64 selection_start;
   i64 selection_end;
-
-  i32 viewing_filtered_img_idx;
 
   int inotify_fd;
 
@@ -298,9 +299,69 @@ internal b32 advance_if_prefix_matches(u8** input, u8* input_end, char* prefix)
   return matches;
 }
 
-internal b32 is_word_separator_char(u8 c)
+internal b32 is_seeking_word_separator(u8 c)
 {
-  return c == ' ' || c == '\n';
+  return 0
+    || c == ' '
+    || c == '\n'
+    || c == ':'
+    || c == '/'
+    || c == '|'
+    ;
+}
+
+internal b32 is_linewrap_word_separator(u8 c)
+{
+  return 0
+    || c == '-'
+    || c == ':'
+    || c == '/'
+    || c == '|'
+    ;
+}
+
+internal i64 seek_left_in_str(str_t str, b32 word_wise, i64 start_idx)
+{
+  i64 result = start_idx;
+
+  while(word_wise && result > 0 && is_seeking_word_separator(str.data[result - 1]))
+  {
+    --result;
+  }
+  if(result > 0)
+  {
+    --result;
+  }
+  while(result > 0 &&
+      (is_utf8_continuation_byte(str.data[result]) ||
+       (word_wise && !is_seeking_word_separator(str.data[result - 1]))))
+  {
+    --result;
+  }
+
+  return result;
+}
+
+internal i64 seek_right_in_str(str_t str, b32 word_wise, i64 start_idx)
+{
+  i64 result = start_idx;
+
+  while(word_wise && result < str.size && is_seeking_word_separator(str.data[result]))
+  {
+    ++result;
+  }
+  if(result < str.size)
+  {
+    ++result;
+  }
+  while(result < str.size &&
+      (is_utf8_continuation_byte(str.data[result]) ||
+       (word_wise && !is_seeking_word_separator(str.data[result]))))
+  {
+    ++result;
+  }
+
+  return result;
 }
 
 typedef struct
@@ -1289,11 +1350,7 @@ internal void draw_wrapped_text(state_t* state,
       {
         break;
       }
-      else if(0
-          || word_end[-1] == '-'
-          || word_end[-1] == ':'
-          || word_end[-1] == '/'
-          )
+      else if(is_linewrap_word_separator(word_end[-1]))
       {
         word_width = prefix_width;
         break;
@@ -2156,6 +2213,7 @@ int main(int argc, char** argv)
                       {
                         state->selection_start = state->search_str.size;
                         state->selection_end   = state->search_str.size;
+                        state->img_idx_viewed_before_search = state->filtered_img_idxs[state->viewing_filtered_img_idx];
                         search_changed = true;
                       }
                     }
@@ -2167,50 +2225,52 @@ int main(int argc, char** argv)
                       }
                       else if(ctrl_held && keysym == 'a')
                       {
-                        str_t* text = &state->search_str;
+                        str_t* str = &state->search_str;
 
-                        if(state->selection_start != 0 || state->selection_end != text->size)
-                        {
-                          state->selection_start = 0;
-                          state->selection_end = text->size;
-                        }
-                        else
-                        {
-                          state->selection_start = text->size;
-                          state->selection_end = 0;
-                        }
+                        state->selection_start = 0;
+                        state->selection_end = str->size;
                       }
                       else if(keysym == XK_BackSpace)
                       {
-                        str_t* text = &state->search_str;
+                        str_t* str = &state->search_str;
 
                         i64 deletion_min = min(state->selection_start, state->selection_end);
                         i64 deletion_max = max(state->selection_start, state->selection_end);
                         if(deletion_min == deletion_max)
                         {
-                          while(ctrl_held && deletion_min > 0 && is_word_separator_char(text->data[deletion_min - 1]))
-                          {
-                            --deletion_min;
-                          }
-                          if(deletion_min > 0)
-                          {
-                            --deletion_min;
-                          }
-                          while(deletion_min > 0 &&
-                              (is_utf8_continuation_byte(text->data[deletion_min]) ||
-                               (ctrl_held && !is_word_separator_char(text->data[deletion_min - 1]))))
-                          {
-                            --deletion_min;
-                          }
+                          deletion_min = seek_left_in_str(*str, ctrl_held, deletion_min);
                         }
                         i64 deletion_length = deletion_max - deletion_min;
                         for(i64 i = deletion_min;
-                            i < text->size - deletion_length;
+                            i < str->size - deletion_length;
                             ++i)
                         {
-                          text->data[i] = text->data[i + deletion_length];
+                          str->data[i] = str->data[i + deletion_length];
                         }
-                        text->size -= deletion_length;
+                        str->size -= deletion_length;
+                        state->selection_start = deletion_min;
+                        state->selection_end = deletion_min;
+
+                        search_changed = true;
+                      }
+                      else if(keysym == XK_Delete)
+                      {
+                        str_t* str = &state->search_str;
+
+                        i64 deletion_min = min(state->selection_start, state->selection_end);
+                        i64 deletion_max = max(state->selection_start, state->selection_end);
+                        if(deletion_min == deletion_max)
+                        {
+                          deletion_max = seek_right_in_str(*str, ctrl_held, deletion_max);
+                        }
+                        i64 deletion_length = deletion_max - deletion_min;
+                        for(i64 i = deletion_min;
+                            i < str->size - deletion_length;
+                            ++i)
+                        {
+                          str->data[i] = str->data[i + deletion_length];
+                        }
+                        str->size -= deletion_length;
                         state->selection_start = deletion_min;
                         state->selection_end = deletion_min;
 
@@ -2218,22 +2278,7 @@ int main(int argc, char** argv)
                       }
                       else if(keysym == XK_Left)
                       {
-                        str_t* text = &state->search_str;
-
-                        while(ctrl_held && state->selection_end > 0 && is_word_separator_char(text->data[state->selection_end - 1]))
-                        {
-                          --state->selection_end;
-                        }
-                        if(state->selection_end > 0)
-                        {
-                          --state->selection_end;
-                        }
-                        while(state->selection_end > 0 &&
-                            (is_utf8_continuation_byte(text->data[state->selection_end]) ||
-                             (ctrl_held && !is_word_separator_char(text->data[state->selection_end - 1]))))
-                        {
-                          --state->selection_end;
-                        }
+                        state->selection_end = seek_left_in_str(state->search_str, ctrl_held, state->selection_end);
                         if(!shift_held)
                         {
                           state->selection_start = state->selection_end;
@@ -2241,22 +2286,7 @@ int main(int argc, char** argv)
                       }
                       else if(keysym == XK_Right)
                       {
-                        str_t* text = &state->search_str;
-
-                        while(ctrl_held && state->selection_end < text->size && is_word_separator_char(text->data[state->selection_end]))
-                        {
-                          ++state->selection_end;
-                        }
-                        if(state->selection_end < text->size)
-                        {
-                          ++state->selection_end;
-                        }
-                        while(state->selection_end < text->size &&
-                            (is_utf8_continuation_byte(text->data[state->selection_end]) ||
-                             (ctrl_held && !is_word_separator_char(text->data[state->selection_end]))))
-                        {
-                          ++state->selection_end;
-                        }
+                        state->selection_end = seek_right_in_str(state->search_str, ctrl_held, state->selection_end);
                         if(!shift_held)
                         {
                           state->selection_start = state->selection_end;
@@ -2278,35 +2308,72 @@ int main(int argc, char** argv)
                         }
                         state->selection_end = state->search_str.size;
                       }
-                      else if(ctrl_held && keysym == 'u')
-                      {
-                        if(state->search_str.size > 0)
-                        {
-                          state->search_str.size = 0;
-                          search_changed = true;
-                        }
-                      }
                       else if(!ctrl_held)
                       {
+                        str_t* str = &state->search_str;
+                        i64 str_capacity = state->search_str_capacity;
+
                         Status xmb_lookup_status = 0;
-                        char* result_buffer = (char*)&state->search_str.data[state->search_str.size];
-                        int xmb_lookup_rc = Xutf8LookupString(x_input_context, &event.xkey,
-                        // int xmb_lookup_rc = XmbLookupString(x_input_context, &event.xkey,
-                            result_buffer,
-                            state->search_str_capacity - state->search_str.size,
+                        u8 result_buffer[256];
+                        int result_length = Xutf8LookupString(x_input_context, &event.xkey,
+                        // int result_length = XmbLookupString(x_input_context, &event.xkey,
+                            (char*)result_buffer, sizeof(result_buffer),
                             0, &xmb_lookup_status);
-                        // printf("%d %d\n", xmb_lookup_status, xmb_lookup_rc);
-                        if(xmb_lookup_status != XBufferOverflow && xmb_lookup_rc > 0)
+                        // printf("%d %d\n", xmb_lookup_status, result_length);
+                        if(xmb_lookup_status != XBufferOverflow && result_length > 0)
                         {
 #if 0
                           printf("\n");
-                          for_count(i, xmb_lookup_rc)
+                          for_count(i, result_length)
                           {
                             printf("0x%04x '%c'\n", (u8)result_buffer[i], (u8)result_buffer[i]);
                           }
 #endif
-                          state->search_str.size += xmb_lookup_rc;
-                          search_changed = true;
+
+                          i64 selection_min = min(state->selection_start, state->selection_end);
+                          i64 selection_max = max(state->selection_start, state->selection_end);
+                          i64 selection_length = selection_max - selection_min;
+                          i64 str_length_change = result_length - selection_length;
+
+                          if(str->size + str_length_change <= str_capacity)
+                          {
+                            if(str_length_change > 0)
+                            {
+                              // Move characters after the insertion to the right.
+                              for(i64 move_idx = str->size + str_length_change - 1;
+                                  move_idx >= selection_max + str_length_change;
+                                  --move_idx)
+                              {
+                                str->data[move_idx] = str->data[move_idx - str_length_change];
+                              }
+                            }
+
+                            // Insert new characters.
+                            for(i64 result_idx = 0;
+                                result_idx < result_length;
+                                ++result_idx)
+                            {
+                              str->data[selection_min + result_idx] = result_buffer[result_idx];
+                            }
+
+                            if(str_length_change < 0)
+                            {
+                              // Move characters after the insertion to the left.
+                              i64 length_reduction = -str_length_change;
+                              for(i64 move_idx = selection_max - length_reduction;
+                                  move_idx < str->size - length_reduction;
+                                  ++move_idx)
+                              {
+                                str->data[move_idx] = str->data[move_idx + length_reduction];
+                              }
+                            }
+
+                            str->size += str_length_change;
+                            state->selection_end = selection_min + result_length;
+                            state->selection_start = state->selection_end;
+
+                            search_changed = true;
+                          }
                         }
                       }
                     }
@@ -3184,13 +3251,11 @@ int main(int argc, char** argv)
 
           if(search_changed)
           {
-            i32 prev_viewing_idx = state->filtered_img_idxs[state->viewing_filtered_img_idx];
-
             if(state->search_str.size == 0)
             {
               for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
               state->filtered_img_count = state->total_img_count;
-              state->viewing_filtered_img_idx = prev_viewing_idx;
+              state->viewing_filtered_img_idx = state->img_idx_viewed_before_search;
             }
             else
             {
@@ -3297,8 +3362,8 @@ int main(int argc, char** argv)
                 if(query_model.size > 0)
                 {
                   b32 model_matches = false;
-                  for(i32 offset = 0;
-                      offset <= (i32)img->model.size - (i32)query_model.size && !model_matches;
+                  for(i64 offset = 0;
+                      offset <= (i64)img->model.size - (i64)query_model.size && !model_matches;
                       ++offset)
                   {
                     str_t model_substr = { img->model.data + offset, query_model.size };
@@ -3314,8 +3379,8 @@ int main(int argc, char** argv)
                 BITSET32(positive_words_matched, array_count(query_positive_words)) = {0};
                 BITSET32(negative_words_matched, array_count(query_negative_words)) = {0};
 
-                for(i32 offset = 0;
-                    offset < (i32)img->positive_prompt.size && query_positive_word_count > 0 && overall_match;
+                for(i64 offset = 0;
+                    offset < (i64)img->positive_prompt.size && query_positive_word_count > 0 && overall_match;
                     ++offset)
                 {
                   for(i32 word_idx = 0;
@@ -3347,8 +3412,8 @@ int main(int argc, char** argv)
                   }
                 }
 
-                for(i32 offset = 0;
-                    offset < (i32)img->negative_prompt.size && query_negative_word_count > 0 && overall_match;
+                for(i64 offset = 0;
+                    offset < (i64)img->negative_prompt.size && query_negative_word_count > 0 && overall_match;
                     ++offset)
                 {
                   for(i32 word_idx = 0;
@@ -3394,7 +3459,7 @@ int main(int argc, char** argv)
                 }
                 if(overall_match)
                 {
-                  if(prev_viewing_idx >= img_idx)
+                  if(state->img_idx_viewed_before_search >= img_idx)
                   {
                     state->viewing_filtered_img_idx = state->filtered_img_count;
                   }
@@ -3939,8 +4004,8 @@ int main(int argc, char** argv)
                 glColor3f(label_gray, label_gray, label_gray);
                 x += draw_str(state, flags, 1, fs, x, y, str("Search: "));
 
-                i32 selection_min = min(state->selection_start, state->selection_end);
-                i32 selection_max = max(state->selection_start, state->selection_end);
+                i64 selection_min = min(state->selection_start, state->selection_end);
+                i64 selection_max = max(state->selection_start, state->selection_end);
                 str_t str_before_selection = { state->search_str.data, selection_min };
                 str_t str_in_selection = str_from_span(state->search_str.data + selection_min,
                     state->search_str.data + selection_max);
