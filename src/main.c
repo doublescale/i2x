@@ -299,6 +299,105 @@ internal b32 advance_if_prefix_matches(u8** input, u8* input_end, char* prefix)
   return matches;
 }
 
+internal str_t parse_next_json_str_destructively(u8** input, u8* input_end)
+{
+  u8* in = *input;
+  while(in < input_end && *in != '"') { ++in; }
+  if(in < input_end) { ++in; }
+
+  u8* out = in;
+  str_t result = {out};
+  u16 utf16_high_surrogate = 0;
+  while(in < input_end && *in != '"')
+  {
+    if(*in == '\\' && in + 1 < input_end)
+    {
+      ++in;
+      if(0) {}
+      else if(*in == 'b') { *out++ = '\b'; ++in; }
+      else if(*in == 'f') { *out++ = '\f'; ++in; }
+      else if(*in == 'n') { *out++ = '\n'; ++in; }
+      else if(*in == 'r') { *out++ = '\r'; ++in; }
+      else if(*in == 't') { *out++ = '\t'; ++in; }
+      else if(*in == 'u' && in + 4 < input_end)
+      {
+        ++in;
+        u16 utf16_code = 0;
+        for_count(nibble_idx, 4)
+        {
+          utf16_code <<= 4;
+          if(0) {}
+          else if(*in >= '0' && *in <= '9') { utf16_code += *in - '0'; }
+          else if(*in >= 'A' && *in <= 'F') { utf16_code += *in + 10 - 'A'; }
+          else if(*in >= 'a' && *in <= 'f') { utf16_code += *in + 10 - 'a'; }
+          ++in;
+        }
+
+        u32 c = (u32)utf16_code;
+        if(utf16_code >= 0xD800 && utf16_code <= 0xDBFF)
+        {
+          // TODO: Emit the high surrogate if it's unpaired?
+          //       Or also swallow unpaired high surrogates?
+          //       Either way, don't match surrogate pairs across other things.
+          utf16_high_surrogate = utf16_code;
+        }
+        else if(utf16_high_surrogate && utf16_code >= 0xDC00 && utf16_code <= 0xDFFF)
+        {
+          c = 0x10000 + ((u32)(utf16_high_surrogate - 0xD800) << 10) + (u32)(utf16_code - 0xDC00);
+          utf16_high_surrogate = 0;
+        }
+        else
+        {
+          utf16_high_surrogate = 0;
+        }
+
+        if(!utf16_high_surrogate)
+        {
+          // UTF-32 to UTF-8.
+          i32 utf8_bytes = 1;
+          if(c >= 0x00080) { utf8_bytes = 2; }
+          if(c >= 0x00800) { utf8_bytes = 3; }
+          if(c >= 0x10000) { utf8_bytes = 4; }
+          if(out + utf8_bytes <= input_end)
+          {
+            if(utf8_bytes == 1)
+            {
+              *out++ = c;
+            }
+            if(utf8_bytes == 2)
+            {
+              *out++ = 0xC0 | (c >> 6);
+              *out++ = 0x80 | (c & 0x3F);
+            }
+            if(utf8_bytes == 3)
+            {
+              *out++ = 0xE0 | (c >> 12);
+              *out++ = 0x80 | ((c >> 6) & 0x3F);
+              *out++ = 0x80 | (c & 0x3F);
+            }
+            if(utf8_bytes == 4)
+            {
+              *out++ = 0xF0 | (c >> 18);
+              *out++ = 0x80 | ((c >> 12) & 0x3F);
+              *out++ = 0x80 | ((c >> 6) & 0x3F);
+              *out++ = 0x80 | (c & 0x3F);
+            }
+          }
+        }
+      }
+      else { *out++ = *in++; }
+    }
+    else
+    {
+      *out++ = *in++;
+    }
+  }
+
+  result.size = out - result.data;
+  *input = in;
+  return result;
+}
+
 internal b32 is_seeking_word_separator(u8 c)
 {
   return 0
@@ -1053,25 +1152,14 @@ internal void reload_input_paths(state_t* state)
                 }
                 else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
                 {
-                  while(p < value_end && *p != '"') { ++p; }
-                  ++p;
-                  str_t v = {p};
-                  while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
-                  v.size = p - v.data;
-
+                  str_t v = parse_next_json_str_destructively(&p, value_end);
                   img->sampler = v;
                 }
                 else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
                 {
-                  while(p < value_end && *p != '"') { ++p; }
-                  ++p;
-                  str_t v = {p};
-                  while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
-                  v.size = p - v.data;
-
+                  str_t v = parse_next_json_str_destructively(&p, value_end);
                   v = str_remove_suffix(v, str(".ckpt"));
                   v = str_remove_suffix(v, str(".safetensors"));
-
                   img->model = v;
                 }
                 else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
@@ -1085,12 +1173,7 @@ internal void reload_input_paths(state_t* state)
                 }
                 else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
                 {
-                  while(p < value_end && *p != '"') { ++p; }
-                  ++p;
-                  str_t v = {p};
-                  while(p < value_end && *p != '"') { if(*p == '\\') { ++p; } ++p; }
-                  v.size = p - v.data;
-
+                  str_t v = parse_next_json_str_destructively(&p, value_end);
                   if(!img->positive_prompt.data) { img->positive_prompt = v; }
                   else if(!img->negative_prompt.data) { img->negative_prompt = v; }
                 }
@@ -1265,6 +1348,8 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
        )
     {
       i32 codepoint = decode_utf8(&str_ptr, str_end);
+
+      if(codepoint == '\t') { codepoint = ' '; }
 
       i32 x_advance, left_side_bearing;
       stbtt_GetCodepointHMetrics(&state->font, codepoint, &x_advance, &left_side_bearing);
