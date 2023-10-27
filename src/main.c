@@ -364,6 +364,59 @@ internal i64 seek_right_in_str(str_t str, b32 word_wise, i64 start_idx)
   return result;
 }
 
+internal b32 str_replace_selection(i64 str_capacity, str_t* str,
+    i64* selection_start, i64* selection_end, str_t new_contents)
+{
+  b32 result = false;
+
+  i64 selection_min = min(*selection_start, *selection_end);
+  i64 selection_max = max(*selection_start, *selection_end);
+  i64 selection_length = selection_max - selection_min;
+  i64 str_length_change = new_contents.size - selection_length;
+
+  if(str->size + str_length_change <= str_capacity)
+  {
+    if(str_length_change > 0)
+    {
+      // Move characters after the insertion to the right.
+      for(i64 move_idx = str->size + str_length_change - 1;
+          move_idx >= selection_max + str_length_change;
+          --move_idx)
+      {
+        str->data[move_idx] = str->data[move_idx - str_length_change];
+      }
+    }
+
+    // Insert new characters.
+    for(i64 new_idx = 0;
+        new_idx < new_contents.size;
+        ++new_idx)
+    {
+      str->data[selection_min + new_idx] = new_contents.data[new_idx];
+    }
+
+    if(str_length_change < 0)
+    {
+      // Move characters after the insertion to the left.
+      i64 length_reduction = -str_length_change;
+      for(i64 move_idx = selection_max - length_reduction;
+          move_idx < str->size - length_reduction;
+          ++move_idx)
+      {
+        str->data[move_idx] = str->data[move_idx + length_reduction];
+      }
+    }
+
+    str->size += str_length_change;
+    *selection_end = selection_min + new_contents.size;
+    *selection_start = *selection_end;
+
+    result = true;
+  }
+
+  return result;
+}
+
 typedef struct
 {
   i32 total_img_count;
@@ -2232,48 +2285,24 @@ int main(int argc, char** argv)
                       }
                       else if(keysym == XK_BackSpace)
                       {
-                        str_t* str = &state->search_str;
-
-                        i64 deletion_min = min(state->selection_start, state->selection_end);
-                        i64 deletion_max = max(state->selection_start, state->selection_end);
-                        if(deletion_min == deletion_max)
+                        if(state->selection_start == state->selection_end)
                         {
-                          deletion_min = seek_left_in_str(*str, ctrl_held, deletion_min);
+                          state->selection_start = seek_left_in_str(
+                              state->search_str, ctrl_held, state->selection_start);
                         }
-                        i64 deletion_length = deletion_max - deletion_min;
-                        for(i64 i = deletion_min;
-                            i < str->size - deletion_length;
-                            ++i)
-                        {
-                          str->data[i] = str->data[i + deletion_length];
-                        }
-                        str->size -= deletion_length;
-                        state->selection_start = deletion_min;
-                        state->selection_end = deletion_min;
-
+                        str_replace_selection(state->search_str_capacity, &state->search_str,
+                            &state->selection_start, &state->selection_end, str(""));
                         search_changed = true;
                       }
                       else if(keysym == XK_Delete)
                       {
-                        str_t* str = &state->search_str;
-
-                        i64 deletion_min = min(state->selection_start, state->selection_end);
-                        i64 deletion_max = max(state->selection_start, state->selection_end);
-                        if(deletion_min == deletion_max)
+                        if(state->selection_start == state->selection_end)
                         {
-                          deletion_max = seek_right_in_str(*str, ctrl_held, deletion_max);
+                          state->selection_end = seek_right_in_str(
+                              state->search_str, ctrl_held, state->selection_end);
                         }
-                        i64 deletion_length = deletion_max - deletion_min;
-                        for(i64 i = deletion_min;
-                            i < str->size - deletion_length;
-                            ++i)
-                        {
-                          str->data[i] = str->data[i + deletion_length];
-                        }
-                        str->size -= deletion_length;
-                        state->selection_start = deletion_min;
-                        state->selection_end = deletion_min;
-
+                        str_replace_selection(state->search_str_capacity, &state->search_str,
+                            &state->selection_start, &state->selection_end, str(""));
                         search_changed = true;
                       }
                       else if(keysym == XK_Left)
@@ -2310,68 +2339,27 @@ int main(int argc, char** argv)
                       }
                       else if(!ctrl_held)
                       {
-                        str_t* str = &state->search_str;
-                        i64 str_capacity = state->search_str_capacity;
-
                         Status xmb_lookup_status = 0;
-                        u8 result_buffer[256];
-                        int result_length = Xutf8LookupString(x_input_context, &event.xkey,
-                        // int result_length = XmbLookupString(x_input_context, &event.xkey,
-                            (char*)result_buffer, sizeof(result_buffer),
+                        u8 entered_buffer[256];
+                        str_t entered_str = {entered_buffer};
+                        entered_str.size = Xutf8LookupString(x_input_context, &event.xkey,
+                        // entered_str.size = XmbLookupString(x_input_context, &event.xkey,
+                            (char*)entered_buffer, sizeof(entered_buffer),
                             0, &xmb_lookup_status);
-                        // printf("%d %d\n", xmb_lookup_status, result_length);
-                        if(xmb_lookup_status != XBufferOverflow && result_length > 0)
+                        // printf("%d %lu\n", xmb_lookup_status, entered_str.size);
+                        if(xmb_lookup_status != XBufferOverflow && entered_str.size > 0)
                         {
 #if 0
                           printf("\n");
-                          for_count(i, result_length)
+                          for_count(i, entered_str.size)
                           {
-                            printf("0x%04x '%c'\n", (u8)result_buffer[i], (u8)result_buffer[i]);
+                            printf("0x%04x '%c'\n", entered_str.data[i], entered_str.data[i]);
                           }
 #endif
 
-                          i64 selection_min = min(state->selection_start, state->selection_end);
-                          i64 selection_max = max(state->selection_start, state->selection_end);
-                          i64 selection_length = selection_max - selection_min;
-                          i64 str_length_change = result_length - selection_length;
-
-                          if(str->size + str_length_change <= str_capacity)
+                          if(str_replace_selection(state->search_str_capacity, &state->search_str,
+                                &state->selection_start, &state->selection_end, entered_str))
                           {
-                            if(str_length_change > 0)
-                            {
-                              // Move characters after the insertion to the right.
-                              for(i64 move_idx = str->size + str_length_change - 1;
-                                  move_idx >= selection_max + str_length_change;
-                                  --move_idx)
-                              {
-                                str->data[move_idx] = str->data[move_idx - str_length_change];
-                              }
-                            }
-
-                            // Insert new characters.
-                            for(i64 result_idx = 0;
-                                result_idx < result_length;
-                                ++result_idx)
-                            {
-                              str->data[selection_min + result_idx] = result_buffer[result_idx];
-                            }
-
-                            if(str_length_change < 0)
-                            {
-                              // Move characters after the insertion to the left.
-                              i64 length_reduction = -str_length_change;
-                              for(i64 move_idx = selection_max - length_reduction;
-                                  move_idx < str->size - length_reduction;
-                                  ++move_idx)
-                              {
-                                str->data[move_idx] = str->data[move_idx + length_reduction];
-                              }
-                            }
-
-                            str->size += str_length_change;
-                            state->selection_end = selection_min + result_length;
-                            state->selection_start = state->selection_end;
-
                             search_changed = true;
                           }
                         }
