@@ -1343,7 +1343,7 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
     r32 x_scale = x_scale_factor * y_scale;
 
     u8* str_end = str.data + str.size;
-    i32 last_codepoint = 0;
+    u32 last_codepoint = 0;
 
     for(u8* str_ptr = str.data;
         str_ptr < str_end;
@@ -1356,7 +1356,7 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
       i32 x_advance, left_side_bearing;
       stbtt_GetCodepointHMetrics(&state->font, codepoint, &x_advance, &left_side_bearing);
 
-      if(str_ptr != str.data)
+      if(last_codepoint)
       {
         x += x_scale * stbtt_GetCodepointKernAdvance(&state->font, last_codepoint, codepoint) * state->stb_font_scale / state->font_char_w;
       }
@@ -1389,7 +1389,6 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
             // printf("uploading codepoint %d\n", codepoint);
             // printf("  char_idx %d, row %d, col %d\n", char_idx, row, col);
 
-#if 1
             u8* texels_start = state->font_texels + row * state->font_char_h * state->font_texture_w + col * state->font_char_w;
             for_count(j, state->font_char_h)
             {
@@ -1405,16 +1404,6 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
                 col * state->font_char_w, row * state->font_char_h, state->font_char_w, state->font_char_h,
                 GL_ALPHA, GL_UNSIGNED_BYTE, texels_start);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-#else
-            u8* tmp_texels = malloc_array(state->font_char_w * state->font_char_h, u8);
-            zero_bytes(state->font_char_w * state->font_char_h, tmp_texels);
-            stbtt_MakeCodepointBitmap(&state->font, tmp_texels,
-                state->font_char_w, state->font_char_h, state->font_char_w, state->stb_font_scale, state->stb_font_scale, codepoint);
-            glTexSubImage2D(GL_TEXTURE_2D, 0,
-                col * state->font_char_w, row * state->font_char_h, state->font_char_w, state->font_char_h,
-                GL_ALPHA, GL_UNSIGNED_BYTE, tmp_texels);
-            free(tmp_texels);
-#endif
 
             state->next_custom_codepoint_idx = (state->next_custom_codepoint_idx + 1) % state->custom_codepoint_count;
           }
@@ -3345,6 +3334,9 @@ int main(int argc, char** argv)
               // 20.5ms with SEARCH_MATCHED flag.
               // 19.5ms with search_tasks loop.
               // 23ms with alternatives and flexible model search.
+              // 18ms with 64-bit bloom filter on possible first byte.
+              // 12.5ms with 64-bit bloom filter on possible first two bytes.
+              // 9ms with 64-bit bloom filter on possible first three bytes.
 
               state->filtered_img_count = 0;
               state->viewing_filtered_img_idx = 0;
@@ -3373,7 +3365,10 @@ int main(int argc, char** argv)
               search_item_t* first_model_item = 0;
               search_item_t* first_positive_item = 0;
               search_item_t* first_negative_item = 0;
-              // str_t query_model = {0};
+
+              // TODO: Separate bloom filter for each search task.
+              u64 bloom = 0;
+
               for(u8 *word_start = query.data, *word_end = query.data;
                   word_start < query_end && next_search_item_idx < array_count(search_items);
                  )
@@ -3446,6 +3441,12 @@ int main(int argc, char** argv)
                         first_positive_item = item;
                       }
                     }
+
+                    // The upper-case region of ASCII maps into the control-code region
+                    // when taking off the two highest bits;  use this to avoid collisions
+                    // with the symbols and digits, which would get mapped from lower-case.
+                    bloom |= (1 << (to_upper(item->word.data[0]) >> 2));
+
                     last_alternative = item;
                   }
 
@@ -3493,25 +3494,6 @@ int main(int argc, char** argv)
                 b32 overall_match = true;
                 img_entry_t* img = &state->img_entries[img_idx];
 
-#if 0
-                if(query_model.size > 0)
-                {
-                  b32 model_matches = false;
-                  for(i64 offset = 0;
-                      offset <= (i64)img->model.size - (i64)query_model.size && !model_matches;
-                      ++offset)
-                  {
-                    str_t model_substr = { img->model.data + offset, query_model.size };
-                    if(str_eq_ignoring_case(model_substr, query_model))
-                    {
-                      model_matches = true;
-                    }
-                  }
-
-                  overall_match = overall_match && model_matches;
-                }
-#endif
-
                 struct
                 {
                   str_t haystack;
@@ -3540,6 +3522,8 @@ int main(int argc, char** argv)
                       offset < (i64)haystack.size && overall_match;
                       ++offset)
                   {
+                    if(!(bloom & (1 << (to_upper(haystack.data[offset]) >> 2)))) { continue; }
+
                     for(search_item_t* item = first_item;
                         item;
                         item = item->next)
@@ -3602,7 +3586,7 @@ _search_end_label:
 
               i64 nsecs_search_end = get_nanoseconds();
               r64 msecs = 1e-6 * (nsecs_search_end - nsecs_search_start);
-              printf("%.3f ms for \"%.*s\"\n", msecs, PF_STR(state->search_str));
+              // printf("%.3f ms for \"%.*s\"\n", msecs, PF_STR(state->search_str));
             }
 
             dirty = true;
