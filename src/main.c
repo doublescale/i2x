@@ -3339,11 +3339,12 @@ int main(int argc, char** argv)
             else
             {
               i64 nsecs_search_start = get_nanoseconds();
-              // 24ms before change for "the quick brown fox jumps over the lazy dog" on ~/downloads/ComfyUI/output, optimized
-              // 27.5ms after change, bitset for non-excluded matches
-              // 24ms again if bitset is sparse with excluded matches
+              // 24ms before change for "the quick brown fox jumps over the lazy dog" on ~/downloads/ComfyUI/output, optimized.
+              // 27.5ms after change, bitset for non-excluded matches.
+              // 24ms again if bitset is sparse with excluded matches.
               // 20.5ms with SEARCH_MATCHED flag.
               // 19.5ms with search_tasks loop.
+              // 23ms with alternatives and flexible model search.
 
               state->filtered_img_count = 0;
               state->viewing_filtered_img_idx = 0;
@@ -3369,9 +3370,10 @@ int main(int argc, char** argv)
 
               search_item_t search_items[256];
               i32 next_search_item_idx = 0;
+              search_item_t* first_model_item = 0;
               search_item_t* first_positive_item = 0;
               search_item_t* first_negative_item = 0;
-              str_t query_model = {0};
+              // str_t query_model = {0};
               for(u8 *word_start = query.data, *word_end = query.data;
                   word_start < query_end && next_search_item_idx < array_count(search_items);
                  )
@@ -3389,63 +3391,100 @@ int main(int argc, char** argv)
                   ++word_start;
                 }
 
-                word_end = word_start;
-
-                u8* column_at = 0;
-                while(word_end < query_end && *word_end != ' ')
+                search_item_t* last_alternative = 0;
+                do
                 {
-                  if(!column_at && *word_end == ':')
+                  word_end = word_start;
+
+                  u8* column_at = 0;
+                  while(word_end < query_end && *word_end != ' ' && *word_end != '|')
                   {
-                    column_at = word_end;
+                    if(!column_at && *word_end == ':')
+                    {
+                      column_at = word_end;
+                    }
+
+                    ++word_end;
                   }
 
-                  ++word_end;
-                }
-
-                str_t pre_column = {0};
-                str_t post_column = {0};
-                if(column_at)
-                {
-                  pre_column = str_from_span(word_start, column_at);
-                  post_column = str_from_span(column_at + 1, word_end);
-                }
-
-                if(str_eq(pre_column, str("m")))
-                {
-                  query_model = post_column;
-                }
-                else if(str_eq(pre_column, str("n")))
-                {
-                  if(post_column.size)
+                  if(word_end > word_start)
                   {
                     search_item_t* item = &search_items[next_search_item_idx++];
                     zero_struct(*item);
-                    item->word = post_column;
                     if(exclude) { item->flags |= SEARCH_EXCLUDE; }
-                    item->next = first_negative_item;
-                    first_negative_item = item;
-                  }
-                }
-                else if(word_end > word_start)
-                {
-                  search_item_t* item = &search_items[next_search_item_idx++];
-                  zero_struct(*item);
-                  item->word = str_from_span(word_start, word_end);
-                  if(exclude) { item->flags |= SEARCH_EXCLUDE; }
-                  item->next = first_positive_item;
-                  first_positive_item = item;
-                }
+                    if(last_alternative)
+                    {
+                      item->word = str_from_span(word_start, word_end);
+                      last_alternative->next_alternative = item;
+                    }
+                    else
+                    {
+                      str_t pre_column = {0};
+                      str_t post_column = {0};
+                      if(column_at)
+                      {
+                        pre_column = str_from_span(word_start, column_at);
+                        post_column = str_from_span(column_at + 1, word_end);
+                      }
 
-                word_start = word_end;
+                      if(str_eq(pre_column, str("m")) && post_column.size > 0)
+                      {
+                        item->word = post_column;
+                        item->next = first_model_item;
+                        first_model_item = item;
+                      }
+                      else if(str_eq(pre_column, str("n")) && post_column.size > 0)
+                      {
+                        item->word = post_column;
+                        item->next = first_negative_item;
+                        first_negative_item = item;
+                      }
+                      else
+                      {
+                        item->word = str_from_span(word_start, word_end);
+                        item->next = first_positive_item;
+                        first_positive_item = item;
+                      }
+                    }
+                    last_alternative = item;
+                  }
+
+                  word_start = word_end;
+                  if(*word_end == '|') { ++word_start; }
+                } while(*word_end == '|');
               }
 
 #if 0
-              printf("\nwords:\n");
-              for(search_item_t* item = first_positive_item;
-                  item;
-                  item = item->next)
               {
-                printf("  \"%.*s\"\n", PF_STR(item->word));
+                struct
+                {
+                  char* name;
+                  search_item_t* first_item;
+                } searches[] = {
+                  { "model", first_model_item },
+                  { "positive", first_positive_item },
+                  { "negative", first_negative_item },
+                };
+                for_count(i, array_count(searches))
+                {
+                  if(searches[i].first_item)
+                  {
+                    printf("\n%s:\n", searches[i].name);
+                    for(search_item_t* item = searches[i].first_item;
+                        item;
+                        item = item->next)
+                    {
+                      printf("  %s\"%.*s\"", item->flags & SEARCH_EXCLUDE ? "EXCLUDE " : "", PF_STR(item->word));
+                      for(search_item_t* alt = item->next_alternative;
+                          alt;
+                          alt = alt->next_alternative)
+                      {
+                        printf(" | \"%.*s\"", PF_STR(alt->word));
+                      }
+                      printf("\n");
+                    }
+                  }
+                }
               }
 #endif
 
@@ -3454,6 +3493,7 @@ int main(int argc, char** argv)
                 b32 overall_match = true;
                 img_entry_t* img = &state->img_entries[img_idx];
 
+#if 0
                 if(query_model.size > 0)
                 {
                   b32 model_matches = false;
@@ -3470,12 +3510,14 @@ int main(int argc, char** argv)
 
                   overall_match = overall_match && model_matches;
                 }
+#endif
 
                 struct
                 {
                   str_t haystack;
                   search_item_t* first_item;
                 } search_tasks[] = {
+                  { img->model, first_model_item },
                   { img->positive_prompt, first_positive_item },
                   { img->negative_prompt, first_negative_item },
                 };
@@ -3502,29 +3544,38 @@ int main(int argc, char** argv)
                         item;
                         item = item->next)
                     {
-                      str_t query_word = item->word;
-
-                      if(!(item->flags & SEARCH_MATCHED) &&
-                          haystack.size >= query_word.size + offset)
+                      if(!(item->flags & SEARCH_MATCHED))
                       {
-                        // TODO: If multiple query word prefixes match, pick the longest one eagerly.
-                        str_t prompt_substr = { haystack.data + offset, query_word.size };
-                        if(str_eq_ignoring_case(prompt_substr, query_word))
+                        for(search_item_t* alternative = item;
+                            alternative;
+                            alternative = alternative->next_alternative)
                         {
-                          // TODO: Think about whether to consider already-matched words
-                          //       earlier in the prompt for exclusion.
-                          if(item->flags & SEARCH_EXCLUDE)
+                          str_t query_word = alternative->word;
+
+                          if(haystack.size >= query_word.size + offset)
                           {
-                            overall_match = false;
+                            // TODO: If multiple query word prefixes match, pick the longest one eagerly.
+                            str_t prompt_substr = { haystack.data + offset, query_word.size };
+                            if(str_eq_ignoring_case(prompt_substr, query_word))
+                            {
+                              // TODO: Think about whether to consider already-matched words
+                              //       earlier in the prompt for exclusion.
+                              if(item->flags & SEARCH_EXCLUDE)
+                              {
+                                overall_match = false;
+                              }
+                              else
+                              {
+                                item->flags |= SEARCH_MATCHED;
+                              }
+                              goto _search_end_label;
+                            }
                           }
-                          else
-                          {
-                            item->flags |= SEARCH_MATCHED;
-                          }
-                          break;
                         }
                       }
                     }
+_search_end_label:
+                    offset = offset;  // Dummy expression to avoid compiler warning.
                   }
 
                   for(search_item_t* item = first_item;
