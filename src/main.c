@@ -405,6 +405,7 @@ internal b32 is_seeking_word_separator(u8 c)
     || c == '\n'
     || c == ':'
     || c == '/'
+    || c == '\\'
     || c == '|'
     ;
 }
@@ -415,6 +416,7 @@ internal b32 is_linewrap_word_separator(u8 c)
     || c == '-'
     || c == ':'
     || c == '/'
+    || c == '\\'
     || c == '|'
     ;
 }
@@ -3336,6 +3338,13 @@ int main(int argc, char** argv)
             }
             else
             {
+              i64 nsecs_search_start = get_nanoseconds();
+              // 24ms before change for "the quick brown fox jumps over the lazy dog" on ~/downloads/ComfyUI/output, optimized
+              // 27.5ms after change, bitset for non-excluded matches
+              // 24ms again if bitset is sparse with excluded matches
+              // 20.5ms with SEARCH_MATCHED flag.
+              // 19.5ms with search_tasks loop.
+
               state->filtered_img_count = 0;
               state->viewing_filtered_img_idx = 0;
 
@@ -3358,16 +3367,13 @@ int main(int argc, char** argv)
                 struct search_flags_t* next_alternative;
               } search_item_t;
 
-              i32 query_positive_word_count = 0;
-              i32 query_negative_word_count = 0;
-              str_t query_positive_words[256];
-              str_t query_negative_words[256];
-              // TODO: Turn a (str_t, b32) pair into a search-item structure?
-              BITSET32(exclude_positive_words, array_count(query_positive_words)) = {0};
-              BITSET32(exclude_negative_words, array_count(query_negative_words)) = {0};
+              search_item_t search_items[256];
+              i32 next_search_item_idx = 0;
+              search_item_t* first_positive_item = 0;
+              search_item_t* first_negative_item = 0;
               str_t query_model = {0};
               for(u8 *word_start = query.data, *word_end = query.data;
-                  word_start < query_end && query_positive_word_count < array_count(query_positive_words);
+                  word_start < query_end && next_search_item_idx < array_count(search_items);
                  )
               {
                 // TODO: Consider "quoted strings" as one word.  Or maybe use {braces}?
@@ -3386,9 +3392,7 @@ int main(int argc, char** argv)
                 word_end = word_start;
 
                 u8* column_at = 0;
-                while(word_end < query_end &&
-                    !(*word_end == ' ' ||
-                      *word_end == ','))
+                while(word_end < query_end && *word_end != ' ')
                 {
                   if(!column_at && *word_end == ':')
                   {
@@ -3414,22 +3418,22 @@ int main(int argc, char** argv)
                 {
                   if(post_column.size)
                   {
-                    if(query_negative_word_count < array_count(query_negative_words))
-                    {
-                      if(exclude) { bitset32_set(exclude_negative_words, query_negative_word_count); }
-                      query_negative_words[query_negative_word_count] = post_column;
-                      ++query_negative_word_count;
-                    }
+                    search_item_t* item = &search_items[next_search_item_idx++];
+                    zero_struct(*item);
+                    item->word = post_column;
+                    if(exclude) { item->flags |= SEARCH_EXCLUDE; }
+                    item->next = first_negative_item;
+                    first_negative_item = item;
                   }
                 }
                 else if(word_end > word_start)
                 {
-                  if(query_positive_word_count < array_count(query_positive_words))
-                  {
-                    if(exclude) { bitset32_set(exclude_positive_words, query_positive_word_count); }
-                    query_positive_words[query_positive_word_count] = str_from_span(word_start, word_end);
-                    ++query_positive_word_count;
-                  }
+                  search_item_t* item = &search_items[next_search_item_idx++];
+                  zero_struct(*item);
+                  item->word = str_from_span(word_start, word_end);
+                  if(exclude) { item->flags |= SEARCH_EXCLUDE; }
+                  item->next = first_positive_item;
+                  first_positive_item = item;
                 }
 
                 word_start = word_end;
@@ -3437,11 +3441,11 @@ int main(int argc, char** argv)
 
 #if 0
               printf("\nwords:\n");
-              for(i32 word_idx = 0;
-                  word_idx < query_positive_word_count;
-                  ++word_idx)
+              for(search_item_t* item = first_positive_item;
+                  item;
+                  item = item->next)
               {
-                printf("  \"%.*s\"\n", PF_STR(query_positive_words[word_idx]));
+                printf("  \"%.*s\"\n", PF_STR(item->word));
               }
 #endif
 
@@ -3467,87 +3471,73 @@ int main(int argc, char** argv)
                   overall_match = overall_match && model_matches;
                 }
 
-                BITSET32(positive_words_matched, array_count(query_positive_words)) = {0};
-                BITSET32(negative_words_matched, array_count(query_negative_words)) = {0};
-
-                for(i64 offset = 0;
-                    offset < (i64)img->positive_prompt.size && query_positive_word_count > 0 && overall_match;
-                    ++offset)
+                struct
                 {
-                  for(i32 word_idx = 0;
-                      word_idx < query_positive_word_count;
-                      ++word_idx)
-                  {
-                    str_t query_positive_word = query_positive_words[word_idx];
+                  str_t haystack;
+                  search_item_t* first_item;
+                } search_tasks[] = {
+                  { img->positive_prompt, first_positive_item },
+                  { img->negative_prompt, first_negative_item },
+                };
+                for(i32 search_task_idx = 0;
+                    search_task_idx < array_count(search_tasks);
+                    ++search_task_idx)
+                {
+                  str_t haystack = search_tasks[search_task_idx].haystack;
+                  search_item_t* first_item = search_tasks[search_task_idx].first_item;
+                  if(!first_item) { continue; }
 
-                    if(!bitset32_get(positive_words_matched, word_idx) &&
-                        img->positive_prompt.size >= query_positive_word.size + offset)
+                  for(search_item_t* item = first_item;
+                      item;
+                      item = item->next)
+                  {
+                    item->flags &= ~SEARCH_MATCHED;
+                  }
+
+                  for(i64 offset = 0;
+                      offset < (i64)haystack.size && overall_match;
+                      ++offset)
+                  {
+                    for(search_item_t* item = first_item;
+                        item;
+                        item = item->next)
                     {
-                      // TODO: If multiple query word prefixes match, pick the longest one eagerly.
-                      str_t prompt_substr = { img->positive_prompt.data + offset, query_positive_word.size };
-                      if(str_eq_ignoring_case(prompt_substr, query_positive_word))
+                      str_t query_word = item->word;
+
+                      if(!(item->flags & SEARCH_MATCHED) &&
+                          haystack.size >= query_word.size + offset)
                       {
-                        // TODO: Think about whether to consider already-matched words
-                        //       earlier in the prompt for exclusion.
-                        if(bitset32_get(exclude_positive_words, word_idx))
+                        // TODO: If multiple query word prefixes match, pick the longest one eagerly.
+                        str_t prompt_substr = { haystack.data + offset, query_word.size };
+                        if(str_eq_ignoring_case(prompt_substr, query_word))
                         {
-                          overall_match = false;
+                          // TODO: Think about whether to consider already-matched words
+                          //       earlier in the prompt for exclusion.
+                          if(item->flags & SEARCH_EXCLUDE)
+                          {
+                            overall_match = false;
+                          }
+                          else
+                          {
+                            item->flags |= SEARCH_MATCHED;
+                          }
+                          break;
                         }
-                        else
-                        {
-                          bitset32_set(positive_words_matched, word_idx);
-                        }
-                        break;
                       }
+                    }
+                  }
+
+                  for(search_item_t* item = first_item;
+                      item;
+                      item = item->next)
+                  {
+                    if(!(item->flags & SEARCH_EXCLUDE))
+                    {
+                      overall_match = overall_match && (item->flags & SEARCH_MATCHED);
                     }
                   }
                 }
 
-                for(i64 offset = 0;
-                    offset < (i64)img->negative_prompt.size && query_negative_word_count > 0 && overall_match;
-                    ++offset)
-                {
-                  for(i32 word_idx = 0;
-                      word_idx < query_negative_word_count;
-                      ++word_idx)
-                  {
-                    str_t query_negative_word = query_negative_words[word_idx];
-
-                    if(!bitset32_get(negative_words_matched, word_idx) &&
-                        img->negative_prompt.size >= query_negative_word.size + offset)
-                    {
-                      // TODO: If multiple query word prefixes match, pick the longest one eagerly.
-                      str_t prompt_substr = { img->negative_prompt.data + offset, query_negative_word.size };
-                      if(str_eq_ignoring_case(prompt_substr, query_negative_word))
-                      {
-                        if(bitset32_get(exclude_negative_words, word_idx))
-                        {
-                          overall_match = false;
-                        }
-                        else
-                        {
-                          bitset32_set(negative_words_matched, word_idx);
-                        }
-                        break;
-                      }
-                    }
-                  }
-                }
-
-                for_count(word_idx, query_positive_word_count)
-                {
-                  if(!bitset32_get(exclude_positive_words, word_idx))
-                  {
-                    overall_match = overall_match && bitset32_get(positive_words_matched, word_idx);
-                  }
-                }
-                for_count(word_idx, query_negative_word_count)
-                {
-                  if(!bitset32_get(exclude_negative_words, word_idx))
-                  {
-                    overall_match = overall_match && bitset32_get(negative_words_matched, word_idx);
-                  }
-                }
                 if(overall_match)
                 {
                   if(state->img_idx_viewed_before_search >= img_idx)
@@ -3558,6 +3548,10 @@ int main(int argc, char** argv)
                   state->filtered_img_idxs[state->filtered_img_count++] = img_idx;
                 }
               }
+
+              i64 nsecs_search_end = get_nanoseconds();
+              r64 msecs = 1e-6 * (nsecs_search_end - nsecs_search_start);
+              printf("%.3f ms for \"%.*s\"\n", msecs, PF_STR(state->search_str));
             }
 
             dirty = true;
@@ -4045,7 +4039,7 @@ int main(int argc, char** argv)
               str_t tmp_str = { tmp };
 
 #define SHOW_LABEL_VALUE(label, value) \
-              if(label[0] == 0 || value.size > 0) \
+              if(value.size > 0) \
               { \
                 y -= fs; \
                 x = x0; \
@@ -4058,14 +4052,14 @@ int main(int argc, char** argv)
               tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
                   state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->total_img_count);
               SHOW_LABEL_VALUE("", tmp_str);
-              SHOW_LABEL_VALUE("", str(""));
+              y -= fs;
               SHOW_LABEL_VALUE("File: ", img->path);
               if(img->w || img->h)
               {
                 tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%dx%d", img->w, img->h);
               }
               SHOW_LABEL_VALUE("Resolution: ", tmp_str);
-              SHOW_LABEL_VALUE("", str(""));
+              y -= fs;
               SHOW_LABEL_VALUE("Model: ", img->model);
               SHOW_LABEL_VALUE("Sampler: ", img->sampler);
               SHOW_LABEL_VALUE("Sampling steps: ", img->sampling_steps);
