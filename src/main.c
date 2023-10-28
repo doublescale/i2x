@@ -262,11 +262,11 @@ internal void xi_update_device_info(state_t* state, i32 class_count, XIAnyClassI
       DEBUG_LOG("      increment: %f\n", scroll_class->increment);
       DEBUG_LOG("      flags: %d\n", scroll_class->flags);
 
-      if(scroll_class->number == 2)
+      if(scroll_class->number == 2 && scroll_class->increment >= 1e-6f)
       {
         state->xi_scroll_x_increment = scroll_class->increment;
       }
-      if(scroll_class->number == 3)
+      if(scroll_class->number == 3 && scroll_class->increment >= 1e-6f)
       {
         state->xi_scroll_y_increment = scroll_class->increment;
       }
@@ -1326,12 +1326,13 @@ enum
 };
 typedef u32 draw_str_flags_t;
 
-internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor, r32 y_scale, r32 start_x, r32 y, str_t str)
+internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
+    r32 x_scale_factor, r32 y_scale, r32 start_x, r32 y, str_t str, u32* last_codepoint)
 {
   r32 x = start_x;
   b32 measure_only = (flags & DRAW_STR_MEASURE_ONLY);
 
-  if(state->font_texture_id)
+  if(state->font_texture_id && str.size > 0)
   {
     if(!measure_only)
     {
@@ -1343,7 +1344,6 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
     r32 x_scale = x_scale_factor * y_scale;
 
     u8* str_end = str.data + str.size;
-    u32 last_codepoint = 0;
 
     for(u8* str_ptr = str.data;
         str_ptr < str_end;
@@ -1356,9 +1356,9 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
       i32 x_advance, left_side_bearing;
       stbtt_GetCodepointHMetrics(&state->font, codepoint, &x_advance, &left_side_bearing);
 
-      if(last_codepoint)
+      if(*last_codepoint)
       {
-        x += x_scale * stbtt_GetCodepointKernAdvance(&state->font, last_codepoint, codepoint) * state->stb_font_scale / state->font_char_w;
+        x += x_scale * stbtt_GetCodepointKernAdvance(&state->font, *last_codepoint, codepoint) * state->stb_font_scale / state->font_char_w;
       }
 
       if(!measure_only)
@@ -1431,84 +1431,142 @@ internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 x_scale_factor
       }
 
       x += x_scale * x_advance * state->stb_font_scale / state->font_char_w;
-      last_codepoint = codepoint;
+      *last_codepoint = codepoint;
     }
   }
 
   return x - start_x;
 }
 
-internal void draw_wrapped_text(state_t* state,
-    draw_str_flags_t draw_str_flags, r32 fs, r32 x0, r32 x1, r32* x, r32* y, str_t text)
+internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 y_scale, r32 start_x, r32 y, str_t str)
 {
-  u8* text_end = text.data + text.size;
-  r32 max_word_width = x1 - x0;
+  u32 last_codepoint = 0;
+  return draw_str_advanced(state, flags, 1, y_scale, start_x, y, str, &last_codepoint);
+}
 
-  for(u8* word_start = text.data;
-      word_start < text_end; // && fs * state->font_ascent + *y >= 0;
-     )
+typedef struct
+{
+  state_t* state;
+  r32 fs;
+  r32 x0;
+  r32 x1;
+  str_t remaining_text;
+  i32 line_idx;
+
+  r32 line_end_x;
+  b32 finished;
+} wrapped_text_ctx_t;
+
+internal wrapped_text_ctx_t begin_wrapped_text(state_t* state, r32 fs, r32 x0, r32 x1, str_t text)
+{
+  wrapped_text_ctx_t result = {0};
+  result.state = state;
+  result.fs = fs;
+  result.x0 = x0;
+  result.x1 = x1;
+  result.remaining_text = text;
+
+  return result;
+}
+
+internal str_t wrap_next_line(wrapped_text_ctx_t* ctx, r32 x)
+{
+  u8* text_end = ctx->remaining_text.data + ctx->remaining_text.size;
+  str_t result = { text_end, 0 };
+
+  if(!ctx->finished)
   {
-    b32 end_line = false;
-    u8* word_end = word_start;
-    r32 word_width = 0;
+    b32 first_word_can_get_split = (ctx->line_idx != 0 || x <= ctx->x0);
+    u32 last_codepoint = 0;
+    u8* line_start = ctx->remaining_text.data;
+    u8* line_end = line_start;
+    u8* remainder_start = line_start;
+    u8* chr_end = line_start;
 
-    while(word_end < text_end)
+    ctx->line_end_x = x;
+
+    for(;;)
     {
-      u8* prefix_end = word_end + 1;
-      if(!is_ascii(*word_end))
+      if(chr_end >= text_end)
       {
-        while(prefix_end < text_end && is_utf8_continuation_byte(*prefix_end))
+        line_end = text_end;
+        remainder_start = text_end;
+        ctx->line_end_x = x;
+        ctx->finished = true;
+        break;
+      }
+
+      u8* chr_start = chr_end;
+      ++chr_end;
+      while(chr_end < text_end && is_utf8_continuation_byte(*chr_end))
+      {
+        ++chr_end;
+      }
+
+      if(*chr_start == '\n')
+      {
+        line_end = chr_start;
+        remainder_start = chr_start + 1;
+        ctx->line_end_x = x;
+        break;
+      }
+      else if(*chr_start == ' ')
+      {
+        line_end = chr_start;
+        remainder_start = chr_start + 1;
+        ctx->line_end_x = x;
+      }
+
+      x += draw_str_advanced(ctx->state, DRAW_STR_MEASURE_ONLY, 1, ctx->fs, 0, 0,
+          str_from_span(chr_start, chr_end), &last_codepoint);
+
+      if(x > ctx->x1)
+      {
+        if(first_word_can_get_split && remainder_start == line_start)
         {
-          ++prefix_end;
+          line_end = chr_start > line_start ? chr_start : chr_end;
+          remainder_start = line_end;
+          ctx->line_end_x = x;
         }
-      }
-      str_t prefix = str_from_span(word_start, prefix_end);
-      r32 prefix_width = draw_str(state, DRAW_STR_MEASURE_ONLY, 1, fs, 0, 0, prefix);
-      if(word_end > word_start && prefix_width > max_word_width)
-      {
-        break;
-      }
-      word_end = prefix_end;
-
-      if(word_end[-1] == '\n')
-      {
-        end_line = true;
-        break;
-      }
-      else if(word_end[-1] == ' ')
-      {
-        break;
-      }
-      else if(is_linewrap_word_separator(word_end[-1]))
-      {
-        word_width = prefix_width;
         break;
       }
 
-      word_width = prefix_width;
-    }
-
-    if(*x + word_width > x1)
-    {
-      *x = x0;
-      *y -= fs;
-      while(word_start < text_end && *word_start == ' ')
+      if(chr_start > line_start && is_linewrap_word_separator(*chr_start))
       {
-        ++word_start;
+        line_end = chr_start + 1;
+        remainder_start = chr_start + 1;
+        ctx->line_end_x = x;
       }
     }
 
-    str_t word = str_from_span(word_start, word_end);
-    if(word_end[-1] == '\n') { --word.size; }
-    *x += draw_str(state, draw_str_flags, 1, fs, *x, *y, word);
-    word_start = word_end;
-
-    if(end_line)
-    {
-      *x = x0;
-      *y -= fs;
-    }
+    result = str_from_span(line_start, line_end);
+    ctx->remaining_text = str_from_span(remainder_start, text_end);
   }
+
+  return result;
+}
+
+internal b32 finish_wrapped_line(wrapped_text_ctx_t* ctx, r32* x, r32* y)
+{
+  if(!ctx->finished)
+  {
+    *x = ctx->x0;
+    *y -= ctx->fs;
+    ++ctx->line_idx;
+  }
+
+  return !ctx->finished;
+}
+
+internal void draw_wrapped_text(state_t* state,
+    r32 fs, r32 x0, r32 x1, r32* x, r32* y, str_t text)
+{
+  wrapped_text_ctx_t wrap_ctx = begin_wrapped_text(state, fs, x0, x1, text);
+  do
+  {
+    str_t line = wrap_next_line(&wrap_ctx, *x);
+    *x += draw_str(state, 0, fs, *x, *y, line);
+  } while(finish_wrapped_line(&wrap_ctx, x, y));
 }
 
 int main(int argc, char** argv)
@@ -1924,6 +1982,14 @@ int main(int argc, char** argv)
         state->show_info = 2;
         state->search_str_capacity = 1024;
         state->search_str.data = malloc_array(state->search_str_capacity, u8);
+#if 0
+        {
+          // SEARCH STRING DEBUG
+          str_t str = str("one two-three\nfour");
+          copy_bytes(str.size, str.data, state->search_str.data);
+          state->search_str.size += str.size;
+        }
+#endif
         state->info_panel_width = 500;
 
         state->xi_scroll_x_increment = 120.0f;
@@ -2031,6 +2097,12 @@ int main(int argc, char** argv)
 
             if(!XPending(display)) { break; }
 
+            XEvent event;
+            XNextEvent(display, &event);
+
+            // This is needed for XIM to handle combining keys, like ` + a = à.
+            if(XFilterEvent(&event, None)) { continue; }
+
             r32 mouse_x = prev_mouse_x;
             r32 mouse_y = prev_mouse_y;
             r32 mouse_delta_x = 0;
@@ -2041,12 +2113,6 @@ int main(int argc, char** argv)
             i32 mouse_btn_went_down = 0;
             i32 mouse_btn_went_up = 0;
             r32 thumbnail_h = get_thumbnail_size(state);
-
-            XEvent event;
-            XNextEvent(display, &event);
-
-            // This is needed for XIM to handle combining keys, like ` + a = à.
-            if(XFilterEvent(&event, None)) { continue; }
 
             if(event.xcookie.type == GenericEvent && event.xcookie.extension == xi_opcode)
             {
@@ -2145,20 +2211,20 @@ int main(int argc, char** argv)
                           if(bit_idx == 2)
                           {
                             r32* last = &state->xi_last_scroll_x_valuator;
-                            r32 delta = *value_ptr - *last;
-                            if(absolute(delta < 1e6f) && inside_window)
+                            r32 delta = (*value_ptr - *last) / state->xi_scroll_x_increment;
+                            if(absolute(delta < 10.0f) && inside_window)
                             {
-                              scroll_x += delta / state->xi_scroll_x_increment;
+                              scroll_x += delta;
                             }
                             *last = *value_ptr;
                           }
                           else if(bit_idx == 3)
                           {
                             r32* last = &state->xi_last_scroll_y_valuator;
-                            r32 delta = *value_ptr - *last;
-                            if(absolute(delta < 1e6f) && inside_window)
+                            r32 delta = (*value_ptr - *last) / state->xi_scroll_y_increment;
+                            if(absolute(delta < 10.0f) && inside_window)
                             {
-                              scroll_y -= delta / state->xi_scroll_y_increment;
+                              scroll_y -= delta;
                             }
                             *last = *value_ptr;
                           }
@@ -2417,7 +2483,7 @@ int main(int argc, char** argv)
                       else if(!ctrl_held)
                       {
                         Status xmb_lookup_status = 0;
-                        u8 entered_buffer[256];
+                        u8 entered_buffer[64];
                         str_t entered_str = {entered_buffer};
                         entered_str.size = Xutf8LookupString(x_input_context, &event.xkey,
                         // entered_str.size = XmbLookupString(x_input_context, &event.xkey,
@@ -4014,6 +4080,7 @@ _search_end_label:
 
             r32 text_gray = bright_bg ? 0 : 1;
             r32 label_gray = bright_bg ? 0.3f : 0.7f;
+            r32 highlight_gray = bright_bg ? 0.7f : 0.3f;
 
             if(state->show_info == 1)
             {
@@ -4024,7 +4091,7 @@ _search_end_label:
               r32 x = image_region_x0 + 0.2f * fs;
               r32 y = fs * (state->font_descent + 0.1f);
               str_t str = img->positive_prompt;
-              draw_str(state, 0, 1, fs, x, y, str);
+              draw_str(state, 0, fs, x, y, str);
             }
             if(state->show_info == 2)
             {
@@ -4064,9 +4131,9 @@ _search_end_label:
               y -= fs;
               x = x0;
               glColor3f(label_gray, label_gray, label_gray);
-              x += draw_str(state, 0, 1, fs, x, y, str("Text wrap test: "));
+              x += draw_str(state, 0, fs, x, y, str("Text wrap test: "));
               glColor3f(text_gray, text_gray, text_gray);
-              draw_wrapped_text(state, 0, fs, x_indented, x1, &x, &y,
+              draw_wrapped_text(state, fs, x_indented, x1, &x, &y,
                   str("\n ble afawpeij afweo a fafw pwfW\npfojawpovijpvij asdiopfj\n afjiop awiof pioawefj pioawjef\n"));
 #endif
 
@@ -4079,9 +4146,9 @@ _search_end_label:
                 y -= fs; \
                 x = x0; \
                 glColor3f(label_gray, label_gray, label_gray); \
-                x += draw_str(state, 0, 1, fs, x, y, str(label)); \
+                x += draw_str(state, 0, fs, x, y, str(label)); \
                 glColor3f(text_gray, text_gray, text_gray); \
-                draw_wrapped_text(state, 0, fs, x_indented, x1, &x, &y, value); \
+                draw_wrapped_text(state, fs, x_indented, x1, &x, &y, value); \
               }
 
               tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
@@ -4108,61 +4175,123 @@ _search_end_label:
 
             if(state->searching)
             {
+              str_t text = state->search_str;
+              u8* selection_min = text.data + min(state->selection_start, state->selection_end);
+              u8* selection_max = text.data + max(state->selection_start, state->selection_end);
+
               glScissor(0, 0, state->win_w, state->win_h);
               r32 x0 = image_region_x0 + 0.5f * fs;
               r32 x1 = state->win_w - 0.6f * fs;
               r32 y1 = state->win_h - 1.5f * fs;
               r32 x_indented = x0 + fs;
-              for(i32 pass = 1;
-                  pass <= 2;
-                  ++pass)
+              str_t label = str("Search: ");
+
+              // Background rectangle.
               {
-                draw_str_flags_t flags = (pass == 1) ? DRAW_STR_MEASURE_ONLY : 0;
+                r32 x = x0;
+                r32 y = y1;
+
+                x += draw_str(state, DRAW_STR_MEASURE_ONLY, fs, x, y, label);
+                wrapped_text_ctx_t wrap_ctx = begin_wrapped_text(state, fs, x_indented, x1, text);
+                do
+                {
+                  wrap_next_line(&wrap_ctx, x);
+                } while(finish_wrapped_line(&wrap_ctx, &x, &y));
+
+                r32 x_max = (wrap_ctx.line_idx == 0) ? wrap_ctx.line_end_x : x1;
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_BLEND);
+                glColor3f(1 - text_gray, 1 - text_gray, 1 - text_gray);
+                glBegin(GL_QUADS);
+                glVertex2f(x0 - 0.3f * fs, y - fs * (state->font_descent + 0.2f));
+                glVertex2f(x_max + 0.3f * fs, y - fs * (state->font_descent + 0.2f));
+                glVertex2f(x_max + 0.3f * fs, y1 + fs * (state->font_ascent + 0.2f));
+                glVertex2f(x0 - 0.3f * fs, y1 + fs * (state->font_ascent + 0.2f));
+                glEnd();
+              }
+
+              {
                 r32 x = x0;
                 r32 y = y1;
 
                 glColor3f(label_gray, label_gray, label_gray);
-                x += draw_str(state, flags, 1, fs, x, y, str("Search: "));
+                x += draw_str(state, 0, fs, x, y, label);
 
-                i64 selection_min = min(state->selection_start, state->selection_end);
-                i64 selection_max = max(state->selection_start, state->selection_end);
-                str_t str_before_selection = { state->search_str.data, selection_min };
-                str_t str_in_selection = str_from_span(state->search_str.data + selection_min,
-                    state->search_str.data + selection_max);
-                str_t str_after_selection = str_from_span(state->search_str.data + selection_max,
-                    state->search_str.data + state->search_str.size);
+                wrapped_text_ctx_t wrap_ctx = begin_wrapped_text(state, fs, x_indented, x1, text);
 
                 glColor3f(text_gray, text_gray, text_gray);
-                draw_wrapped_text(state, flags, fs, x_indented, x1, &x, &y, str_before_selection);
-                if(state->selection_end < state->selection_start)
+                b32 cursor_found = false;
+                r32 cursor_x = x;
+                r32 cursor_y = y;
+                b32 selection_range_started = false;
+                do
                 {
-                  x += draw_str(state, flags, 1, fs, x, y, str("|"));
-                }
-                glColor3f(0, 1, 0);
-                draw_wrapped_text(state, flags, fs, x_indented, x1, &x, &y, str_in_selection);
-                glColor3f(text_gray, text_gray, text_gray);
-                if(state->selection_end >= state->selection_start)
-                {
-                  x += draw_str(state, flags, 1, fs, x, y, str("|"));
-                }
-                draw_wrapped_text(state, flags, fs, x_indented, x1, &x, &y, str_after_selection);
+                  str_t line = wrap_next_line(&wrap_ctx, x);
+                  u8* line_end = line.data + line.size;
 
-                if(pass == 1)
-                {
-                  // Background rectangle.
-                  r32 x_max = (y == y1) ? x : x1;
-                  glColor3f(1 - text_gray, 1 - text_gray, 1 - text_gray);
-                  glBindTexture(GL_TEXTURE_2D, 0);
-                  glDisable(GL_BLEND);
-                  glBegin(GL_QUADS);
-                  glVertex2f(x0 - 0.3f * fs, y - fs * (state->font_descent + 0.2f));
-                  glVertex2f(x_max + 0.3f * fs, y - fs * (state->font_descent + 0.2f));
-                  glVertex2f(x_max + 0.3f * fs, y1 + fs * (state->font_ascent + 0.2f));
-                  glVertex2f(x0 - 0.3f * fs, y1 + fs * (state->font_ascent + 0.2f));
-                  glEnd();
+                  u8* selection_min_in_line = clamp(line.data, line_end, selection_min);
+                  u8* selection_max_in_line = clamp(line.data, line_end, selection_max);
 
-                  glColor3f(text_gray, text_gray, text_gray);
-                }
+                  str_t span_before_selection = str_from_span(line.data, selection_min_in_line);
+                  str_t span_in_selection = str_from_span(selection_min_in_line, selection_max_in_line);
+                  str_t span_after_selection = str_from_span(selection_max_in_line, line_end);
+
+                  u32 last_codepoint = 0;
+                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_before_selection, &last_codepoint);
+
+                  r32 highlight_x0 = x;
+                  r32 highlight_x1 = x;
+                  if(selection_min < wrap_ctx.remaining_text.data && selection_max > line_end)
+                  {
+                    highlight_x1 = wrap_ctx.line_end_x + 0.5f * fs;
+                  }
+                  else
+                  {
+                    u32 scratch_codepoint = last_codepoint;
+                    highlight_x1 += draw_str_advanced(state, DRAW_STR_MEASURE_ONLY,
+                        1, fs, x, y, span_in_selection, &scratch_codepoint);
+                  }
+                  if(highlight_x0 != highlight_x1)
+                  {
+                    glColor3f(highlight_gray, highlight_gray, highlight_gray);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    glDisable(GL_BLEND);
+                    glBegin(GL_QUADS);
+                    glVertex2f(highlight_x0, y - fs * state->font_descent);
+                    glVertex2f(highlight_x1, y - fs * state->font_descent);
+                    glVertex2f(highlight_x1, y + fs * state->font_ascent);
+                    glVertex2f(highlight_x0, y + fs * state->font_ascent);
+                    glEnd();
+                    glColor3f(text_gray, text_gray, text_gray);
+                  }
+                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_in_selection, &last_codepoint);
+
+                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_after_selection, &last_codepoint);
+
+                  if(!cursor_found && text.data + state->selection_end <= line_end)
+                  {
+                    if(state->selection_end < state->selection_start)
+                    {
+                      cursor_x = highlight_x0;
+                    }
+                    else
+                    {
+                      cursor_x = highlight_x1;
+                    }
+                    cursor_y = y;
+                    cursor_found = true;
+                  }
+                } while(finish_wrapped_line(&wrap_ctx, &x, &y));
+
+                // Draw cursor.
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_BLEND);
+                glBegin(GL_QUADS);
+                glVertex2f(cursor_x - 0.5f, cursor_y - fs * state->font_descent);
+                glVertex2f(cursor_x + 0.5f, cursor_y - fs * state->font_descent);
+                glVertex2f(cursor_x + 0.5f, cursor_y + fs * state->font_ascent);
+                glVertex2f(cursor_x - 0.5f, cursor_y + fs * state->font_ascent);
+                glEnd();
               }
             }
 
