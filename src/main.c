@@ -2423,6 +2423,7 @@ int main(int argc, char** argv)
                         for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
                         state->filtered_img_count = state->total_img_count;
                         state->viewing_filtered_img_idx = state->img_idx_viewed_before_search;
+                        scroll_thumbnail_into_view = true;
                       }
                       else if(keysym == XK_Return)
                       {
@@ -2446,6 +2447,7 @@ int main(int argc, char** argv)
                         {
                           str_replace_selection(0, &state->search_str,
                               &state->selection_start, &state->selection_end, str(""));
+                          search_changed = true;
                         }
                         XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
                       }
@@ -3012,6 +3014,7 @@ int main(int argc, char** argv)
                       str_replace_selection(array_count(state->search_str_buffer),
                           &state->search_str, &state->selection_start, &state->selection_end,
                           str_from_start_and_size(data, item_count));
+                      search_changed = true;
                     }
                     else
                     {
