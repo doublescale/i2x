@@ -276,6 +276,8 @@ typedef struct
 } str_t;
 #define str(x) ((str_t){ (u8*)(x), sizeof(x) - 1 })
 
+#define STR_SIZE(x) ((x).size)
+
 internal str_t wrap_str(char* z)
 {
   str_t result = {0};
@@ -291,6 +293,11 @@ internal str_t wrap_str(char* z)
 internal str_t str_from_span(u8* start, u8* end)
 {
   return (str_t){ start, end > start ? end - start : 0 };
+}
+
+internal str_t str_from_start_and_size(u8* start, size_t size)
+{
+  return (str_t){ start, size };
 }
 
 internal b32 str_eq(str_t a, str_t b)

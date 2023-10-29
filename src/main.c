@@ -179,6 +179,9 @@ typedef struct
 
   i32 viewing_filtered_img_idx;
 
+  u8 clipboard_str_buffer[64 * 1024];
+  str_t clipboard_str;
+
   b32 searching;
   u8 search_str_buffer[64 * 1024];
   str_t search_str;
@@ -476,7 +479,7 @@ internal b32 str_replace_selection(i64 str_capacity, str_t* str,
   i64 selection_length = selection_max - selection_min;
   i64 str_length_change = new_contents.size - selection_length;
 
-  if(str->size + str_length_change <= str_capacity)
+  if(str_length_change < 0 || str->size + str_length_change <= str_capacity)
   {
     if(str_length_change > 0)
     {
@@ -1967,7 +1970,6 @@ int main(int argc, char** argv)
 
         b32 quitting = false;
         i32 last_viewing_img_idx = -1;
-        str_t clipboard_str = {0};
         b32 border_sampling = true;
         state->linear_sampling = true;
         state->alpha_blend = true;
@@ -2429,9 +2431,27 @@ int main(int argc, char** argv)
                       else if(ctrl_held && keysym == 'a')
                       {
                         str_t* str = &state->search_str;
-
                         state->selection_start = 0;
                         state->selection_end = str->size;
+                      }
+                      else if(ctrl_held && (keysym == 'c' || keysym == 'x'))
+                      {
+                        u8* selection_min = state->search_str.data + min(state->selection_start, state->selection_end);
+                        u8* selection_max = state->search_str.data + max(state->selection_start, state->selection_end);
+                        str_t str = str_from_span(selection_min, selection_max);
+                        state->clipboard_str.data = state->clipboard_str_buffer;
+                        state->clipboard_str.size = min(sizeof(state->clipboard_str_buffer), STR_SIZE(str));
+                        copy_bytes(state->clipboard_str.size, str.data, state->clipboard_str_buffer);
+                        if(keysym == 'x')
+                        {
+                          str_replace_selection(0, &state->search_str,
+                              &state->selection_start, &state->selection_end, str(""));
+                        }
+                        XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
+                      }
+                      else if(ctrl_held && keysym == 'v')
+                      {
+                        XConvertSelection(display, atom_clipboard, atom_utf8, atom_mycliptarget, window, CurrentTime);
                       }
                       else if(keysym == XK_BackSpace)
                       {
@@ -2440,7 +2460,7 @@ int main(int argc, char** argv)
                           state->selection_start = seek_left_in_str(
                               state->search_str, ctrl_held, state->selection_start);
                         }
-                        str_replace_selection(sizeof(state->search_str_buffer), &state->search_str,
+                        str_replace_selection(0, &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
                         search_changed = true;
                       }
@@ -2451,7 +2471,7 @@ int main(int argc, char** argv)
                           state->selection_end = seek_right_in_str(
                               state->search_str, ctrl_held, state->selection_end);
                         }
-                        str_replace_selection(sizeof(state->search_str_buffer), &state->search_str,
+                        str_replace_selection(0, &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
                         search_changed = true;
                       }
@@ -2717,10 +2737,12 @@ int main(int argc, char** argv)
                         }
                       }
                     }
+#if 0
                     else if(ctrl_held && keysym == 'v')
                     {
                       XConvertSelection(display, atom_clipboard, atom_uri_list, atom_mycliptarget, window, CurrentTime);
                     }
+#endif
                     else if(ctrl_held && keysym == 'c')
                     {
                       // TODO: Copy list of marked images if there are any.
@@ -2729,11 +2751,11 @@ int main(int argc, char** argv)
                         img_entry_t* img = get_filtered_img(state, state->viewing_filtered_img_idx);
                         if(shift_held)
                         {
-                          clipboard_str = img->positive_prompt;
+                          state->clipboard_str = img->positive_prompt;
                         }
                         else
                         {
-                          clipboard_str = img->path;
+                          state->clipboard_str = img->path;
                         }
                         XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
                       }
@@ -2985,9 +3007,18 @@ int main(int argc, char** argv)
                     {
                       printf("Paste: INCR!\n");
                     }
-                    printf("Paste: format: %d, count: %lu, bytes left: %lu, data: %s\n",
-                        format, item_count, bytes_left, data);
-                    // TODO: Parse URL-encoded file://... path and open it.
+                    if(state->searching)
+                    {
+                      str_replace_selection(array_count(state->search_str_buffer),
+                          &state->search_str, &state->selection_start, &state->selection_end,
+                          str_from_start_and_size(data, item_count));
+                    }
+                    else
+                    {
+                      printf("Paste: format: %d, count: %lu, bytes left: %lu, data: %s\n",
+                          format, item_count, bytes_left, data);
+                      // TODO: Parse URL-encoded file://... path and open it.
+                    }
                     XFree(data);
                     XDeleteProperty(display, window, event.xselection.property);
                   }
@@ -3010,7 +3041,7 @@ int main(int argc, char** argv)
                   b32 any_marked = false;
                   for_count(i, state->total_img_count) { any_marked = any_marked || (state->img_entries[i].flags & IMG_FLAG_MARKED); }
 
-                  if(request->property != None && clipboard_str.data != 0)
+                  if(request->property != None && state->clipboard_str.data != 0)
                   {
                     if(request->target == atom_targets)
                     {
@@ -3038,7 +3069,7 @@ int main(int argc, char** argv)
                         }
                         else
                         {
-                          path = (char*)clipboard_str.data;
+                          path = (char*)state->clipboard_str.data;
                         }
                         char* full_path = realpath(path, 0);
 
@@ -3099,7 +3130,7 @@ int main(int argc, char** argv)
                     {
                       XChangeProperty(display, request->requestor, request->property,
                           atom_utf8, 8, PropModeReplace,
-                          clipboard_str.data, clipboard_str.size);
+                          state->clipboard_str.data, state->clipboard_str.size);
 
                       respond_ok = true;
                     }
