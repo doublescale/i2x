@@ -1,5 +1,5 @@
 # i2x
-Image viewer specialized for PNGs generated with Stable Diffusion.
+Image viewer specialized for large PNG collections generated with Stable Diffusion.
 
 ## Build & Run
 ```bash
@@ -20,6 +20,5 @@ OPTIMIZE=1 ./build
 - Leaks memory in some circumstances. (WIP)
 - Reloading of images could be better. (WIP)
 - Parsing metadata is done up-front, synchronously.  Opening many uncached images may take a while. (WIP)
-- Developer accepts donations: <TODO>
 
 WIP items will probably get fixed at some point.

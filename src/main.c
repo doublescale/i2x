@@ -180,6 +180,7 @@ typedef struct
   i32 viewing_filtered_img_idx;
 
   b32 searching;
+  u8 search_str_buffer[64 * 1024];
   str_t search_str;
   i64 search_str_capacity;
   i32 img_idx_viewed_before_search;
@@ -1690,8 +1691,8 @@ int main(int argc, char** argv)
         XFree(visual_info);
         GLXWindow glx_window = glXCreateWindow(display, glx_config, window, 0);
 
-        state_t _state = {0};
-        state_t* state = &_state;
+        state_t* state = malloc_struct(state_t);
+        zero_struct(*state);
         state->vsync = true;
 
         // TODO: Check if GLX_EXT_swap_control is in the extensions string first.
@@ -1980,15 +1981,12 @@ int main(int argc, char** argv)
         state->thumbnail_columns = 2;
         i32 hovered_thumbnail_idx = -1;
         state->show_info = 2;
-        state->search_str_capacity = 1024;
-        state->search_str.data = malloc_array(state->search_str_capacity, u8);
+        state->search_str.data = state->search_str_buffer;
 #if 0
-        {
-          // SEARCH STRING DEBUG
-          str_t str = str("one two-three\nfour");
-          copy_bytes(str.size, str.data, state->search_str.data);
-          state->search_str.size += str.size;
-        }
+        // SEARCH STRING DEBUG
+        str_replace_selection(sizeof(state->search_str_buffer),
+            &state->search_str, &state->selection_start, &state->selection_end,
+            str("one two-three\nfour"));
 #endif
         state->info_panel_width = 500;
 
@@ -2398,7 +2396,8 @@ int main(int argc, char** argv)
 
                   if(went_down)
                   {
-                    if(ctrl_held && keysym == 'q')
+                    if(0) {}
+                    else if(ctrl_held && keysym == 'q')
                     {
                       quitting = true;
                     }
@@ -2415,7 +2414,15 @@ int main(int argc, char** argv)
                     }
                     else if(state->searching)
                     {
-                      if(keysym == XK_Escape || keysym == XK_Return)
+                      if(0) {}
+                      else if(keysym == XK_Escape)
+                      {
+                        state->searching = false;
+                        for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
+                        state->filtered_img_count = state->total_img_count;
+                        state->viewing_filtered_img_idx = state->img_idx_viewed_before_search;
+                      }
+                      else if(keysym == XK_Return)
                       {
                         state->searching = false;
                       }
@@ -2433,7 +2440,7 @@ int main(int argc, char** argv)
                           state->selection_start = seek_left_in_str(
                               state->search_str, ctrl_held, state->selection_start);
                         }
-                        str_replace_selection(state->search_str_capacity, &state->search_str,
+                        str_replace_selection(sizeof(state->search_str_buffer), &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
                         search_changed = true;
                       }
@@ -2444,13 +2451,21 @@ int main(int argc, char** argv)
                           state->selection_end = seek_right_in_str(
                               state->search_str, ctrl_held, state->selection_end);
                         }
-                        str_replace_selection(state->search_str_capacity, &state->search_str,
+                        str_replace_selection(sizeof(state->search_str_buffer), &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
                         search_changed = true;
                       }
                       else if(keysym == XK_Left)
                       {
-                        state->selection_end = seek_left_in_str(state->search_str, ctrl_held, state->selection_end);
+                        if(!shift_held && !ctrl_held && state->selection_start != state->selection_end)
+                        {
+                          state->selection_end = min(state->selection_start, state->selection_end);
+                        }
+                        else
+                        {
+                          state->selection_end = seek_left_in_str(state->search_str, ctrl_held, state->selection_end);
+                        }
+
                         if(!shift_held)
                         {
                           state->selection_start = state->selection_end;
@@ -2458,7 +2473,15 @@ int main(int argc, char** argv)
                       }
                       else if(keysym == XK_Right)
                       {
-                        state->selection_end = seek_right_in_str(state->search_str, ctrl_held, state->selection_end);
+                        if(!shift_held && !ctrl_held && state->selection_start != state->selection_end)
+                        {
+                          state->selection_end = max(state->selection_start, state->selection_end);
+                        }
+                        else
+                        {
+                          state->selection_end = seek_right_in_str(state->search_str, ctrl_held, state->selection_end);
+                        }
+
                         if(!shift_held)
                         {
                           state->selection_start = state->selection_end;
@@ -2500,7 +2523,7 @@ int main(int argc, char** argv)
                           }
 #endif
 
-                          if(str_replace_selection(state->search_str_capacity, &state->search_str,
+                          if(str_replace_selection(sizeof(state->search_str_buffer), &state->search_str,
                                 &state->selection_start, &state->selection_end, entered_str))
                           {
                             search_changed = true;
@@ -2658,7 +2681,7 @@ int main(int argc, char** argv)
                       reload_input_paths(state);
                       reloaded_paths = true;
                     }
-                    else if(keysym == 'a')
+                    else if(shift_held && alt_held && keysym == 'a')
                     {
                       bflip(border_sampling);
                     }
@@ -2786,15 +2809,15 @@ int main(int argc, char** argv)
                         zoom += 0.25f;
                       }
                     }
-                    else if(keysym == '5')
+                    else if(shift_held && alt_held && keysym == '5')
                     {
                       bflip(show_fps);
                     }
-                    else if(keysym == '6')
+                    else if(shift_held && alt_held && keysym == '6')
                     {
                       bflip(state->alpha_blend);
                     }
-                    else if(keysym == '7')
+                    else if(shift_held && alt_held && keysym == '7')
                     {
                       bflip(state->vsync);
                       glXSwapIntervalEXT(display, glx_window, (int)state->vsync);
@@ -3428,6 +3451,7 @@ int main(int argc, char** argv)
 
               search_item_t search_items[256];
               i32 next_search_item_idx = 0;
+              search_item_t* first_path_item = 0;
               search_item_t* first_model_item = 0;
               search_item_t* first_positive_item = 0;
               search_item_t* first_negative_item = 0;
@@ -3488,7 +3512,14 @@ int main(int argc, char** argv)
                         post_column = str_from_span(column_at + 1, word_end);
                       }
 
-                      if(str_eq(pre_column, str("m")) && post_column.size > 0)
+                      if(0) {}
+                      else if(str_eq(pre_column, str("f")) && post_column.size > 0)
+                      {
+                        item->word = post_column;
+                        item->next = first_path_item;
+                        first_path_item = item;
+                      }
+                      else if(str_eq(pre_column, str("m")) && post_column.size > 0)
                       {
                         item->word = post_column;
                         item->next = first_model_item;
@@ -3565,6 +3596,7 @@ int main(int argc, char** argv)
                   str_t haystack;
                   search_item_t* first_item;
                 } search_tasks[] = {
+                  { img->path, first_path_item },
                   { img->model, first_model_item },
                   { img->positive_prompt, first_positive_item },
                   { img->negative_prompt, first_negative_item },

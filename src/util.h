@@ -41,6 +41,7 @@ typedef double r64;
 #define lerp(a, b, t) ((1 - (t)) * (a) + (t) * (b))
 
 #define malloc_array(count, type) ((type*)malloc((count) * sizeof(type)))
+#define malloc_struct(type) malloc_array(1, type)
 
 // Modulo, but positive.
 internal i32 i32_wrap_upto(i32 x, i32 y)
