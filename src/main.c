@@ -1616,6 +1616,31 @@ int main(int argc, char** argv)
   debug_out = fopen("/tmp/i2x-debug.log", "wb");
   // if(!debug_out) { debug_out = stderr; }
 
+  state_t* state = malloc_struct(state_t);
+  zero_struct(*state);
+  state->loader_count = 7;
+
+  for(i32 i = 1; i < argc; ++i)
+  {
+    if(zstr_eq(argv[i], "--help")
+        || zstr_eq(argv[i], "-h")
+        || zstr_eq(argv[i], "-?"))
+    {
+      printf("Usage: %s <image files and directories>\n", argv[0]);
+      printf("\n");
+      printf("Directories get expanded (one level, not recursive), contents sorted alphabetically.\n");
+      printf("If only one file is passed, its containing directory is opened, and the file focused.\n");
+      printf("\n");
+      printf("The following environment variables are used:\n");
+      printf("I2X_DISABLE_XINPUT2: Disables XInput2 handling, which allows\n");
+      printf("  smooth scrolling and raw sub-pixel mouse motion, but can be glitchy.\n");
+      printf("I2X_LOADER_THREADS: Sets the number of image-loader threads (default: %d).\n", state->loader_count);
+      printf("\n");
+      printf("Example invocation: I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 %s\n", argv[0]);
+      return 0;
+    }
+  }
+
   Display* display = XOpenDisplay(0);
   if(display)
   {
@@ -1732,8 +1757,6 @@ int main(int argc, char** argv)
         XFree(visual_info);
         GLXWindow glx_window = glXCreateWindow(display, glx_config, window, 0);
 
-        state_t* state = malloc_struct(state_t);
-        zero_struct(*state);
         state->vsync = true;
 
         // TODO: Check if GLX_EXT_swap_control is in the extensions string first.
@@ -1976,7 +1999,6 @@ int main(int argc, char** argv)
           }
         }
 
-        state->loader_count = 7;
         {
           char* thread_count_envvar = getenv("I2X_LOADER_THREADS");
           if(thread_count_envvar)
@@ -2023,10 +2045,10 @@ int main(int argc, char** argv)
         r32 offset_x = 0;
         r32 offset_y = 0;
         state->hide_sidebar = false;
-        state->sidebar_width = 310;
+        state->sidebar_width = 300;
         state->thumbnail_columns = 2;
         i32 hovered_thumbnail_idx = -1;
-        state->show_info = 2;
+        // state->show_info = 2;
         state->search_str.data = state->search_str_buffer;
 #if 0
         // SEARCH STRING DEBUG
@@ -2034,7 +2056,7 @@ int main(int argc, char** argv)
             &state->search_str, &state->selection_start, &state->selection_end,
             str("one two-three\nfour"));
 #endif
-        state->info_panel_width = 500;
+        state->info_panel_width = 300;
 
         str_t help_tab_labels[] = {
           str("Keybindings"),
