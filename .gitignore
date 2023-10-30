@@ -2,3 +2,4 @@ bin
 obj
 i2x
 test/ComfyUI*.png
+*.log

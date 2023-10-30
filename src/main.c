@@ -2500,7 +2500,7 @@ int main(int argc, char** argv)
                     {
                       state->help_tab_idx = i32_wrap_upto(state->help_tab_idx + 1, help_tab_count);
                     }
-                    else if(state->show_help && ctrl_held && keysym == 'f' || !state->searching && keysym == '/')
+                    else if(ctrl_held && keysym == 'f' || !state->searching && keysym == '/')
                     {
                       bflip(state->searching);
                       if(state->searching)
