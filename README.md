@@ -10,7 +10,7 @@ OPTIMIZE=1 ./build
 ## Features
 - Handle tens of thousands of images in a directory.
 - Show Stable Diffusion generation metadata contained in PNGs.  i2x intends to support stable-diffusion-webui and ComfyUI.
-- Search images by prompt.
+- Search images by prompt and other parameters.
 
 ## Known Limitations
 - Linux-only.
@@ -19,6 +19,5 @@ OPTIMIZE=1 ./build
 - Partial Unicode support.  No fallback fonts.
 - Leaks memory in some circumstances. (WIP)
 - Reloading of images could be better. (WIP)
-- Parsing metadata is done up-front, synchronously.  Opening many uncached images may take a while. (WIP)
 
-WIP items will probably get fixed at some point.
+WIP items might get fixed at some point.

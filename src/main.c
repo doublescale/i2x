@@ -137,6 +137,26 @@ typedef struct img_entry_t
 
 typedef struct
 {
+  i32 total_img_count;
+  img_entry_t* img_entries;
+
+  i32 filtered_img_count;
+  i32* filtered_img_idxs;
+
+  volatile i32 viewing_filtered_img_idx;
+  volatile i32 first_visible_thumbnail_idx;
+  volatile i32 last_visible_thumbnail_idx;
+} shared_loader_data_t;
+
+typedef struct
+{
+  i32 thread_idx;
+  sem_t* semaphore;
+  shared_loader_data_t* shared;
+} loader_data_t;
+
+typedef struct
+{
   i32 win_w;
   i32 win_h;
 
@@ -189,6 +209,16 @@ typedef struct
   i32 img_idx_viewed_before_search;
   i64 selection_start;
   i64 selection_end;
+  i32 metadata_loaded_count;
+  b32 all_metadata_loaded;
+
+  shared_loader_data_t shared_loader_data;
+  i32 loader_count;
+  pthread_t loader_threads[16];
+  loader_data_t loader_data[16];
+  sem_t loader_semaphores[16];
+  pthread_t metadata_loader_thread;
+  sem_t metadata_loader_semaphore;
 
   int inotify_fd;
 
@@ -522,26 +552,6 @@ internal b32 str_replace_selection(i64 str_capacity, str_t* str,
   return result;
 }
 
-typedef struct
-{
-  i32 total_img_count;
-  img_entry_t* img_entries;
-
-  i32 filtered_img_count;
-  i32* filtered_img_idxs;
-
-  volatile i32 viewing_filtered_img_idx;
-  volatile i32 first_visible_thumbnail_idx;
-  volatile i32 last_visible_thumbnail_idx;
-} shared_loader_data_t;
-
-typedef struct
-{
-  i32 thread_idx;
-  sem_t* semaphore;
-  shared_loader_data_t* shared;
-} loader_data_t;
-
 internal void* loader_fun(void* raw_data)
 {
   loader_data_t* data = (loader_data_t*)raw_data;
@@ -687,6 +697,306 @@ internal void* loader_fun(void* raw_data)
     // printf("Loader %d: Waiting on semaphore.\n", thread_idx);
     sem_wait(data->semaphore);
     // printf("Loader %d: Got signal!\n", thread_idx);
+  }
+
+  return 0;
+}
+
+internal void* metadata_loader_fun(void* raw_data)
+{
+  state_t* state = (state_t*)raw_data;
+
+  for(;;)
+  {
+    // printf("Metadata loader: Waiting on semaphore.\n");
+    sem_wait(&state->metadata_loader_semaphore);
+    // printf("Metadata loader: Got signal!\n");
+
+    state->metadata_loaded_count = 0;
+
+    // TODO: Prioritize loading currently viewed images,
+    //       or let the decoder threads parse the metadata too.
+    for(i32 img_idx = 0;
+        img_idx < state->total_img_count;
+        ++img_idx)
+    {
+      img_entry_t* img = &state->img_entries[img_idx];
+
+      if(img->file_header_data.size)
+      {
+        free(img->file_header_data.data);
+        zero_struct(img->file_header_data);
+      }
+
+      int fd = open((char*)img->path.data, O_RDONLY);
+      if(fd == -1) { continue; }
+      size_t bytes_to_read = 4 * 1024;
+      img->file_header_data.data = malloc_array(bytes_to_read, u8);
+      ssize_t bytes_actually_read = read(fd, img->file_header_data.data, bytes_to_read);
+      close(fd);
+      if(bytes_actually_read == -1) { continue; }
+      img->file_header_data.size = bytes_actually_read;
+
+      // Look for PNG metadata.
+      if(img->file_header_data.size >= 16)
+      {
+        u8* ptr = img->file_header_data.data;
+        u8* data_end = img->file_header_data.data + img->file_header_data.size;
+        b32 bad = false;
+
+        // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
+        bad |= (*ptr++ != 0x89);
+        bad |= (*ptr++ != 'P');
+        bad |= (*ptr++ != 'N');
+        bad |= (*ptr++ != 'G');
+        bad |= (*ptr++ != 0x0d);
+        bad |= (*ptr++ != 0x0a);
+        bad |= (*ptr++ != 0x1a);
+        bad |= (*ptr++ != 0x0a);
+
+        while(!bad)
+        {
+          // Convert big-endian to little-endian.
+          u32 chunk_size = 0;
+          chunk_size |= *ptr++;
+          chunk_size <<= 8;
+          chunk_size |= *ptr++;
+          chunk_size <<= 8;
+          chunk_size |= *ptr++;
+          chunk_size <<= 8;
+          chunk_size |= *ptr++;
+
+          // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+          b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
+          b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
+          if(tEXt_header || iTXt_header)
+          {
+            u8* key_start = ptr + 4;
+            u8* value_end = ptr + 4 + chunk_size;
+
+            if(value_end <= data_end)
+            {
+              i32 key_len = 0;
+              while(key_start[key_len] != 0 && key_start + key_len + 1 < value_end)
+              {
+                ++key_len;
+              }
+
+              u8* value_start = key_start + key_len + 1;
+              // https://www.w3.org/TR/2003/REC-PNG-20031110/#11iTXt
+              if(iTXt_header)
+              {
+                value_start += 2;
+                while(*value_start) { ++value_start; }
+                ++value_start;
+                while(*value_start) { ++value_start; }
+                ++value_start;
+              }
+
+              str_t key = { key_start, key_len };
+              str_t value = str_from_span(value_start, value_end);
+              // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+              if(str_eq_zstr(key, "prompt"))
+              {
+                // comfyanonymous/ComfyUI JSON.
+                // TODO: Tokenize properly, or string contents might get mistaken for object keys,
+                //       like {"seed": "tricky \"seed:"}
+
+                for(u8* p = value_start;
+                    p < value_end;
+                   )
+                {
+                  if(0) {}
+                  else if(advance_if_prefix_matches(&p, value_end, "\"seed\"")
+                      || advance_if_prefix_matches(&p, value_end, "\"noise_seed\""))
+                  {
+                    while(p < value_end && !is_digit(*p)) { ++p; }
+                    str_t v = {p};
+                    while(p < value_end && is_digit(*p)) { ++p; }
+                    v.size = p - v.data;
+
+                    img->seed = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "\"steps\""))
+                  {
+                    while(p < value_end && !is_digit(*p)) { ++p; }
+                    str_t v = {p};
+                    while(p < value_end && is_digit(*p)) { ++p; }
+                    v.size = p - v.data;
+
+                    img->sampling_steps = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "\"cfg\""))
+                  {
+                    while(p < value_end && !(is_digit(*p) || *p == '.')) { ++p; }
+                    str_t v = {p};
+                    while(p < value_end && (is_digit(*p) || *p == '.')) { ++p; }
+                    v.size = p - v.data;
+
+                    img->cfg = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
+                  {
+                    str_t v = parse_next_json_str_destructively(&p, value_end);
+                    img->sampler = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
+                  {
+                    str_t v = parse_next_json_str_destructively(&p, value_end);
+                    v = str_remove_suffix(v, str(".ckpt"));
+                    v = str_remove_suffix(v, str(".safetensors"));
+                    img->model = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
+                  {
+                    while(p < value_end && !is_digit(*p)) { ++p; }
+                    str_t v = {p};
+                    while(p < value_end && is_digit(*p)) { ++p; }
+                    v.size = p - v.data;
+
+                    img->batch_size = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
+                  {
+                    str_t v = parse_next_json_str_destructively(&p, value_end);
+                    if(!img->positive_prompt.data) { img->positive_prompt = v; }
+                    else if(!img->negative_prompt.data) { img->negative_prompt = v; }
+                  }
+                  else
+                  {
+                    ++p;
+                  }
+                }
+              }
+              else if(str_eq_zstr(key, "parameters"))
+              {
+                // AUTOMATIC1111/stable-diffusion-webui.
+                // Be careful with newlines and misleading labels in the
+                // positive and negative prompts; use the last found keywords.
+
+                u8* p = value_start;
+                u8* negative_prompt_label_start = 0;
+                u8* steps_label_start = value_end;
+
+                while(p < value_end)
+                {
+                  u8* p_prev = p;
+                  if(0) {}
+                  else if(advance_if_prefix_matches(&p, value_end, "\nNegative prompt: "))
+                  {
+                    negative_prompt_label_start = p_prev;
+                    img->negative_prompt.data = p;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "\nSteps: "))
+                  {
+                    steps_label_start = p_prev;
+                    img->sampling_steps.data = p;
+                  }
+
+                  ++p;
+                }
+
+                if(negative_prompt_label_start)
+                {
+                  img->positive_prompt = str_from_span(value_start, negative_prompt_label_start);
+                }
+                else
+                {
+                  img->positive_prompt = str_from_span(value_start, steps_label_start);
+                }
+
+                if(img->negative_prompt.data)
+                {
+                  img->negative_prompt.size = steps_label_start - img->negative_prompt.data;
+                }
+
+                p = steps_label_start;
+
+                while(p < value_end)
+                {
+                  u8* p_prev = p;
+                  if(0) {}
+                  else if(advance_if_prefix_matches(&p, value_end, "Steps: "))
+                  {
+                    str_t v = {p};
+                    while(p < value_end && *p != ',') { ++p; }
+                    v.size = p - v.data;
+
+                    img->sampling_steps = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "Sampler: "))
+                  {
+                    str_t v = {p};
+                    while(p < value_end && *p != ',') { ++p; }
+                    v.size = p - v.data;
+
+                    img->sampler = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "CFG scale: "))
+                  {
+                    str_t v = {p};
+                    while(p < value_end && *p != ',') { ++p; }
+                    v.size = p - v.data;
+
+                    img->cfg = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "Seed: "))
+                  {
+                    str_t v = {p};
+                    while(p < value_end && *p != ',') { ++p; }
+                    v.size = p - v.data;
+
+                    img->seed = v;
+                  }
+                  else if(advance_if_prefix_matches(&p, value_end, "Model: "))
+                  {
+                    str_t v = {p};
+                    while(p < value_end && *p != ',') { ++p; }
+                    v.size = p - v.data;
+
+                    img->model = v;
+                  }
+
+                  ++p;
+                }
+              }
+
+              if(!img->generation_parameters.size)
+              {
+                img->generation_parameters = value;
+              }
+            }
+            else
+            {
+              bad = true;
+            }
+          }
+
+          ptr += 4 + chunk_size + 4;
+
+          bad |= (ptr + 8 >= data_end);
+        }
+      }
+
+#if 0
+      printf("\n%.*s\n", PF_STR(img->path));
+#define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
+      // P(generation_parameters);
+      P(positive_prompt);
+      P(negative_prompt);
+      P(seed);
+      P(batch_size);
+      P(model);
+      P(sampler);
+      P(sampling_steps);
+      P(cfg);
+#undef P
+#endif
+
+      ++state->metadata_loaded_count;
+      // usleep(200);
+    }
   }
 
   return 0;
@@ -1036,285 +1346,6 @@ internal void reload_input_paths(state_t* state)
     }
   }
 
-  for(i32 img_idx = 0;
-      img_idx < state->total_img_count;
-      ++img_idx)
-  {
-    img_entry_t* img = &state->img_entries[img_idx];
-
-    if(img->file_header_data.size)
-    {
-      free(img->file_header_data.data);
-      zero_struct(img->file_header_data);
-    }
-
-    int fd = open((char*)img->path.data, O_RDONLY);
-    if(fd == -1) { continue; }
-    size_t bytes_to_read = 4 * 1024;
-    img->file_header_data.data = malloc_array(bytes_to_read, u8);
-    ssize_t bytes_actually_read = read(fd, img->file_header_data.data, bytes_to_read);
-    close(fd);
-    if(bytes_actually_read == -1) { continue; }
-    img->file_header_data.size = bytes_actually_read;
-
-    // Look for PNG metadata.
-    if(img->file_header_data.size >= 16)
-    {
-      u8* ptr = img->file_header_data.data;
-      u8* data_end = img->file_header_data.data + img->file_header_data.size;
-      b32 bad = false;
-
-      // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
-      bad |= (*ptr++ != 0x89);
-      bad |= (*ptr++ != 'P');
-      bad |= (*ptr++ != 'N');
-      bad |= (*ptr++ != 'G');
-      bad |= (*ptr++ != 0x0d);
-      bad |= (*ptr++ != 0x0a);
-      bad |= (*ptr++ != 0x1a);
-      bad |= (*ptr++ != 0x0a);
-
-      while(!bad)
-      {
-        // Convert big-endian to little-endian.
-        u32 chunk_size = 0;
-        chunk_size |= *ptr++;
-        chunk_size <<= 8;
-        chunk_size |= *ptr++;
-        chunk_size <<= 8;
-        chunk_size |= *ptr++;
-        chunk_size <<= 8;
-        chunk_size |= *ptr++;
-
-        // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
-        b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
-        b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
-        if(tEXt_header || iTXt_header)
-        {
-          u8* key_start = ptr + 4;
-          u8* value_end = ptr + 4 + chunk_size;
-
-          if(value_end <= data_end)
-          {
-            i32 key_len = 0;
-            while(key_start[key_len] != 0 && key_start + key_len + 1 < value_end)
-            {
-              ++key_len;
-            }
-
-            u8* value_start = key_start + key_len + 1;
-            // https://www.w3.org/TR/2003/REC-PNG-20031110/#11iTXt
-            if(iTXt_header)
-            {
-              value_start += 2;
-              while(*value_start) { ++value_start; }
-              ++value_start;
-              while(*value_start) { ++value_start; }
-              ++value_start;
-            }
-
-            str_t key = { key_start, key_len };
-            str_t value = str_from_span(value_start, value_end);
-            // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
-
-            if(str_eq_zstr(key, "prompt"))
-            {
-              // comfyanonymous/ComfyUI JSON.
-              // TODO: Tokenize properly, or string contents might get mistaken for object keys,
-              //       like {"seed": "tricky \"seed:"}
-
-              for(u8* p = value_start;
-                  p < value_end;
-                 )
-              {
-                if(0) {}
-                else if(advance_if_prefix_matches(&p, value_end, "\"seed\"")
-                    || advance_if_prefix_matches(&p, value_end, "\"noise_seed\""))
-                {
-                  while(p < value_end && !is_digit(*p)) { ++p; }
-                  str_t v = {p};
-                  while(p < value_end && is_digit(*p)) { ++p; }
-                  v.size = p - v.data;
-
-                  img->seed = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "\"steps\""))
-                {
-                  while(p < value_end && !is_digit(*p)) { ++p; }
-                  str_t v = {p};
-                  while(p < value_end && is_digit(*p)) { ++p; }
-                  v.size = p - v.data;
-
-                  img->sampling_steps = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "\"cfg\""))
-                {
-                  while(p < value_end && !(is_digit(*p) || *p == '.')) { ++p; }
-                  str_t v = {p};
-                  while(p < value_end && (is_digit(*p) || *p == '.')) { ++p; }
-                  v.size = p - v.data;
-
-                  img->cfg = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
-                {
-                  str_t v = parse_next_json_str_destructively(&p, value_end);
-                  img->sampler = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
-                {
-                  str_t v = parse_next_json_str_destructively(&p, value_end);
-                  v = str_remove_suffix(v, str(".ckpt"));
-                  v = str_remove_suffix(v, str(".safetensors"));
-                  img->model = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
-                {
-                  while(p < value_end && !is_digit(*p)) { ++p; }
-                  str_t v = {p};
-                  while(p < value_end && is_digit(*p)) { ++p; }
-                  v.size = p - v.data;
-
-                  img->batch_size = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
-                {
-                  str_t v = parse_next_json_str_destructively(&p, value_end);
-                  if(!img->positive_prompt.data) { img->positive_prompt = v; }
-                  else if(!img->negative_prompt.data) { img->negative_prompt = v; }
-                }
-                else
-                {
-                  ++p;
-                }
-              }
-            }
-            else if(str_eq_zstr(key, "parameters"))
-            {
-              // AUTOMATIC1111/stable-diffusion-webui.
-              // Be careful with newlines and misleading labels in the
-              // positive and negative prompts; use the last found keywords.
-
-              u8* p = value_start;
-              u8* negative_prompt_label_start = 0;
-              u8* steps_label_start = value_end;
-
-              while(p < value_end)
-              {
-                u8* p_prev = p;
-                if(0) {}
-                else if(advance_if_prefix_matches(&p, value_end, "\nNegative prompt: "))
-                {
-                  negative_prompt_label_start = p_prev;
-                  img->negative_prompt.data = p;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "\nSteps: "))
-                {
-                  steps_label_start = p_prev;
-                  img->sampling_steps.data = p;
-                }
-
-                ++p;
-              }
-
-              if(negative_prompt_label_start)
-              {
-                img->positive_prompt = str_from_span(value_start, negative_prompt_label_start);
-              }
-              else
-              {
-                img->positive_prompt = str_from_span(value_start, steps_label_start);
-              }
-
-              if(img->negative_prompt.data)
-              {
-                img->negative_prompt.size = steps_label_start - img->negative_prompt.data;
-              }
-
-              p = steps_label_start;
-
-              while(p < value_end)
-              {
-                u8* p_prev = p;
-                if(0) {}
-                else if(advance_if_prefix_matches(&p, value_end, "Steps: "))
-                {
-                  str_t v = {p};
-                  while(p < value_end && *p != ',') { ++p; }
-                  v.size = p - v.data;
-
-                  img->sampling_steps = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "Sampler: "))
-                {
-                  str_t v = {p};
-                  while(p < value_end && *p != ',') { ++p; }
-                  v.size = p - v.data;
-
-                  img->sampler = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "CFG scale: "))
-                {
-                  str_t v = {p};
-                  while(p < value_end && *p != ',') { ++p; }
-                  v.size = p - v.data;
-
-                  img->cfg = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "Seed: "))
-                {
-                  str_t v = {p};
-                  while(p < value_end && *p != ',') { ++p; }
-                  v.size = p - v.data;
-
-                  img->seed = v;
-                }
-                else if(advance_if_prefix_matches(&p, value_end, "Model: "))
-                {
-                  str_t v = {p};
-                  while(p < value_end && *p != ',') { ++p; }
-                  v.size = p - v.data;
-
-                  img->model = v;
-                }
-
-                ++p;
-              }
-            }
-
-            if(!img->generation_parameters.size)
-            {
-              img->generation_parameters = value;
-            }
-          }
-          else
-          {
-            bad = true;
-          }
-        }
-
-        ptr += 4 + chunk_size + 4;
-
-        bad |= (ptr + 8 >= data_end);
-      }
-    }
-
-#if 0
-    printf("\n%.*s\n", PF_STR(img->path));
-#define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
-    // P(generation_parameters);
-    P(positive_prompt);
-    P(negative_prompt);
-    P(seed);
-    P(batch_size);
-    P(model);
-    P(sampler);
-    P(sampling_steps);
-    P(cfg);
-#undef P
-#endif
-  }
-
   for(i32 idx = 0;
       idx < state->total_img_count;
       ++idx)
@@ -1322,6 +1353,8 @@ internal void reload_input_paths(state_t* state)
     state->filtered_img_idxs[idx] = idx;
   }
   state->filtered_img_count = state->total_img_count;
+
+  sem_post(&state->metadata_loader_semaphore);
 }
 
 enum
@@ -1839,6 +1872,9 @@ int main(int argc, char** argv)
         zero_bytes(state->total_img_capacity * sizeof(img_entry_t), state->img_entries);
         state->filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
 
+        sem_init(&state->metadata_loader_semaphore, 0, 0);
+        pthread_create(&state->metadata_loader_thread, 0, metadata_loader_fun, state);
+
         reload_input_paths(state);
 
         if(open_single_directory_on.size)
@@ -1935,27 +1971,30 @@ int main(int argc, char** argv)
           }
         }
 
-        pthread_t loader_threads[7] = {0};
-        i32 loader_count = array_count(loader_threads);
-        shared_loader_data_t* shared_loader_data = malloc_array(1, shared_loader_data_t);
-        loader_data_t* loader_data = malloc_array(loader_count, loader_data_t);
-        sem_t* loader_semaphores = malloc_array(loader_count, sem_t);
+        state->loader_count = 7;
+        {
+          char* thread_count_envvar = getenv("I2X_LOADER_THREADS");
+          if(thread_count_envvar)
+          {
+            state->loader_count = atoi(thread_count_envvar);
+          }
+        }
+        state->loader_count = clamp(1, state->loader_count, array_count(state->loader_threads));
 
-        zero_struct(*shared_loader_data);
-        shared_loader_data->total_img_count = state->total_img_count;
-        shared_loader_data->img_entries = state->img_entries;
-        shared_loader_data->filtered_img_count = state->filtered_img_count;
-        shared_loader_data->filtered_img_idxs = state->filtered_img_idxs;
+        state->shared_loader_data.total_img_count = state->total_img_count;
+        state->shared_loader_data.img_entries = state->img_entries;
+        state->shared_loader_data.filtered_img_count = state->filtered_img_count;
+        state->shared_loader_data.filtered_img_idxs = state->filtered_img_idxs;
 
         for(i32 loader_idx = 0;
-            loader_idx < loader_count;
+            loader_idx < state->loader_count;
             ++loader_idx)
         {
-          sem_init(&loader_semaphores[loader_idx], 0, 0);
-          loader_data[loader_idx].thread_idx = loader_idx + 1;
-          loader_data[loader_idx].semaphore = &loader_semaphores[loader_idx];
-          loader_data[loader_idx].shared = shared_loader_data;
-          pthread_create(&loader_threads[loader_idx], 0, loader_fun, &loader_data[loader_idx]);
+          sem_init(&state->loader_semaphores[loader_idx], 0, 0);
+          state->loader_data[loader_idx].thread_idx = loader_idx + 1;
+          state->loader_data[loader_idx].semaphore = &state->loader_semaphores[loader_idx];
+          state->loader_data[loader_idx].shared = &state->shared_loader_data;
+          pthread_create(&state->loader_threads[loader_idx], 0, loader_fun, &state->loader_data[loader_idx]);
         }
 
         state->win_w = WINDOW_INIT_W;
@@ -2033,6 +2072,13 @@ int main(int argc, char** argv)
           b32 search_changed = false;
 
           if(!state->vsync) { dirty = true; }
+          if(!state->all_metadata_loaded)
+          {
+            // printf("Loading metadata %d/%d\n", state->metadata_loaded_count, state->total_img_count);
+            dirty = true;
+            search_changed = true;
+          }
+          state->all_metadata_loaded = (state->metadata_loaded_count >= state->total_img_count);
 
           if(state->inotify_fd != -1)
           {
@@ -3440,7 +3486,7 @@ int main(int argc, char** argv)
             prev_mouse_y = mouse_y;
           }
 
-          if(search_changed)
+          if(state->searching && search_changed)
           {
             if(state->search_str.size == 0)
             {
@@ -3754,16 +3800,20 @@ _search_end_label:
               img = &state->img_entries[viewing_img_idx];
             }
 
-            if(last_viewing_img_idx != viewing_img_idx && img->load_state == LOAD_STATE_LOADED_INTO_RAM)
+            if(last_viewing_img_idx != viewing_img_idx)
             {
               char txt[256];
               txt[0] = 0;
-              i32 txt_len = snprintf(txt, sizeof(txt), "%s [%d/%d] %dx%d %s",
-                  PROGRAM_NAME,
-                  viewing_img_idx + 1, state->total_img_count,
-                  img->w, img->h,
-                  img->path.data);
-              set_title(display, window, (u8*)txt, txt_len);
+              char* path = (char*)img->path.data;
+              if(path)
+              {
+                i32 txt_len = snprintf(txt, sizeof(txt), "%s - %s", PROGRAM_NAME, path);
+                set_title(display, window, (u8*)txt, txt_len);
+              }
+              else
+              {
+                set_title(display, window, (unsigned char*)PROGRAM_NAME, sizeof(PROGRAM_NAME) - 1);
+              }
 
 #if 0
               // if(state->show_info)
@@ -3811,18 +3861,18 @@ _search_end_label:
             i32 first_visible_thumbnail_idx = max(0, first_visible_row * state->thumbnail_columns);
             i32 last_visible_thumbnail_idx = min(state->filtered_img_count, one_past_last_visible_row * state->thumbnail_columns) - 1;
             if(0
-                || state->viewing_filtered_img_idx != shared_loader_data->viewing_filtered_img_idx
-                || first_visible_thumbnail_idx != shared_loader_data->first_visible_thumbnail_idx
-                || last_visible_thumbnail_idx != shared_loader_data->last_visible_thumbnail_idx
-                || state->filtered_img_count != shared_loader_data->filtered_img_count
+                || state->viewing_filtered_img_idx != state->shared_loader_data.viewing_filtered_img_idx
+                || first_visible_thumbnail_idx != state->shared_loader_data.first_visible_thumbnail_idx
+                || last_visible_thumbnail_idx != state->shared_loader_data.last_visible_thumbnail_idx
+                || state->filtered_img_count != state->shared_loader_data.filtered_img_count
                 || reloaded_paths
               )
             {
-              shared_loader_data->viewing_filtered_img_idx = state->viewing_filtered_img_idx;
-              shared_loader_data->first_visible_thumbnail_idx = first_visible_thumbnail_idx;
-              shared_loader_data->last_visible_thumbnail_idx = last_visible_thumbnail_idx;
-              shared_loader_data->filtered_img_count = state->filtered_img_count;
-              for_count(i, loader_count) { sem_post(&loader_semaphores[i]); }
+              state->shared_loader_data.viewing_filtered_img_idx = state->viewing_filtered_img_idx;
+              state->shared_loader_data.first_visible_thumbnail_idx = first_visible_thumbnail_idx;
+              state->shared_loader_data.last_visible_thumbnail_idx = last_visible_thumbnail_idx;
+              state->shared_loader_data.filtered_img_count = state->filtered_img_count;
+              for_count(i, state->loader_count) { sem_post(&state->loader_semaphores[i]); }
             }
 
 #if 0
@@ -4220,22 +4270,35 @@ _search_end_label:
               tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
                   state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->total_img_count);
               SHOW_LABEL_VALUE("", tmp_str);
+
               y -= fs;
               SHOW_LABEL_VALUE("File: ", img->path);
               if(img->w || img->h)
               {
                 tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%dx%d", img->w, img->h);
+                SHOW_LABEL_VALUE("Resolution: ", tmp_str);
               }
-              SHOW_LABEL_VALUE("Resolution: ", tmp_str);
+              else
+              {
+                y -= fs;
+              }
+
               y -= fs;
-              SHOW_LABEL_VALUE("Model: ", img->model);
-              SHOW_LABEL_VALUE("Sampler: ", img->sampler);
-              SHOW_LABEL_VALUE("Sampling steps: ", img->sampling_steps);
-              SHOW_LABEL_VALUE("CFG: ", img->cfg);
-              SHOW_LABEL_VALUE("Batch size: ", img->batch_size);
-              SHOW_LABEL_VALUE("Seed: ", img->seed);
-              SHOW_LABEL_VALUE("Positive prompt: ", img->positive_prompt);
-              SHOW_LABEL_VALUE("Negative prompt: ", img->negative_prompt);
+              if(state->metadata_loaded_count < viewing_img_idx)
+              {
+                SHOW_LABEL_VALUE("Loading metadata...", str(" "));
+              }
+              else
+              {
+                SHOW_LABEL_VALUE("Model: ", img->model);
+                SHOW_LABEL_VALUE("Sampler: ", img->sampler);
+                SHOW_LABEL_VALUE("Sampling steps: ", img->sampling_steps);
+                SHOW_LABEL_VALUE("CFG: ", img->cfg);
+                SHOW_LABEL_VALUE("Batch size: ", img->batch_size);
+                SHOW_LABEL_VALUE("Seed: ", img->seed);
+                SHOW_LABEL_VALUE("Positive prompt: ", img->positive_prompt);
+                SHOW_LABEL_VALUE("Negative prompt: ", img->negative_prompt);
+              }
 #undef SHOW_LABEL_VALUE
             }
 
@@ -4252,7 +4315,7 @@ _search_end_label:
               r32 x_indented = x0 + fs;
               str_t label = str("Search: ");
 
-              // Background rectangle.
+              // Background rectangle / progress bar.
               {
                 r32 x = x0;
                 r32 y = y1;
@@ -4264,15 +4327,37 @@ _search_end_label:
                   wrap_next_line(&wrap_ctx, x);
                 } while(finish_wrapped_line(&wrap_ctx, &x, &y));
 
+                r32 background_gray = bright_bg ? 1 : 0;
+                r32 loading_gray = bright_bg ? 0.8f : 0.2f;
                 r32 x_max = (wrap_ctx.line_idx == 0) ? wrap_ctx.line_end_x : x1;
+                r32 box_x0 = x0 - 0.3f * fs;
+                r32 box_x1 = x_max + 0.3f * fs;
+                r32 box_y0 = y - fs * (state->font_descent + 0.2f);
+                r32 box_y1 = y1 + fs * (state->font_ascent + 0.2f);
+
+                r32 x_progress_split = box_x1;
+                if(state->metadata_loaded_count < state->total_img_count)
+                {
+                  r32 completion_ratio = (r32)state->metadata_loaded_count / (r32)state->total_img_count;
+                  x_progress_split = lerp(box_x0, box_x1, completion_ratio);
+                }
+
                 glBindTexture(GL_TEXTURE_2D, 0);
                 glDisable(GL_BLEND);
-                glColor3f(1 - text_gray, 1 - text_gray, 1 - text_gray);
                 glBegin(GL_QUADS);
-                glVertex2f(x0 - 0.3f * fs, y - fs * (state->font_descent + 0.2f));
-                glVertex2f(x_max + 0.3f * fs, y - fs * (state->font_descent + 0.2f));
-                glVertex2f(x_max + 0.3f * fs, y1 + fs * (state->font_ascent + 0.2f));
-                glVertex2f(x0 - 0.3f * fs, y1 + fs * (state->font_ascent + 0.2f));
+                glColor3f(background_gray, background_gray, background_gray);
+                glVertex2f(box_x0, box_y0);
+                glVertex2f(x_progress_split, box_y0);
+                glVertex2f(x_progress_split, box_y1);
+                glVertex2f(box_x0, box_y1);
+                if(x_progress_split != box_x1)
+                {
+                  glColor3f(loading_gray, loading_gray, loading_gray);
+                  glVertex2f(x_progress_split, box_y0);
+                  glVertex2f(box_x1, box_y0);
+                  glVertex2f(box_x1, box_y1);
+                  glVertex2f(x_progress_split, box_y1);
+                }
                 glEnd();
               }
 
