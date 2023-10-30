@@ -19,7 +19,7 @@ Invoke ./i2x --help for command-line help.
 - Search images by prompt and other parameters.
 
 Here's a video showing a search over 35k images:
-![Search](demo/search.mp4)
+![Search](demo/search.gif)
 
 ## Known Limitations
 - Linux-only.
