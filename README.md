@@ -2,10 +2,14 @@
 Image viewer specialized for large PNG collections generated with Stable Diffusion.
 
 ## Build & Run
+A C compiler and development packages for X11, Xi, GL, GLX must be installed.
+
 ```bash
 OPTIMIZE=1 ./build
 ./i2x <files and directories>
 ```
+
+Press F1 for help.
 
 ## Features
 - Handle tens of thousands of images in a directory.

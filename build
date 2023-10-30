@@ -1,6 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
+
+if [ -z $CC ]; then
+  CC=$(command -v clang || echo gcc)
+fi
+if ! command -v "$CC" >/dev/null; then
+  echo "'$CC' not found. Install 'clang' or 'gcc' or set \$CC to the C compiler executable."
+  exit 1
+fi
 
 mkdir -p obj bin
 
@@ -14,10 +22,10 @@ fi
 
 if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb.o ]; then
   echo "Building obj/stb.o"
-  clang -std=c11 -O3 -c -o obj/stb.o lib/stb.c
+  $CC -std=c11 -O3 -c -o obj/stb.o lib/stb.c
 fi
 
-clang $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb.o src/main.c
+$CC $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb.o src/main.c
 
 if [ ${OPTIMIZE:-0} -ne 0 ]; then
   strip i2x

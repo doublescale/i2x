@@ -202,6 +202,9 @@ typedef struct
   u8 clipboard_str_buffer[64 * 1024];
   str_t clipboard_str;
 
+  b32 show_help;
+  i32 help_tab_idx;
+
   b32 searching;
   u8 search_str_buffer[64 * 1024];
   str_t search_str;
@@ -1426,6 +1429,8 @@ internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
             // printf("uploading codepoint %d\n", codepoint);
             // printf("  char_idx %d, row %d, col %d\n", char_idx, row, col);
 
+            // TODO: Put placeholder rectangle glyph at idx 0, re-use it for unavailable glyphs.
+            // TODO: Extract the code that's shared with the initial font rasterization.
             u8* texels_start = state->font_texels + row * state->font_char_h * state->font_texture_w + col * state->font_char_w;
             for_count(j, state->font_char_h)
             {
@@ -2031,6 +2036,14 @@ int main(int argc, char** argv)
 #endif
         state->info_panel_width = 500;
 
+        str_t help_tab_labels[] = {
+          str("Keybindings"),
+          str("Search"),
+        };
+        i32 help_tab_count = array_count(help_tab_labels);
+        // state->show_help = true;
+        // state->help_tab_idx = 1;
+
         state->xi_scroll_x_increment = 120.0f;
         state->xi_scroll_y_increment = 120.0f;
 
@@ -2449,7 +2462,23 @@ int main(int argc, char** argv)
                     {
                       quitting = true;
                     }
-                    else if(ctrl_held && keysym == 'f' || !state->searching && keysym == '/')
+                    else if(keysym == XK_F1)
+                    {
+                      bflip(state->show_help);
+                    }
+                    else if(state->show_help && keysym == XK_Escape)
+                    {
+                      state->show_help = false;
+                    }
+                    else if(state->show_help && (shift_held && keysym == XK_Tab))
+                    {
+                      state->help_tab_idx = i32_wrap_upto(state->help_tab_idx - 1, help_tab_count);
+                    }
+                    else if(state->show_help && keysym == XK_Tab)
+                    {
+                      state->help_tab_idx = i32_wrap_upto(state->help_tab_idx + 1, help_tab_count);
+                    }
+                    else if(state->show_help && ctrl_held && keysym == 'f' || !state->searching && keysym == '/')
                     {
                       bflip(state->searching);
                       if(state->searching)
@@ -4197,6 +4226,7 @@ _search_end_label:
             r32 text_gray = bright_bg ? 0 : 1;
             r32 label_gray = bright_bg ? 0.3f : 0.7f;
             r32 highlight_gray = bright_bg ? 0.7f : 0.3f;
+            r32 background_gray = bright_bg ? 1 : 0;
 
             if(state->show_info == 1)
             {
@@ -4327,7 +4357,6 @@ _search_end_label:
                   wrap_next_line(&wrap_ctx, x);
                 } while(finish_wrapped_line(&wrap_ctx, &x, &y));
 
-                r32 background_gray = bright_bg ? 1 : 0;
                 r32 loading_gray = bright_bg ? 0.8f : 0.2f;
                 r32 x_max = (wrap_ctx.line_idx == 0) ? wrap_ctx.line_end_x : x1;
                 r32 box_x0 = x0 - 0.3f * fs;
@@ -4445,6 +4474,152 @@ _search_end_label:
                 glEnd();
               }
             }
+
+            if(state->show_help)
+            {
+              r32 box_width = min(state->win_w, 45 * fs);
+              r32 box_x0 = 0.5f * (state->win_w - box_width);
+              r32 box_x1 = 0.5f * (state->win_w + box_width);
+              r32 box_y0 = 0;
+              r32 box_y1 = min(state->win_h, 30 * fs);
+
+              glScissor(box_x0, box_y0, box_x1 - box_x0, box_y1 - box_y0);
+
+              glEnable(GL_BLEND);
+              glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+              glColor4f(background_gray, background_gray, background_gray, 0.85f);
+              glBindTexture(GL_TEXTURE_2D, 0);
+              glBegin(GL_QUADS);
+              glVertex2f(box_x0, box_y0);
+              glVertex2f(box_x1, box_y0);
+              glVertex2f(box_x1, box_y1);
+              glVertex2f(box_x0, box_y1);
+              glEnd();
+              glDisable(GL_BLEND);
+
+              r32 x0 = box_x0 + 0.5f * fs;
+              r32 x1 = box_x1 - 0.5f * fs;
+              r32 x = x0;
+              r32 y = box_y1 - 1.25f * fs;
+
+              for(i32 tab_idx = 0;
+                  tab_idx < help_tab_count;
+                  ++tab_idx)
+              {
+                b32 active_tab = (state->help_tab_idx == tab_idx);
+
+                if(active_tab)
+                {
+                  glColor3f(text_gray, text_gray, text_gray);
+                }
+                else
+                {
+                  glColor3f(label_gray, label_gray, label_gray);
+                }
+
+                x += draw_str(state, 0, fs, x, y, help_tab_labels[tab_idx]);
+                x += fs;
+              }
+
+              glColor3f(label_gray, label_gray, label_gray);
+              x += fs;
+              x += draw_str(state, 0, fs, x, y, str("(Tab ↹ for next section, F1 to toggle this help.)"));
+
+              glBindTexture(GL_TEXTURE_2D, 0);
+              glBegin(GL_QUADS);
+              glVertex2f(box_x0, y - fs * (0.25f + state->font_descent) - 1);
+              glVertex2f(box_x1, y - fs * (0.25f + state->font_descent) - 1);
+              glVertex2f(box_x1, y - fs * (0.25f + state->font_descent));
+              glVertex2f(box_x0, y - fs * (0.25f + state->font_descent));
+              glEnd();
+
+              x = x0;
+              y -= 1.0f * fs;
+              r32 x_indented = x0 + fs;
+              r32 x_column = x0 + 16 * fs;
+
+#define SHOW_LABEL_VALUE(label, binding) \
+              { \
+                y -= fs; \
+                x = x0; \
+                \
+                glColor3f(label_gray, label_gray, label_gray); \
+                r32 label_width = draw_str(state, DRAW_STR_MEASURE_ONLY, fs, x, y, str(label)); \
+                x = x_column - label_width - 1.0f * fs; \
+                draw_str(state, 0, fs, x, y, str(label)); \
+                \
+                glColor3f(text_gray, text_gray, text_gray); \
+                x = x_column; \
+                x += draw_str(state, 0, fs, x, y, str(binding)); \
+              }
+
+              r32 ypad = 0.5f * fs;
+              if(0) {}
+              else if(state->help_tab_idx == 0)
+              {
+                // Keys.
+
+                SHOW_LABEL_VALUE("Quit", "Ctrl + Q");
+                SHOW_LABEL_VALUE("Navigate images", "Space/Backspace, Arrows, HJKL, LMB/MMB, Alt + Scroll");
+                SHOW_LABEL_VALUE("Jump to first, last", "Home/End, G/Shift + G");
+                y -= ypad;
+                SHOW_LABEL_VALUE("Pan image", "LMB-Drag");
+                SHOW_LABEL_VALUE("Zoom image", "Scroll, 0/-/=, MMB-Drag, Ctrl + LMB-Drag");
+                SHOW_LABEL_VALUE("Zoom to fit", "X");
+                SHOW_LABEL_VALUE("Zoom to 1:1", "Z, 1");
+                SHOW_LABEL_VALUE("Zoom to 2:1, 3:1, 4:1", "2/3/4");
+                SHOW_LABEL_VALUE("Zoom to 1:2, 1:3, 1:4", "Shift + 2/3/4");
+                y -= ypad;
+                SHOW_LABEL_VALUE("Toggle info bar/panel", "I");
+                SHOW_LABEL_VALUE("Toggle thumbnails", "T");
+                SHOW_LABEL_VALUE("Change thumbnail column count", "Alt + 0/-/=, Ctrl + Scroll on thumbnails");
+                y -= ypad;
+                SHOW_LABEL_VALUE("Search", "/, Ctrl + F");
+                SHOW_LABEL_VALUE("Mark images", "M, Ctrl + A, Ctrl/Shift + LMB on thumbnails");
+                SHOW_LABEL_VALUE("Mark image and go to next", "Shift + M");
+                SHOW_LABEL_VALUE("Copy current or marked images", "Ctrl + C");
+                SHOW_LABEL_VALUE("Show only marked images", "O");
+                y -= ypad;
+                SHOW_LABEL_VALUE("Toggle nearest-pixel filtering", "N");
+                SHOW_LABEL_VALUE("Toggle bright/dark mode", "B");
+                SHOW_LABEL_VALUE("Copy positive prompt (WIP)", "Shift + Ctrl + C (might not work if there are marked images)");
+                SHOW_LABEL_VALUE("Reload images (WIP)", "R");
+              }
+              else if(state->help_tab_idx == 1)
+              {
+                // Search.
+
+                y -= fs;
+                x = x0;
+                glColor3f(text_gray, text_gray, text_gray);
+                draw_wrapped_text(state, fs, x0, x1, &x, &y, str(
+                      "When the search box is open (Ctrl+F or /), images can be filtered by prompt and other metadata.\n"
+                      "Everything is case-insensitive and mostly order-independent.\n"
+                      "\n"
+                      "EXAMPLE:  blue -jay sketch|paint\n"
+                      "This will match positive prompts that include \"blue\" and "
+                      "either \"sketch\" or \"paint\", but not \"jay\".\n"
+                      "It would accept \"sketch of blue sky\", \"Painting a Blue Sketch\", but NOT "
+                      "\"blue car\" or \"blue jay sketch\".\n"
+                      "\n"
+                      "Additional parameters can be specified with these special prefixes:\n"
+                      "  f:<file path>\n"
+                      "  m:<model name>\n"
+                      "  n:<negative prompt>\n"
+                      "\n"
+                      "EXAMPLE:  m:sd -f:bad|tmp m:0.9\n"
+                      "This will match images created with a model that includes both \"sd\" and \"0.9\" "
+                      "(e.g. \"SDXL_0.9vae\", but neither \"sd_xl_1.0\" nor \"v1-5-pruned\"), "
+                      "but only if their filepath does NOT include \"bad\" or \"tmp\" (so \"good/pic.png\" is OK, but \"tmp/pic.png\" is excluded).\n"
+                      "\n"
+                      "If the search is aborted with Escape (instead of accepted with Enter), all images get shown again.\n"
+                      "If image metadata are still getting loaded (e.g. from a slow filesystem), "
+                      "the search box turns into a progress bar. "
+                      "While it is not full, the search results may be incomplete."
+                      ));
+              }
+            }
+#undef SHOW_LABEL_VALUE
 
 #if 0
             // https://www.khronos.org/opengl/wiki/Sync_Object#Synchronization
