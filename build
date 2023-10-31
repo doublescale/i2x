@@ -25,7 +25,9 @@ if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb.o ]; then
   $CC -std=c11 -O3 -c -o obj/stb.o lib/stb.c
 fi
 
-$CC $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb.o src/main.c
+ld -r -b binary data/DejaVuSans.ttf -o obj/font.o
+
+$CC $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb.o obj/font.o src/main.c
 
 if [ ${OPTIMIZE:-0} -ne 0 ]; then
   strip i2x

@@ -57,6 +57,10 @@ static FILE* debug_out = 0;
 
 // static void (*glXSwapIntervalEXT)(Display *dpy, GLXDrawable drawable, int interval);
 
+extern void* _binary_data_DejaVuSans_ttf_start;
+// extern void* _binary_data_DejaVuSans_ttf_end;
+// extern void* _binary_data_DejaVuSans_ttf_size;
+
 internal u64 get_nanoseconds()
 {
   struct timespec ts;
@@ -1633,10 +1637,12 @@ int main(int argc, char** argv)
       printf("\n");
       printf("The following environment variables are used:\n");
       printf("I2X_DISABLE_XINPUT2: Disables XInput2 handling, which allows\n");
-      printf("  smooth scrolling and raw sub-pixel mouse motion, but can be glitchy.\n");
-      printf("I2X_LOADER_THREADS: Sets the number of image-loader threads (default: %d).\n", state->loader_count);
+      printf("                     smooth scrolling and raw sub-pixel mouse motion,\n");
+      printf("                     but can be glitchy.\n");
+      printf("I2X_LOADER_THREADS:  Sets the number of image-loader threads (default: %d).\n", state->loader_count);
+      printf("I2X_TTF_PATH:        Use an external font file instead of the internal one.\n");
       printf("\n");
-      printf("Example invocation: I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 %s\n", argv[0]);
+      printf("Example invocation:  I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 %s\n", argv[0]);
       return 0;
     }
   }
@@ -1938,64 +1944,69 @@ int main(int argc, char** argv)
         state->custom_codepoint_count = state->chars_per_font_row * state->chars_per_font_col - state->fixed_codepoint_range_length;
         state->custom_codepoints = malloc_array(state->custom_codepoint_count, u32);
         for_count(i, state->custom_codepoint_count) { state->custom_codepoints[i] = ' '; }
-        // TODO: Pack a font into the executable.
-        char* ttf_paths[] = {
-          "/usr/share/fonts/TTF/DejaVuSans.ttf",
-          "/usr/share/fonts/TTF/Vera.ttf",
-        };
-        for(i32 ttf_idx = 0;
-            ttf_idx < array_count(ttf_paths) && !state->font_texture_id;
-            ++ttf_idx)
+
         {
-          char* ttf_path = ttf_paths[ttf_idx];
-          str_t ttf_contents = read_file(ttf_path);
-
-          if(ttf_contents.size > 0)
+          u8* ttf_data = 0;
+          char* ttf_path = getenv("I2X_TTF_PATH");
+          if(ttf_path)
           {
-            if(stbtt_InitFont(&state->font, ttf_contents.data, stbtt_GetFontOffsetForIndex(ttf_contents.data, 0)))
+            ttf_data = read_file(ttf_path).data;
+            if(!ttf_data)
             {
-              state->font_texels = malloc_array(state->font_texture_w * state->font_texture_h, u8);
-              zero_bytes(state->font_texture_w * state->font_texture_h, state->font_texels);
-
-              state->stb_font_scale = stbtt_ScaleForPixelHeight(&state->font, 32);
-
-              int ascent, descent, line_gap;
-              stbtt_GetFontVMetrics(&state->font, &ascent, &descent, &line_gap);
-              state->font_ascent = (r32)ascent * state->stb_font_scale / (r32)state->font_char_h;
-              state->font_descent = -(r32)descent * state->stb_font_scale / (r32)state->font_char_h;
-
-              for(i32 char_idx = 0;
-                  char_idx < state->fixed_codepoint_range_length;
-                  ++char_idx)
-              {
-                i32 row = char_idx / state->chars_per_font_row;
-                i32 col = char_idx % state->chars_per_font_row;
-
-                i32 codepoint = state->fixed_codepoint_range_start + char_idx;
-
-                stbtt_MakeCodepointBitmap(&state->font,
-                    state->font_texels + row * state->font_char_h * state->font_texture_w + col * state->font_char_w,
-                    state->font_char_w, state->font_char_h, state->font_texture_w, state->stb_font_scale, state->stb_font_scale, codepoint);
-              }
-
-              glGenTextures(1, &state->font_texture_id);
-              glBindTexture(GL_TEXTURE_2D, state->font_texture_id);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-              glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
-                  state->font_texture_w, state->font_texture_h, 0, GL_ALPHA, GL_UNSIGNED_BYTE, state->font_texels);
+              fprintf(stderr, "Can't open TTF file at '%s', falling back to built-in font.\n", ttf_path);
             }
-            else
+          }
+          if(!ttf_data)
+          {
+            ttf_data = (u8*)&_binary_data_DejaVuSans_ttf_start;
+          }
+
+          if(stbtt_InitFont(&state->font, ttf_data, stbtt_GetFontOffsetForIndex(ttf_data, 0)))
+          {
+            state->font_texels = malloc_array(state->font_texture_w * state->font_texture_h, u8);
+            zero_bytes(state->font_texture_w * state->font_texture_h, state->font_texels);
+
+            state->stb_font_scale = stbtt_ScaleForPixelHeight(&state->font, 32);
+
+            int ascent, descent, line_gap;
+            stbtt_GetFontVMetrics(&state->font, &ascent, &descent, &line_gap);
+            state->font_ascent = (r32)ascent * state->stb_font_scale / (r32)state->font_char_h;
+            state->font_descent = -(r32)descent * state->stb_font_scale / (r32)state->font_char_h;
+
+            for(i32 char_idx = 0;
+                char_idx < state->fixed_codepoint_range_length;
+                ++char_idx)
             {
-              free(ttf_contents.data);
+              i32 row = char_idx / state->chars_per_font_row;
+              i32 col = char_idx % state->chars_per_font_row;
+
+              i32 codepoint = state->fixed_codepoint_range_start + char_idx;
+
+              stbtt_MakeCodepointBitmap(&state->font,
+                  state->font_texels + row * state->font_char_h * state->font_texture_w + col * state->font_char_w,
+                  state->font_char_w, state->font_char_h, state->font_texture_w, state->stb_font_scale, state->stb_font_scale, codepoint);
             }
+
+            glGenTextures(1, &state->font_texture_id);
+            glBindTexture(GL_TEXTURE_2D, state->font_texture_id);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
+                state->font_texture_w, state->font_texture_h, 0, GL_ALPHA, GL_UNSIGNED_BYTE, state->font_texels);
           }
 
           if(!state->font_texture_id)
           {
-            fprintf(stderr, "Could not generate font from '%s'.\n", ttf_path);
+            if(ttf_path)
+            {
+              fprintf(stderr, "Could not generate font from '%s'.\n", ttf_path);
+            }
+            else
+            {
+              fprintf(stderr, "Could not generate font.\n");
+            }
           }
         }
 
@@ -2050,13 +2061,7 @@ int main(int argc, char** argv)
         i32 hovered_thumbnail_idx = -1;
         // state->show_info = 2;
         state->search_str.data = state->search_str_buffer;
-#if 0
-        // SEARCH STRING DEBUG
-        str_replace_selection(sizeof(state->search_str_buffer),
-            &state->search_str, &state->selection_start, &state->selection_end,
-            str("one two-three\nfour"));
-#endif
-        state->info_panel_width = 300;
+        state->info_panel_width = 350;
 
         str_t help_tab_labels[] = {
           str("Keybindings"),

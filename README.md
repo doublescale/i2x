@@ -3,7 +3,6 @@ Image viewer specialized for large PNG collections generated with Stable Diffusi
 
 ## Build & Run
 A C compiler and development packages for X11, Xi, GL, GLX must be installed.
-The DejaVu Sans font must be installed at /usr/share/fonts/TTF/DejaVuSans.ttf (WIP).
 
 ```bash
 OPTIMIZE=1 ./build
