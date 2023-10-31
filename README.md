@@ -15,11 +15,13 @@ Invoke ./i2x --help for command-line help.
 
 ## Features
 - Handle tens of thousands of images.
+- Fast. Should start up in <0.5s. Flip between loaded images instantly.
+- Limited support for JPEG, BMP, and some other image formats.
 - Show Stable Diffusion generation metadata contained in PNGs.  i2x intends to support stable-diffusion-webui and ComfyUI.
 - Search images by prompt and other parameters.
 
 Here's a video showing a search over 35k images:
-![Search](demo/search.gif)
+![Search Demo](demo/search.gif)
 
 ## Known Limitations
 - Linux-only.
