@@ -168,7 +168,18 @@ typedef struct
   i64 vram_bytes_used;
   b32 linear_sampling;
   b32 alpha_blend;
+  b32 zoom_from_original_size;  // If false, fit to window instead.
+
+  b32 show_help;
+  i32 help_tab_idx;
+
+  b32 show_thumbnails;
+  r32 thumbnail_panel_width_ratio;
+  r32 thumbnail_scroll_rows;
+  i32 thumbnail_columns;
+
   i32 show_info;
+  r32 info_panel_width_ratio;
 
   GLuint test_texture_id;
 
@@ -206,9 +217,6 @@ typedef struct
   u8 clipboard_str_buffer[64 * 1024];
   str_t clipboard_str;
 
-  b32 show_help;
-  i32 help_tab_idx;
-
   b32 searching;
   u8 search_str_buffer[64 * 1024];
   str_t search_str;
@@ -228,15 +236,6 @@ typedef struct
   sem_t metadata_loader_semaphore;
 
   int inotify_fd;
-
-  b32 zoom_from_original_size;  // If false, fit to window instead.
-
-  b32 hide_sidebar;
-  i32 sidebar_width;
-  r32 sidebar_scroll_rows;
-  i32 thumbnail_columns;
-
-  i32 info_panel_width;
 
   r32 dragging_start_x;
   r32 dragging_start_y;
@@ -1200,29 +1199,36 @@ internal b32 interaction_allowed(ui_interaction_t current, ui_interaction_t targ
 
 internal i32 get_scrollbar_width(state_t* state)
 {
-  return 20;
+  return max(5, (i32)(0.01f * state->win_w + 0.5f));
 }
 
-internal i32 get_effective_sidebar_width(state_t* state)
+internal i32 get_effective_thumbnail_panel_width(state_t* state)
 {
-  return max(0, min(state->win_w - 10, state->sidebar_width));
+  i32 result = 0;
+  if(state->show_thumbnails)
+  {
+    result = max(2, min(state->win_w - 10, state->win_w * state->thumbnail_panel_width_ratio));
+  }
+  return result;
 }
 
 internal r32 get_thumbnail_size(state_t* state)
 {
-  return max(1.0f, (r32)(get_effective_sidebar_width(state) - get_scrollbar_width(state) - 2) / (r32)state->thumbnail_columns);
+  return max(1.0f,
+      (r32)(get_effective_thumbnail_panel_width(state) - get_scrollbar_width(state) - 2)
+      / (r32)state->thumbnail_columns);
 }
 
-internal void clamp_sidebar_scroll_rows(state_t* state)
+internal void clamp_thumbnail_scroll_rows(state_t* state)
 {
   r32 thumbnail_h = get_thumbnail_size(state);
   if(thumbnail_h > 0)
   {
     i32 thumbnail_rows = (state->filtered_img_count + state->thumbnail_columns - 1) / state->thumbnail_columns;
 
-    state->sidebar_scroll_rows = max(0,
+    state->thumbnail_scroll_rows = max(0,
         min(thumbnail_rows - state->win_h / thumbnail_h + 1,
-          state->sidebar_scroll_rows));
+          state->thumbnail_scroll_rows));
   }
 }
 
@@ -2055,13 +2061,13 @@ int main(int argc, char** argv)
         r32 zoom = 0;
         r32 offset_x = 0;
         r32 offset_y = 0;
-        state->hide_sidebar = false;
-        state->sidebar_width = 300;
+        state->show_thumbnails = true;
+        state->thumbnail_panel_width_ratio = 0.2f;
         state->thumbnail_columns = 2;
         i32 hovered_thumbnail_idx = -1;
         // state->show_info = 2;
         state->search_str.data = state->search_str_buffer;
-        state->info_panel_width = 350;
+        state->info_panel_width_ratio = 0.2f;
 
         str_t help_tab_labels[] = {
           str("Keybindings"),
@@ -2092,10 +2098,10 @@ int main(int argc, char** argv)
         ui_interaction_t hovered_interaction = {0};
         ui_interaction_t current_interaction = {0};
         ui_interaction_t mainview_interaction = { &offset_x };
-        ui_interaction_t sidebar_interaction = { &state->viewing_filtered_img_idx };
-        ui_interaction_t sidebar_resize_interaction = { &state->sidebar_width };
-        ui_interaction_t scrollbar_interaction = { &state->sidebar_scroll_rows };
-        ui_interaction_t info_panel_resize_interaction = { &state->info_panel_width };
+        ui_interaction_t thumbnail_interaction = { &state->viewing_filtered_img_idx };
+        ui_interaction_t thumbnail_panel_resize_interaction = { &state->thumbnail_panel_width_ratio };
+        ui_interaction_t scrollbar_interaction = { &state->thumbnail_scroll_rows };
+        ui_interaction_t info_panel_resize_interaction = { &state->info_panel_width_ratio };
 
         while(!quitting)
         {
@@ -2162,7 +2168,7 @@ int main(int argc, char** argv)
           i32 info_height = 0;
           r32 win_min_side = 0;
           r32 fs = 0;
-          i32 effective_sidebar_width = 0;
+          i32 effective_thumbnail_panel_width = 0;
           i32 effective_info_panel_width = 0;
           i32 image_region_x0 = 0;
           i32 image_region_y0 = 0;
@@ -2174,9 +2180,9 @@ int main(int argc, char** argv)
             win_min_side = min(state->win_w, state->win_h);
             fs = clamp(12, 36, (26.0f / 1080.0f) * win_min_side);
             info_height = 1.2f * fs;
-            effective_sidebar_width = get_effective_sidebar_width(state);
-            effective_info_panel_width = max(1, min(state->win_w - 10, state->info_panel_width));
-            image_region_x0 = state->hide_sidebar ? 0 : effective_sidebar_width;
+            effective_thumbnail_panel_width = get_effective_thumbnail_panel_width(state);
+            effective_info_panel_width = max(1, min(state->win_w - 10, state->win_w * state->info_panel_width_ratio));
+            image_region_x0 = effective_thumbnail_panel_width;
             image_region_y0 = (state->show_info == 1) ? info_height : 0;
             image_region_w = max(0, state->win_w - image_region_x0 - (state->show_info == 2 ? effective_info_panel_width : 0));
             image_region_h = max(0, state->win_h - image_region_y0);
@@ -2730,13 +2736,13 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == XK_Page_Up)
                     {
-                      state->sidebar_scroll_rows -= (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      clamp_sidebar_scroll_rows(state);
+                      state->thumbnail_scroll_rows -= (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      clamp_thumbnail_scroll_rows(state);
                     }
                     else if(keysym == XK_Page_Down)
                     {
-                      state->sidebar_scroll_rows += (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      clamp_sidebar_scroll_rows(state);
+                      state->thumbnail_scroll_rows += (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      clamp_thumbnail_scroll_rows(state);
                     }
                     else if(ctrl_held && keysym == 'a')
                     {
@@ -2797,7 +2803,7 @@ int main(int argc, char** argv)
                         state->filtered_img_count = state->total_img_count;
                         state->viewing_filtered_img_idx = prev_viewing_idx;
                       }
-                      clamp_sidebar_scroll_rows(state);
+                      clamp_thumbnail_scroll_rows(state);
                       scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == 'r')
@@ -2815,7 +2821,7 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 't')
                     {
-                      bflip(state->hide_sidebar);
+                      bflip(state->show_thumbnails);
                     }
                     else if(keysym == 'i')
                     {
@@ -2915,7 +2921,7 @@ int main(int argc, char** argv)
                       {
                         state->thumbnail_columns += 1;
                         clamp_thumbnail_columns(state);
-                        clamp_sidebar_scroll_rows(state);
+                        clamp_thumbnail_scroll_rows(state);
                       }
                       else
                       {
@@ -2928,7 +2934,7 @@ int main(int argc, char** argv)
                       {
                         state->thumbnail_columns -= 1;
                         clamp_thumbnail_columns(state);
-                        clamp_sidebar_scroll_rows(state);
+                        clamp_thumbnail_scroll_rows(state);
                       }
                       else
                       {
@@ -3293,26 +3299,26 @@ int main(int argc, char** argv)
               zero_struct(current_interaction);
             }
 
-            b32 mouse_on_sidebar_edge = false;
-            b32 mouse_in_sidebar = false;
+            b32 mouse_on_thumbnail_panel_edge = false;
+            b32 mouse_in_thumbnail_panel = false;
             b32 mouse_on_scrollbar = false;
             b32 mouse_on_info_panel_edge = false;
             b32 mouse_in_info_panel = false;
-            if(!state->hide_sidebar
-                && mouse_x >= effective_sidebar_width - get_scrollbar_width(state)
-                && mouse_x < effective_sidebar_width)
+            if(state->show_thumbnails
+                && mouse_x >= effective_thumbnail_panel_width - get_scrollbar_width(state)
+                && mouse_x < effective_thumbnail_panel_width)
             {
               mouse_on_scrollbar = true;
             }
-            else if(!state->hide_sidebar
-                && mouse_x >= effective_sidebar_width
-                && mouse_x < effective_sidebar_width + 10)
+            else if(state->show_thumbnails
+                && mouse_x >= effective_thumbnail_panel_width
+                && mouse_x < effective_thumbnail_panel_width + 10)
             {
-              mouse_on_sidebar_edge = true;
+              mouse_on_thumbnail_panel_edge = true;
             }
-            else if(!state->hide_sidebar && !mouse_on_sidebar_edge && mouse_x < effective_sidebar_width)
+            else if(state->show_thumbnails && !mouse_on_thumbnail_panel_edge && mouse_x < effective_thumbnail_panel_width)
             {
-              mouse_in_sidebar = true;
+              mouse_in_thumbnail_panel = true;
             }
             else if(state->show_info == 2 && absolute(mouse_x - (state->win_w - effective_info_panel_width)) <= 10)
             {
@@ -3332,17 +3338,17 @@ int main(int argc, char** argv)
               else if(mouse_on_scrollbar)
               {
                 hovered_interaction = scrollbar_interaction;
-                state->dragging_start_value2 = state->sidebar_scroll_rows;
+                state->dragging_start_value2 = state->thumbnail_scroll_rows;
               }
-              else if(mouse_on_sidebar_edge)
+              else if(mouse_on_thumbnail_panel_edge)
               {
-                hovered_interaction = sidebar_resize_interaction;
-                state->dragging_start_value = effective_sidebar_width;
-                state->dragging_start_value2 = state->sidebar_scroll_rows;
+                hovered_interaction = thumbnail_panel_resize_interaction;
+                state->dragging_start_value = effective_thumbnail_panel_width;
+                state->dragging_start_value2 = state->thumbnail_scroll_rows;
               }
-              else if(mouse_in_sidebar)
+              else if(mouse_in_thumbnail_panel)
               {
-                hovered_interaction = sidebar_interaction;
+                hovered_interaction = thumbnail_interaction;
 
                 state->dragging_start_value = 0;
                 img_entry_t* hovered_img = get_filtered_img(state, hovered_thumbnail_idx);
@@ -3375,7 +3381,7 @@ int main(int argc, char** argv)
               }
             }
 
-            if(interaction_eq(current_interaction, sidebar_interaction) && lmb_held)
+            if(interaction_eq(current_interaction, thumbnail_interaction) && lmb_held)
             {
               if(hovered_thumbnail_idx != -1)
               {
@@ -3409,32 +3415,42 @@ int main(int argc, char** argv)
               i32 total_thumbnail_rows = (state->filtered_img_count + state->thumbnail_columns - 1) / state->thumbnail_columns + 1;
               if(mmb_held)
               {
-                state->sidebar_scroll_rows = (state->win_h - mouse_y) * total_thumbnail_rows / state->win_h;
+                state->thumbnail_scroll_rows = (state->win_h - mouse_y) * total_thumbnail_rows / state->win_h;
               }
               else if(lmb_held)
               {
-                state->sidebar_scroll_rows -= mouse_delta_y * total_thumbnail_rows / state->win_h;
+                state->thumbnail_scroll_rows -= mouse_delta_y * total_thumbnail_rows / state->win_h;
               }
-              clamp_sidebar_scroll_rows(state);
+              clamp_thumbnail_scroll_rows(state);
               dirty = true;
             }
-            else if(interaction_eq(current_interaction, sidebar_resize_interaction))
+            else if(interaction_eq(current_interaction, thumbnail_panel_resize_interaction))
             {
               if(lmb_held)
               {
-                state->sidebar_width = state->dragging_start_value + (i32)(mouse_x - state->dragging_start_x);
-                state->sidebar_scroll_rows = state->dragging_start_value2;
-                clamp_sidebar_scroll_rows(state);
-                dirty = true;
+                if(state->win_w != 0)
+                {
+                  state->thumbnail_panel_width_ratio =
+                    (r32)(state->dragging_start_value + (i32)(mouse_x - state->dragging_start_x))
+                    / state->win_w;
+                  state->thumbnail_scroll_rows = state->dragging_start_value2;
+                  clamp_thumbnail_scroll_rows(state);
+                  dirty = true;
+                }
               }
             }
             else if(interaction_eq(current_interaction, info_panel_resize_interaction))
             {
               if(lmb_held)
               {
-                state->info_panel_width = state->dragging_start_value - (i32)(mouse_x - state->dragging_start_x);
-                state->info_panel_width = max(1, state->info_panel_width);
-                dirty = true;
+                if(state->win_w != 0)
+                {
+                  state->info_panel_width_ratio =
+                    (r32)(state->dragging_start_value - (i32)(mouse_x - state->dragging_start_x))
+                    / state->win_w;
+                  state->info_panel_width_ratio = clamp(0, 1, state->info_panel_width_ratio);
+                  dirty = true;
+                }
               }
             }
             else if(mouse_delta_x || mouse_delta_y || scroll_x || scroll_y || scroll_y_ticks || mouse_btn_went_down)
@@ -3454,32 +3470,32 @@ int main(int argc, char** argv)
 
               if(!alt_held)
               {
-                if(mouse_in_sidebar || mouse_on_scrollbar)
+                if(mouse_in_thumbnail_panel || mouse_on_scrollbar)
                 {
                   if(ctrl_held)
                   {
                     i32 prev_visible_idx = hovered_thumbnail_idx;
                     if(prev_visible_idx == -1)
                     {
-                      prev_visible_idx = (state->sidebar_scroll_rows + 1) * state->thumbnail_columns;
+                      prev_visible_idx = (state->thumbnail_scroll_rows + 1) * state->thumbnail_columns;
                     }
-                    r32 prev_visible_top_y = (prev_visible_idx / state->thumbnail_columns - state->sidebar_scroll_rows) * thumbnail_h;
+                    r32 prev_visible_top_y = (prev_visible_idx / state->thumbnail_columns - state->thumbnail_scroll_rows) * thumbnail_h;
 
                     state->thumbnail_columns -= scroll_y_ticks;
                     clamp_thumbnail_columns(state);
                     thumbnail_h = get_thumbnail_size(state);
 
-                    r32 new_visible_top_y = (prev_visible_idx / state->thumbnail_columns - state->sidebar_scroll_rows) * thumbnail_h;
-                    state->sidebar_scroll_rows += (new_visible_top_y - prev_visible_top_y) / thumbnail_h;
-                    clamp_sidebar_scroll_rows(state);
+                    r32 new_visible_top_y = (prev_visible_idx / state->thumbnail_columns - state->thumbnail_scroll_rows) * thumbnail_h;
+                    state->thumbnail_scroll_rows += (new_visible_top_y - prev_visible_top_y) / thumbnail_h;
+                    clamp_thumbnail_scroll_rows(state);
                   }
                   else if(shift_held)
                   {
                   }
                   else
                   {
-                    state->sidebar_scroll_rows -= scroll_y;
-                    clamp_sidebar_scroll_rows(state);
+                    state->thumbnail_scroll_rows -= scroll_y;
+                    clamp_thumbnail_scroll_rows(state);
                   }
                 }
                 else
@@ -3898,22 +3914,22 @@ _search_end_label:
               scroll_thumbnail_into_view = false;
               i32 thumbnail_row = state->viewing_filtered_img_idx / state->thumbnail_columns;
 #if 0
-              state->sidebar_scroll_rows = thumbnail_row - 0.5f * state->win_h / thumbnail_h + 0.5f;
+              state->thumbnail_scroll_rows = thumbnail_row - 0.5f * state->win_h / thumbnail_h + 0.5f;
 #else
               // i32 extra_rows = (state->win_h >= 2 * thumbnail_h) ? 1 : 0;
               i32 extra_rows = (i32)(0.3f * state->win_h / thumbnail_h);
 
-              state->sidebar_scroll_rows = clamp(
+              state->thumbnail_scroll_rows = clamp(
                   max(0, thumbnail_row + 1 - state->win_h / thumbnail_h + extra_rows),
                   thumbnail_row - extra_rows,
-                  state->sidebar_scroll_rows);
+                  state->thumbnail_scroll_rows);
 #endif
 
-              clamp_sidebar_scroll_rows(state);
+              clamp_thumbnail_scroll_rows(state);
             }
 
-            i32 first_visible_row = (i32)state->sidebar_scroll_rows;
-            i32 one_past_last_visible_row = (i32)(state->sidebar_scroll_rows + state->win_h / thumbnail_h + 1);
+            i32 first_visible_row = (i32)state->thumbnail_scroll_rows;
+            i32 one_past_last_visible_row = (i32)(state->thumbnail_scroll_rows + state->win_h / thumbnail_h + 1);
             i32 first_visible_thumbnail_idx = max(0, first_visible_row * state->thumbnail_columns);
             i32 last_visible_thumbnail_idx = min(state->filtered_img_count, one_past_last_visible_row * state->thumbnail_columns) - 1;
             if(0
@@ -3979,9 +3995,9 @@ _search_end_label:
 
             b32 still_loading = false;
 
-            if(!state->hide_sidebar)
+            if(state->show_thumbnails)
             {
-              glScissor(0, 0, effective_sidebar_width, state->win_h);
+              glScissor(0, 0, effective_thumbnail_panel_width, state->win_h);
 
               glDisable(GL_BLEND);
               glDisable(GL_TEXTURE_2D);
@@ -3999,38 +4015,38 @@ _search_end_label:
 
                 i32 scrollbar_width = get_scrollbar_width(state);
                 i32 total_thumbnail_rows = (state->filtered_img_count + state->thumbnail_columns - 1) / state->thumbnail_columns + 1;
-                r32 scrollbar_top_ratio = state->sidebar_scroll_rows / (r32)total_thumbnail_rows;
-                r32 scrollbar_bottom_ratio = (state->sidebar_scroll_rows + state->win_h / thumbnail_h) / (r32)total_thumbnail_rows;
+                r32 scrollbar_top_ratio = state->thumbnail_scroll_rows / (r32)total_thumbnail_rows;
+                r32 scrollbar_bottom_ratio = (state->thumbnail_scroll_rows + state->win_h / thumbnail_h) / (r32)total_thumbnail_rows;
                 i32 scrollbar_yrange = max(2, (i32)(state->win_h * (scrollbar_bottom_ratio - scrollbar_top_ratio) + 0.5f));
                 i32 scrollbar_y1 = (i32)(state->win_h * (1 - scrollbar_top_ratio) + 0.5f);
                 i32 scrollbar_y0 = scrollbar_y1 - scrollbar_yrange;
 
-                glVertex2f(effective_sidebar_width - scrollbar_width, scrollbar_y0);
-                glVertex2f(effective_sidebar_width - 2, scrollbar_y0);
-                glVertex2f(effective_sidebar_width - 2, scrollbar_y1);
-                glVertex2f(effective_sidebar_width - scrollbar_width, scrollbar_y1);
+                glVertex2f(effective_thumbnail_panel_width - scrollbar_width, scrollbar_y0);
+                glVertex2f(effective_thumbnail_panel_width - 2, scrollbar_y0);
+                glVertex2f(effective_thumbnail_panel_width - 2, scrollbar_y1);
+                glVertex2f(effective_thumbnail_panel_width - scrollbar_width, scrollbar_y1);
               }
 
               // Resizing bar.
-              r32 sidebar_edge_gray = 0.0f;
-              if(interaction_eq(hovered_interaction, sidebar_resize_interaction))
+              r32 thumbnail_panel_edge_gray = 0.0f;
+              if(interaction_eq(hovered_interaction, thumbnail_panel_resize_interaction))
               {
-                sidebar_edge_gray = bright_bg ? 0.0f : 1.0f;
+                thumbnail_panel_edge_gray = bright_bg ? 0.0f : 1.0f;
               }
               else
               {
-                sidebar_edge_gray = bright_bg ? 0.4f : 0.6f;
+                thumbnail_panel_edge_gray = bright_bg ? 0.4f : 0.6f;
               }
 
-              glColor3f(sidebar_edge_gray, sidebar_edge_gray, sidebar_edge_gray);
-              glVertex2f(effective_sidebar_width - 2, 0);
-              glVertex2f(effective_sidebar_width - 1, 0);
-              glVertex2f(effective_sidebar_width - 1, state->win_h);
-              glVertex2f(effective_sidebar_width - 2, state->win_h);
+              glColor3f(thumbnail_panel_edge_gray, thumbnail_panel_edge_gray, thumbnail_panel_edge_gray);
+              glVertex2f(effective_thumbnail_panel_width - 2, 0);
+              glVertex2f(effective_thumbnail_panel_width - 1, 0);
+              glVertex2f(effective_thumbnail_panel_width - 1, state->win_h);
+              glVertex2f(effective_thumbnail_panel_width - 2, state->win_h);
 
               glEnd();
 
-              glScissor(0, 0, effective_sidebar_width - 2, state->win_h);
+              glScissor(0, 0, effective_thumbnail_panel_width - 2, state->win_h);
 
               if(state->alpha_blend)
               {
@@ -4052,18 +4068,18 @@ _search_end_label:
                 img_entry_t* thumb = get_filtered_img(state, filtered_idx);
                 still_loading |= upload_img_texture(state, thumb);
 
-                i32 sidebar_col = filtered_idx % state->thumbnail_columns;
-                i32 sidebar_row = filtered_idx / state->thumbnail_columns;
+                i32 thumbnail_col = filtered_idx % state->thumbnail_columns;
+                i32 thumbnail_row = filtered_idx / state->thumbnail_columns;
 
-                r32 box_x0 = sidebar_col * thumbnail_w;
-                r32 box_y1 = state->win_h - ((r32)sidebar_row - state->sidebar_scroll_rows) * thumbnail_h;
+                r32 box_x0 = thumbnail_col * thumbnail_w;
+                r32 box_y1 = state->win_h - ((r32)thumbnail_row - state->thumbnail_scroll_rows) * thumbnail_h;
                 r32 box_x1 = box_x0 + thumbnail_w;
                 r32 box_y0 = box_y1 - thumbnail_h;
 
                 if(hovered_thumbnail_idx == -1 &&
-                    interaction_eq(hovered_interaction, sidebar_interaction) &&
+                    interaction_eq(hovered_interaction, thumbnail_interaction) &&
                     max(0, prev_mouse_x) >= box_x0 &&
-                    (prev_mouse_x < box_x1 || sidebar_col == state->thumbnail_columns - 1) &&
+                    (prev_mouse_x < box_x1 || thumbnail_col == state->thumbnail_columns - 1) &&
                     prev_mouse_y >= box_y0 &&
                     prev_mouse_y < box_y1
                   )
