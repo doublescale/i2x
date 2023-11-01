@@ -103,6 +103,20 @@ enum
 };
 typedef u32 load_state_t;
 
+typedef struct
+{
+  i32 entry_idx;
+
+  u64 timestamp;
+
+  i32 w;
+  i32 h;
+  u8* pixels;
+  i64 bytes_used;
+
+  volatile load_state_t load_state;
+} loaded_img_t;
+
 enum
 {
   IMG_FLAG_MARKED = (1 << 0),
@@ -130,26 +144,34 @@ typedef struct img_entry_t
   i32 h;
   u8* pixels;
   GLuint texture_id;
-  u32 vram_bytes;
+  i64 bytes_used;
 
   struct img_entry_t* lru_prev;
   struct img_entry_t* lru_next;
 
-  // This should stay at the end so zeroing the memory updates this last.
   volatile load_state_t load_state;
 } img_entry_t;
 
 typedef struct
 {
+  i32 total_loader_count;
+
   i32 total_img_count;
   img_entry_t* img_entries;
 
   i32 filtered_img_count;
   i32* filtered_img_idxs;
 
+  volatile i64 total_bytes_used;
+  i64 total_bytes_limit;  // Not a strict limit.
+
   volatile i32 viewing_filtered_img_idx;
   volatile i32 first_visible_thumbnail_idx;
   volatile i32 last_visible_thumbnail_idx;
+
+  volatile i64 next_loaded_img_id;
+  volatile i64 next_finalized_img_id;
+  loaded_img_t loaded_imgs[1024];
 } shared_loader_data_t;
 
 typedef struct
@@ -165,7 +187,6 @@ typedef struct
   i32 win_h;
 
   b32 vsync;
-  i64 vram_bytes_used;
   b32 linear_sampling;
   b32 alpha_blend;
   b32 zoom_from_original_size;  // If false, fit to window instead.
@@ -229,9 +250,10 @@ typedef struct
 
   shared_loader_data_t shared_loader_data;
   i32 loader_count;
-  pthread_t loader_threads[16];
-  loader_data_t loader_data[16];
-  sem_t loader_semaphores[16];
+#define MAX_THREAD_COUNT 16
+  pthread_t loader_threads[MAX_THREAD_COUNT];
+  loader_data_t loader_data[MAX_THREAD_COUNT];
+  sem_t loader_semaphores[MAX_THREAD_COUNT];
   pthread_t metadata_loader_thread;
   sem_t metadata_loader_semaphore;
 
@@ -575,8 +597,9 @@ internal void* loader_fun(void* raw_data)
 
     // i32 max_loading_idx = min(filtered_img_count + 1, 800);
     i32 max_loading_idx = min(filtered_img_count + 1, 200);
+    i64 loaded_count_limit = array_count(shared->loaded_imgs) - shared->total_loader_count;
     for(i32 loading_idx = 0;
-        loading_idx < max_loading_idx;
+        loading_idx < max_loading_idx && shared->next_loaded_img_id - shared->next_finalized_img_id < loaded_count_limit;
         ++loading_idx)
     {
       if(0
@@ -618,31 +641,31 @@ internal void* loader_fun(void* raw_data)
 
       // printf("Loader %d loading_idx %d [%5d/%d]\n", thread_idx, loading_idx, img_idx + 1, shared->total_img_count);
 
-      img_entry_t* img = &shared->img_entries[img_idx];
+      img_entry_t* img_entry = &shared->img_entries[img_idx];
 
-      if(__sync_bool_compare_and_swap(&img->load_state, LOAD_STATE_UNLOADED, LOAD_STATE_LOADING))
+      if(__sync_bool_compare_and_swap(&img_entry->load_state, LOAD_STATE_UNLOADED, LOAD_STATE_LOADING))
       {
 #if 0
         printf("Loader %d [%5d/%d] %s\n",
             thread_idx,
             img_idx + 1, shared->total_img_count,
-            img->path.data);
+            img_entry->path.data);
 #endif
 
         struct statx file_stats = {0};
         u64 timestamp = 0;
-        if(statx(AT_FDCWD, (char*)img->path.data, AT_STATX_SYNC_AS_STAT, STATX_MTIME | STATX_SIZE, &file_stats) != -1)
+        if(statx(AT_FDCWD, (char*)img_entry->path.data, AT_STATX_SYNC_AS_STAT, STATX_MTIME | STATX_SIZE, &file_stats) != -1)
         {
-          // printf("\nFile %.*s:\n", (int)img->path.size, img->path.data);
+          // printf("\nFile %.*s:\n", (int)img_entry->path.size, img_entry->path.data);
           // printf("  size: %llu\n", file_stats.stx_size);
           // printf("  modify time: %lli %u\n", file_stats.stx_mtime.tv_sec, file_stats.stx_mtime.tv_nsec);
           timestamp = (((u64)file_stats.stx_mtime.tv_sec << 32) | (u64)file_stats.stx_mtime.tv_nsec);
         }
 
-        if(img->timestamp != timestamp)
+        if(img_entry->timestamp != timestamp)
         {
+#if 0
           img->timestamp = timestamp;
-#if 1
           if(img->pixels)
           {
             free(img->pixels);
@@ -653,49 +676,55 @@ internal void* loader_fun(void* raw_data)
 #endif
         }
 
-        // TODO: Maybe put the resulting heap-allocated pointers onto a rolling "output" buffer
-        //       so the main thread can deal with putting those into the actual image entries,
-        //       to avoid race conditions with directory updates.
-        if(!img->pixels)
+        i64 loaded_img_id = __sync_fetch_and_add(&shared->next_loaded_img_id, 1);
+        loaded_img_t* loaded_img = &shared->loaded_imgs[loaded_img_id % array_count(shared->loaded_imgs)];
+
+        if(loaded_img->load_state != LOAD_STATE_UNLOADED)
         {
-          i32 original_channel_count = 0;
-          img->pixels = stbi_load((char*)img->path.data, &img->w, &img->h, &original_channel_count, 4);
+          printf("WARNING: Loaded image slot %ld was not unloaded, but will be overwritten!\n", loaded_img_id);
+        }
 
-          if(!img->pixels)
-          {
-            img->load_state = LOAD_STATE_LOAD_FAILED;
-          }
-          else
-          {
-#if 1
-            // printf("Channels: %d\n", original_channel_count);
-            if(original_channel_count == 4)
-            {
-              // Premultiply alpha.
-              // printf("Premultiplying alpha.\n");
-              for(u64 i = 0; i < (u64)img->w * (u64)img->h; ++i)
-              {
-                if(img->pixels[4*i + 3] != 255)
-                {
-                  r32 r = img->pixels[4*i + 0] / 255.0f;
-                  r32 g = img->pixels[4*i + 1] / 255.0f;
-                  r32 b = img->pixels[4*i + 2] / 255.0f;
-                  r32 a = img->pixels[4*i + 3] / 255.0f;
+        loaded_img->entry_idx = img_idx;
+        loaded_img->bytes_used = 0;
 
-                  img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
-                  img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
-                  img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
-                }
-              }
-            }
-#endif
+        i32 original_channel_count = 0;
+        loaded_img->pixels = stbi_load((char*)img_entry->path.data, &loaded_img->w, &loaded_img->h, &original_channel_count, 4);
 
-            img->load_state = LOAD_STATE_LOADED_INTO_RAM;
-          }
+        if(!loaded_img->pixels)
+        {
+          __sync_synchronize();
+          loaded_img->load_state = LOAD_STATE_LOAD_FAILED;
         }
         else
         {
-          img->load_state = LOAD_STATE_LOADED_INTO_RAM;
+          loaded_img->bytes_used = 4 * loaded_img->w * loaded_img->h;
+          __sync_fetch_and_add(&shared->total_bytes_used, loaded_img->bytes_used);
+
+#if 1
+          // printf("Channels: %d\n", original_channel_count);
+          if(original_channel_count == 4)
+          {
+            // Premultiply alpha.
+            // printf("Premultiplying alpha.\n");
+            for(u64 i = 0; i < (u64)loaded_img->w * (u64)loaded_img->h; ++i)
+            {
+              if(loaded_img->pixels[4*i + 3] != 255)
+              {
+                r32 r = loaded_img->pixels[4*i + 0] / 255.0f;
+                r32 g = loaded_img->pixels[4*i + 1] / 255.0f;
+                r32 b = loaded_img->pixels[4*i + 2] / 255.0f;
+                r32 a = loaded_img->pixels[4*i + 3] / 255.0f;
+
+                loaded_img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
+                loaded_img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
+                loaded_img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
+              }
+            }
+          }
+#endif
+
+          __sync_synchronize();
+          loaded_img->load_state = LOAD_STATE_LOADED_INTO_RAM;
         }
       }
     }
@@ -1028,26 +1057,39 @@ internal void unload_texture(state_t* state, img_entry_t* unload)
     state->lru_last = unload->lru_prev;
   }
 
-  // printf("Unloading texture ID %u\n", unload->texture_id);
-
-  glDeleteTextures(1, &unload->texture_id);
-  state->vram_bytes_used -= unload->vram_bytes;
-  unload->vram_bytes = 0;
-  unload->texture_id = 0;
   unload->lru_prev = 0;
   unload->lru_next = 0;
 
-  stbi_image_free(unload->pixels);
+  printf("Unloading entry %ld\n", unload - state->img_entries);
+
+  if(unload->texture_id)
+  {
+    glDeleteTextures(1, &unload->texture_id);
+    unload->texture_id = 0;
+  }
+
+  if(unload->pixels)
+  {
+    stbi_image_free(unload->pixels);
+    unload->pixels = 0;
+    __sync_fetch_and_sub(&state->shared_loader_data.total_bytes_used, unload->bytes_used);
+  }
+
   unload->w = 0;
   unload->h = 0;
-  unload->pixels = 0;
+
+  // unload->bytes_used = 0;
+  // TODO: Make sure to update the remembered bytes_used on refresh,
+  //       if it gets used for loading prediction.
+
+  __sync_synchronize();
   unload->load_state = LOAD_STATE_UNLOADED;
 }
 
 internal b32 upload_img_texture(state_t* state, img_entry_t* img)
 {
   u64 nsecs_start = get_nanoseconds();
-  i32 num_deletions = 0;
+  // i32 num_deletions = 0;
   i32 num_uploads = 0;
 
   b32 result = false;
@@ -1056,6 +1098,7 @@ internal b32 upload_img_texture(state_t* state, img_entry_t* img)
   {
     if(img->load_state == LOAD_STATE_LOADED_INTO_RAM)
     {
+#if 0
       i64 texture_bytes = 4 * img->w * img->h;
 
       i64 vram_byte_limit = 1 * 1024 * 1024 * 1024;
@@ -1068,6 +1111,10 @@ internal b32 upload_img_texture(state_t* state, img_entry_t* img)
           unload_texture(state, unload);
         }
       }
+
+      img->vram_bytes = texture_bytes;
+      state->vram_bytes_used += texture_bytes;
+#endif
 
       glGenTextures(1, &img->texture_id);
 
@@ -1089,9 +1136,7 @@ internal b32 upload_img_texture(state_t* state, img_entry_t* img)
       glGenerateMipmap(GL_TEXTURE_2D);
       ++num_uploads;
 
-      img->vram_bytes = texture_bytes;
-      state->vram_bytes_used += texture_bytes;
-      GLint tmp = 0;
+      // GLint tmp = 0;
       // printf("VRAM used: approx. %.0f MiB\n", (r64)state->vram_bytes_used / (1024.0 * 1024.0));
 
       // glGetIntegerv(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &tmp);
@@ -1633,10 +1678,11 @@ int main(int argc, char** argv)
   for(i32 i = 1; i < argc; ++i)
   {
     if(zstr_eq(argv[i], "--help")
-        || zstr_eq(argv[i], "-h")
-        || zstr_eq(argv[i], "-?"))
+        || zstr_eq(argv[i], "-h"))
     {
       printf("Usage: %s <image files and directories>\n", argv[0]);
+      printf("\n");
+      printf("Press F1 for GUI help.\n");
       printf("\n");
       printf("Directories get expanded (one level, not recursive), contents sorted alphabetically.\n");
       printf("If only one file is passed, its containing directory is opened, and the file focused.\n");
@@ -2023,8 +2069,10 @@ int main(int argc, char** argv)
             state->loader_count = atoi(thread_count_envvar);
           }
         }
-        state->loader_count = clamp(1, state->loader_count, array_count(state->loader_threads));
+        state->loader_count = clamp(1, MAX_THREAD_COUNT, state->loader_count);
 
+        state->shared_loader_data.total_bytes_limit = 1 * 1024 * 1024 * 1024;
+        state->shared_loader_data.total_loader_count = state->loader_count;
         state->shared_loader_data.total_img_count = state->total_img_count;
         state->shared_loader_data.img_entries = state->img_entries;
         state->shared_loader_data.filtered_img_count = state->filtered_img_count;
@@ -2105,17 +2153,83 @@ int main(int argc, char** argv)
 
         while(!quitting)
         {
-#if 1
-          if(state->vsync)
-          {
-            // TODO: Check for this in GLX extension string before using it.
-            glXDelayBeforeSwapNV(display, glx_window, 0.002f);
-          }
-#endif
-
           b32 dirty = false;
           b32 reloaded_paths = false;
           b32 search_changed = false;
+
+          {
+            shared_loader_data_t* shared = &state->shared_loader_data;
+            i32 uploaded_count = 0;
+
+            while(shared->next_loaded_img_id > shared->next_finalized_img_id
+                // && uploaded_count < 16
+                )
+            {
+              loaded_img_t* loaded_img =
+                &shared->loaded_imgs[shared->next_finalized_img_id % array_count(shared->loaded_imgs)];
+
+              if(loaded_img->load_state != LOAD_STATE_LOADED_INTO_RAM &&
+                  loaded_img->load_state != LOAD_STATE_LOAD_FAILED)
+              {
+                // printf("Trying to upload loaded ID %ld (entry %d), but it's not ready yet.\n", shared->next_finalized_img_id, loaded_img->entry_idx);
+                break;
+              }
+              // printf("Uploading loaded ID %ld (entry %d).\n", shared->next_finalized_img_id, loaded_img->entry_idx);
+
+              img_entry_t* img_entry = &state->img_entries[loaded_img->entry_idx];
+              // TODO: Unload previous image if a loaded slot gets overwritten?
+              img_entry->timestamp = loaded_img->timestamp;
+              img_entry->w = loaded_img->w;
+              img_entry->h = loaded_img->h;
+              img_entry->pixels = loaded_img->pixels;
+              img_entry->bytes_used = loaded_img->bytes_used;
+              img_entry->load_state = loaded_img->load_state;
+
+              __sync_synchronize();
+              loaded_img->load_state = LOAD_STATE_UNLOADED;
+
+              assert(!img_entry->lru_prev);
+              assert(!img_entry->lru_next);
+
+              if(!state->lru_last)
+              {
+                state->lru_first = img_entry;
+                state->lru_last = img_entry;
+              }
+              else
+              {
+                img_entry->lru_prev = state->lru_last;
+                state->lru_last->lru_next = img_entry;
+                state->lru_last = img_entry;
+              }
+
+              // upload_img_texture(state, img_entry);
+
+              ++uploaded_count;
+              ++shared->next_finalized_img_id;
+            }
+
+            while(state->shared_loader_data.total_bytes_used > state->shared_loader_data.total_bytes_limit
+                && state->lru_last)
+            {
+              unload_texture(state, state->lru_last);
+            }
+
+            if(uploaded_count > 0)
+            {
+              // TODO: Find something better for unblocking the threads which doesn't
+              //       keep going up like these semaphores.
+              for_count(i, state->loader_count) { sem_post(&state->loader_semaphores[i]); }
+            }
+          }
+
+#if 1
+          if(state->vsync)
+          {
+            // TODO: Check for this in the GLX extension string before using it.
+            glXDelayBeforeSwapNV(display, glx_window, 0.002f);
+          }
+#endif
 
           if(!state->vsync) { dirty = true; }
           if(!state->all_metadata_loaded)

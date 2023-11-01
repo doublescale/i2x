@@ -40,6 +40,17 @@ typedef double r64;
 #define bflip(x) (x = !x)
 #define lerp(a, b, t) ((1 - (t)) * (a) + (t) * (b))
 
+#if RELEASE
+  #undef assert
+  #define assert(x)
+#else
+  #ifndef assert
+  #include <stdio.h>
+  #define assert_(x) macrostring(x)
+  #define assert(x) if(!(x)) { fprintf(stderr, "Assert (" __FILE__ ":" assert_(__LINE__) ":%s): " #x "\n", __func__); __builtin_trap(); }
+  #endif
+#endif
+
 #define malloc_array(count, type) ((type*)malloc((count) * sizeof(type)))
 #define malloc_struct(type) malloc_array(1, type)
 
