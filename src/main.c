@@ -586,6 +586,10 @@ internal void* loader_fun(void* raw_data)
   i32 thread_idx = data->thread_idx;
   shared_loader_data_t* shared = data->shared;
 
+  i64 loaded_count_limit = array_count(shared->loaded_imgs) - shared->total_loader_count;
+  // i64 thread_bytes_limit = shared->total_bytes_limit / shared->total_loader_count;
+  i64 thread_bytes_limit = shared->total_bytes_limit;
+
   for(;;)
   {
     i32 viewing_filtered_img_idx = shared->viewing_filtered_img_idx;
@@ -595,11 +599,14 @@ internal void* loader_fun(void* raw_data)
 
     // printf("Loader %d focus %d range_start %d range_end %d\n", thread_idx, viewing_filtered_img_idx, range_start_idx, range_end_idx);
 
-    // i32 max_loading_idx = min(filtered_img_count + 1, 800);
-    i32 max_loading_idx = min(filtered_img_count + 1, 200);
-    i64 loaded_count_limit = array_count(shared->loaded_imgs) - shared->total_loader_count;
+    i32 max_loading_idx = min(filtered_img_count + 1, (range_end_idx - range_start_idx) + 100);
+    // i32 max_loading_idx = min(filtered_img_count + 1, 200);
+    i64 thread_bytes_used = 0;
     for(i32 loading_idx = 0;
-        loading_idx < max_loading_idx && shared->next_loaded_img_id - shared->next_finalized_img_id < loaded_count_limit;
+        1
+        && loading_idx < max_loading_idx
+        && shared->next_loaded_img_id - shared->next_finalized_img_id < loaded_count_limit
+        ;
         ++loading_idx)
     {
       if(0
@@ -639,16 +646,23 @@ internal void* loader_fun(void* raw_data)
 
       i32 img_idx = shared->filtered_img_idxs[filtered_img_idx];
 
-      // printf("Loader %d loading_idx %d [%5d/%d]\n", thread_idx, loading_idx, img_idx + 1, shared->total_img_count);
+      // printf("Loader %d loading_idx %d [%5d/%d]\n", thread_idx, loading_idx, img_idx, shared->total_img_count);
 
       img_entry_t* img_entry = &shared->img_entries[img_idx];
+
+      // printf("- total %ldk, thread %ldk, img %ldk\n", shared->total_bytes_used / 1024, thread_bytes_used / 1024, img_entry->bytes_used / 1024);
+      if(shared->total_bytes_used + img_entry->bytes_used > (3 * shared->total_bytes_limit) / 2
+          || thread_bytes_used + img_entry->bytes_used > thread_bytes_limit)
+      {
+        break;
+      }
 
       if(__sync_bool_compare_and_swap(&img_entry->load_state, LOAD_STATE_UNLOADED, LOAD_STATE_LOADING))
       {
 #if 0
         printf("Loader %d [%5d/%d] %s\n",
             thread_idx,
-            img_idx + 1, shared->total_img_count,
+            img_idx, shared->total_img_count,
             img_entry->path.data);
 #endif
 
@@ -699,6 +713,8 @@ internal void* loader_fun(void* raw_data)
         {
           loaded_img->bytes_used = 4 * loaded_img->w * loaded_img->h;
           __sync_fetch_and_add(&shared->total_bytes_used, loaded_img->bytes_used);
+          thread_bytes_used += loaded_img->bytes_used;
+          // printf("  * total %ldk, thread %ldk\n", shared->total_bytes_used / 1024, thread_bytes_used / 1024);
 
 #if 1
           // printf("Channels: %d\n", original_channel_count);
@@ -726,6 +742,10 @@ internal void* loader_fun(void* raw_data)
           __sync_synchronize();
           loaded_img->load_state = LOAD_STATE_LOADED_INTO_RAM;
         }
+      }
+      else
+      {
+        thread_bytes_used += img_entry->bytes_used;
       }
     }
 
@@ -1060,7 +1080,7 @@ internal void unload_texture(state_t* state, img_entry_t* unload)
   unload->lru_prev = 0;
   unload->lru_next = 0;
 
-  printf("Unloading entry %ld\n", unload - state->img_entries);
+  // printf("Unloading entry %ld\n", unload - state->img_entries);
 
   if(unload->texture_id)
   {
@@ -1075,8 +1095,8 @@ internal void unload_texture(state_t* state, img_entry_t* unload)
     __sync_fetch_and_sub(&state->shared_loader_data.total_bytes_used, unload->bytes_used);
   }
 
-  unload->w = 0;
-  unload->h = 0;
+  // unload->w = 0;
+  // unload->h = 0;
 
   // unload->bytes_used = 0;
   // TODO: Make sure to update the remembered bytes_used on refresh,
@@ -1279,7 +1299,7 @@ internal void clamp_thumbnail_scroll_rows(state_t* state)
 
 internal void clamp_thumbnail_columns(state_t* state)
 {
-  state->thumbnail_columns = clamp(1, 64, state->thumbnail_columns);
+  state->thumbnail_columns = clamp(1, 32, state->thumbnail_columns);
 }
 
 internal img_entry_t* get_filtered_img(state_t* state, i32 filtered_idx)
@@ -2071,7 +2091,9 @@ int main(int argc, char** argv)
         }
         state->loader_count = clamp(1, MAX_THREAD_COUNT, state->loader_count);
 
-        state->shared_loader_data.total_bytes_limit = 1 * 1024 * 1024 * 1024;
+        // state->shared_loader_data.total_bytes_limit = 4 * 1024 * 1024 * 1024LL;
+        state->shared_loader_data.total_bytes_limit = 1 * 1024 * 1024 * 1024LL;
+        // state->shared_loader_data.total_bytes_limit = 16 * 1024 * 1024LL;
         state->shared_loader_data.total_loader_count = state->loader_count;
         state->shared_loader_data.total_img_count = state->total_img_count;
         state->shared_loader_data.img_entries = state->img_entries;
@@ -2160,6 +2182,20 @@ int main(int argc, char** argv)
           {
             shared_loader_data_t* shared = &state->shared_loader_data;
             i32 uploaded_count = 0;
+            i32 deleted_count = 0;
+
+            img_entry_t* unload = state->lru_last;
+            while(state->shared_loader_data.total_bytes_used > state->shared_loader_data.total_bytes_limit
+                && unload)
+            {
+              img_entry_t* next_unload = unload->lru_prev;
+              if(unload != get_filtered_img(state, state->viewing_filtered_img_idx))
+              {
+                unload_texture(state, unload);
+                ++deleted_count;
+              }
+              unload = next_unload;
+            }
 
             while(shared->next_loaded_img_id > shared->next_finalized_img_id
                 // && uploaded_count < 16
@@ -2191,6 +2227,21 @@ int main(int argc, char** argv)
               assert(!img_entry->lru_prev);
               assert(!img_entry->lru_next);
 
+#if 1
+              // Insert at front of LRU chain.
+              if(!state->lru_first)
+              {
+                state->lru_first = img_entry;
+                state->lru_last = img_entry;
+              }
+              else
+              {
+                img_entry->lru_next = state->lru_first;
+                state->lru_first->lru_prev = img_entry;
+                state->lru_first = img_entry;
+              }
+#else
+              // Insert at end of LRU chain.
               if(!state->lru_last)
               {
                 state->lru_first = img_entry;
@@ -2202,6 +2253,7 @@ int main(int argc, char** argv)
                 state->lru_last->lru_next = img_entry;
                 state->lru_last = img_entry;
               }
+#endif
 
               // upload_img_texture(state, img_entry);
 
@@ -2209,13 +2261,7 @@ int main(int argc, char** argv)
               ++shared->next_finalized_img_id;
             }
 
-            while(state->shared_loader_data.total_bytes_used > state->shared_loader_data.total_bytes_limit
-                && state->lru_last)
-            {
-              unload_texture(state, state->lru_last);
-            }
-
-            if(uploaded_count > 0)
+            if(uploaded_count || deleted_count)
             {
               // TODO: Find something better for unblocking the threads which doesn't
               //       keep going up like these semaphores.
@@ -4175,9 +4221,17 @@ _search_end_label:
               glEnable(GL_TEXTURE_2D);
               glColor3f(1.0f, 1.0f, 1.0f);
               hovered_thumbnail_idx = -1;
+#if 0
               for(i32 filtered_idx = first_visible_thumbnail_idx;
                   filtered_idx <= last_visible_thumbnail_idx;
                   ++filtered_idx)
+#else
+              // Traverse the thumbnails backwards to update the LRU chain
+              // in a way that avoids flickering loading/unloading.
+              for(i32 filtered_idx = last_visible_thumbnail_idx;
+                  filtered_idx >= first_visible_thumbnail_idx;
+                  --filtered_idx)
+#endif
               {
                 img_entry_t* thumb = get_filtered_img(state, filtered_idx);
                 still_loading |= upload_img_texture(state, thumb);
