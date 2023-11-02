@@ -248,7 +248,7 @@ typedef struct
   i32 metadata_loaded_count;
   b32 all_metadata_loaded;
 
-  shared_loader_data_t shared_loader_data;
+  shared_loader_data_t shared;
   i32 loader_count;
 #define MAX_THREAD_COUNT 16
   pthread_t loader_threads[MAX_THREAD_COUNT];
@@ -1092,7 +1092,7 @@ internal void unload_texture(state_t* state, img_entry_t* unload)
   {
     stbi_image_free(unload->pixels);
     unload->pixels = 0;
-    __sync_fetch_and_sub(&state->shared_loader_data.total_bytes_used, unload->bytes_used);
+    __sync_fetch_and_sub(&state->shared.total_bytes_used, unload->bytes_used);
   }
 
   // unload->w = 0;
@@ -1694,6 +1694,7 @@ int main(int argc, char** argv)
   state_t* state = malloc_struct(state_t);
   zero_struct(*state);
   state->loader_count = 7;
+  state->shared.total_bytes_limit = 1 * 1024 * 1024 * 1024LL;
 
   for(i32 i = 1; i < argc; ++i)
   {
@@ -1711,7 +1712,9 @@ int main(int argc, char** argv)
       printf("I2X_DISABLE_XINPUT2: Disables XInput2 handling, which allows\n");
       printf("                     smooth scrolling and raw sub-pixel mouse motion,\n");
       printf("                     but can be glitchy.\n");
-      printf("I2X_LOADER_THREADS:  Sets the number of image-loader threads (default: %d).\n", state->loader_count);
+      printf("I2X_LOADER_THREADS:  The number of image-loader threads (default: %d).\n", state->loader_count);
+      printf("I2X_TARGET_VRAM_MB:  VRAM usage to target in MiB, will use more than this (default: %ld).\n",
+          state->shared.total_bytes_limit / (1024 * 1024));
       printf("I2X_TTF_PATH:        Use an external font file instead of the internal one.\n");
       printf("\n");
       printf("Example invocation:  I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 %s\n", argv[0]);
@@ -2056,7 +2059,8 @@ int main(int argc, char** argv)
 
               stbtt_MakeCodepointBitmap(&state->font,
                   state->font_texels + row * state->font_char_h * state->font_texture_w + col * state->font_char_w,
-                  state->font_char_w, state->font_char_h, state->font_texture_w, state->stb_font_scale, state->stb_font_scale, codepoint);
+                  state->font_char_w, state->font_char_h, state->font_texture_w,
+                  state->stb_font_scale, state->stb_font_scale, codepoint);
             }
 
             glGenTextures(1, &state->font_texture_id);
@@ -2087,18 +2091,24 @@ int main(int argc, char** argv)
           if(thread_count_envvar)
           {
             state->loader_count = atoi(thread_count_envvar);
+            state->loader_count = clamp(1, MAX_THREAD_COUNT, state->loader_count);
+            printf("Using %d loader thread%s.\n", state->loader_count, state->loader_count == 1 ? "" : "s");
+          }
+
+          char* vram_target_mb_envvar = getenv("I2X_TARGET_VRAM_MB");
+          if(vram_target_mb_envvar)
+          {
+            state->shared.total_bytes_limit = (i64)atoi(vram_target_mb_envvar) * 1024 * 1024;
+            state->shared.total_bytes_limit = max(0, state->shared.total_bytes_limit);
+            printf("Targeting roughly %ld MiB of VRAM usage.\n", state->shared.total_bytes_limit / (1024 * 1024));
           }
         }
-        state->loader_count = clamp(1, MAX_THREAD_COUNT, state->loader_count);
 
-        // state->shared_loader_data.total_bytes_limit = 4 * 1024 * 1024 * 1024LL;
-        state->shared_loader_data.total_bytes_limit = 1 * 1024 * 1024 * 1024LL;
-        // state->shared_loader_data.total_bytes_limit = 16 * 1024 * 1024LL;
-        state->shared_loader_data.total_loader_count = state->loader_count;
-        state->shared_loader_data.total_img_count = state->total_img_count;
-        state->shared_loader_data.img_entries = state->img_entries;
-        state->shared_loader_data.filtered_img_count = state->filtered_img_count;
-        state->shared_loader_data.filtered_img_idxs = state->filtered_img_idxs;
+        state->shared.total_loader_count = state->loader_count;
+        state->shared.total_img_count = state->total_img_count;
+        state->shared.img_entries = state->img_entries;
+        state->shared.filtered_img_count = state->filtered_img_count;
+        state->shared.filtered_img_idxs = state->filtered_img_idxs;
 
         for(i32 loader_idx = 0;
             loader_idx < state->loader_count;
@@ -2107,7 +2117,7 @@ int main(int argc, char** argv)
           sem_init(&state->loader_semaphores[loader_idx], 0, 0);
           state->loader_data[loader_idx].thread_idx = loader_idx + 1;
           state->loader_data[loader_idx].semaphore = &state->loader_semaphores[loader_idx];
-          state->loader_data[loader_idx].shared = &state->shared_loader_data;
+          state->loader_data[loader_idx].shared = &state->shared;
           pthread_create(&state->loader_threads[loader_idx], 0, loader_fun, &state->loader_data[loader_idx]);
         }
 
@@ -2180,12 +2190,12 @@ int main(int argc, char** argv)
           b32 search_changed = false;
 
           {
-            shared_loader_data_t* shared = &state->shared_loader_data;
+            shared_loader_data_t* shared = &state->shared;
             i32 uploaded_count = 0;
             i32 deleted_count = 0;
 
             img_entry_t* unload = state->lru_last;
-            while(state->shared_loader_data.total_bytes_used > state->shared_loader_data.total_bytes_limit
+            while(state->shared.total_bytes_used > state->shared.total_bytes_limit
                 && unload)
             {
               img_entry_t* next_unload = unload->lru_prev;
@@ -4093,17 +4103,17 @@ _search_end_label:
             i32 first_visible_thumbnail_idx = max(0, first_visible_row * state->thumbnail_columns);
             i32 last_visible_thumbnail_idx = min(state->filtered_img_count, one_past_last_visible_row * state->thumbnail_columns) - 1;
             if(0
-                || state->viewing_filtered_img_idx != state->shared_loader_data.viewing_filtered_img_idx
-                || first_visible_thumbnail_idx != state->shared_loader_data.first_visible_thumbnail_idx
-                || last_visible_thumbnail_idx != state->shared_loader_data.last_visible_thumbnail_idx
-                || state->filtered_img_count != state->shared_loader_data.filtered_img_count
+                || state->viewing_filtered_img_idx != state->shared.viewing_filtered_img_idx
+                || first_visible_thumbnail_idx != state->shared.first_visible_thumbnail_idx
+                || last_visible_thumbnail_idx != state->shared.last_visible_thumbnail_idx
+                || state->filtered_img_count != state->shared.filtered_img_count
                 || reloaded_paths
               )
             {
-              state->shared_loader_data.viewing_filtered_img_idx = state->viewing_filtered_img_idx;
-              state->shared_loader_data.first_visible_thumbnail_idx = first_visible_thumbnail_idx;
-              state->shared_loader_data.last_visible_thumbnail_idx = last_visible_thumbnail_idx;
-              state->shared_loader_data.filtered_img_count = state->filtered_img_count;
+              state->shared.viewing_filtered_img_idx = state->viewing_filtered_img_idx;
+              state->shared.first_visible_thumbnail_idx = first_visible_thumbnail_idx;
+              state->shared.last_visible_thumbnail_idx = last_visible_thumbnail_idx;
+              state->shared.filtered_img_count = state->filtered_img_count;
               for_count(i, state->loader_count) { sem_post(&state->loader_semaphores[i]); }
             }
 
