@@ -99,7 +99,6 @@ enum
   LOAD_STATE_UNLOADED = 0,
   LOAD_STATE_LOADING,
   LOAD_STATE_LOADED_INTO_RAM,
-  LOAD_STATE_LOAD_FAILED,
 };
 typedef u32 load_state_t;
 
@@ -119,7 +118,8 @@ typedef struct
 
 enum
 {
-  IMG_FLAG_MARKED = (1 << 0),
+  IMG_FLAG_FAILED_TO_LOAD = (1 << 0),
+  IMG_FLAG_MARKED         = (1 << 1),
 };
 typedef u32 img_flags_t;
 
@@ -677,20 +677,6 @@ internal void* loader_fun(void* raw_data)
           timestamp = (((u64)file_stats.stx_mtime.tv_sec << 32) | (u64)file_stats.stx_mtime.tv_nsec);
         }
 
-        if(img_entry->timestamp != timestamp)
-        {
-#if 0
-          img->timestamp = timestamp;
-          if(img->pixels)
-          {
-            free(img->pixels);
-            img->pixels = 0;
-            img->w = 0;
-            img->h = 0;
-          }
-#endif
-        }
-
         i64 loaded_img_id = __sync_fetch_and_add(&shared->next_loaded_img_id, 1);
         loaded_img_t* loaded_img = &shared->loaded_imgs[loaded_img_id % array_count(shared->loaded_imgs)];
 
@@ -699,16 +685,18 @@ internal void* loader_fun(void* raw_data)
           printf("WARNING: Loaded image slot %ld was not unloaded, but will be overwritten!\n", loaded_img_id);
         }
 
+        loaded_img->timestamp = timestamp;
         loaded_img->entry_idx = img_idx;
         loaded_img->bytes_used = 0;
 
         i32 original_channel_count = 0;
-        loaded_img->pixels = stbi_load((char*)img_entry->path.data, &loaded_img->w, &loaded_img->h, &original_channel_count, 4);
+        loaded_img->pixels = stbi_load((char*)img_entry->path.data,
+            &loaded_img->w, &loaded_img->h, &original_channel_count, 4);
 
         if(!loaded_img->pixels)
         {
-          __sync_synchronize();
-          loaded_img->load_state = LOAD_STATE_LOAD_FAILED;
+          loaded_img->w = 0;
+          loaded_img->h = 0;
         }
         else
         {
@@ -739,10 +727,10 @@ internal void* loader_fun(void* raw_data)
             }
           }
 #endif
-
-          __sync_synchronize();
-          loaded_img->load_state = LOAD_STATE_LOADED_INTO_RAM;
         }
+
+        __sync_synchronize();
+        loaded_img->load_state = LOAD_STATE_LOADED_INTO_RAM;
       }
       else
       {
@@ -1119,63 +1107,48 @@ internal b32 upload_img_texture(state_t* state, img_entry_t* img)
   {
     if(img->load_state == LOAD_STATE_LOADED_INTO_RAM)
     {
-#if 0
-      i64 texture_bytes = 4 * img->w * img->h;
-
-      i64 vram_byte_limit = 1 * 1024 * 1024 * 1024;
-      while(state->vram_bytes_used + texture_bytes > vram_byte_limit)
+      if(!(img->flags & IMG_FLAG_FAILED_TO_LOAD))
       {
-        img_entry_t* unload = state->lru_last;
-        if(unload)
+        glGenTextures(1, &img->texture_id);
+
+        glBindTexture(GL_TEXTURE_2D, img->texture_id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        if(state->linear_sampling)
         {
-          ++num_deletions;
-          unload_texture(state, unload);
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
         }
+        else
+        {
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        }
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+            img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        ++num_uploads;
+
+        // GLint tmp = 0;
+        // printf("VRAM used: approx. %.0f MiB\n", (r64)state->vram_bytes_used / (1024.0 * 1024.0));
+
+        // glGetIntegerv(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &tmp);
+        // printf("  GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX:         %d kiB\n", tmp);
+
+        // glGetIntegerv(GL_GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX, &tmp);
+        // printf("  GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX:   %d kiB\n", tmp);
+
+        // glGetIntegerv(GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX, &tmp);
+        // printf("  GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX: %d kiB\n", tmp);
+
+        // glGetIntegerv(GL_GPU_MEMORY_INFO_EVICTION_COUNT_NVX, &tmp);
+        // printf("  GPU_MEMORY_INFO_EVICTION_COUNT_NVX: %d\n", tmp);
+
+        // glGetIntegerv(GL_GPU_MEMORY_INFO_EVICTED_MEMORY_NVX, &tmp);
+        // printf("  GPU_MEMORY_INFO_EVICTED_MEMORY_NVX: %d kiB\n", tmp);
       }
-
-      img->vram_bytes = texture_bytes;
-      state->vram_bytes_used += texture_bytes;
-#endif
-
-      glGenTextures(1, &img->texture_id);
-
-      glBindTexture(GL_TEXTURE_2D, img->texture_id);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-      if(state->linear_sampling)
-      {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-      }
-      else
-      {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-      }
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-          img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
-      glGenerateMipmap(GL_TEXTURE_2D);
-      ++num_uploads;
-
-      // GLint tmp = 0;
-      // printf("VRAM used: approx. %.0f MiB\n", (r64)state->vram_bytes_used / (1024.0 * 1024.0));
-
-      // glGetIntegerv(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &tmp);
-      // printf("  GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX:         %d kiB\n", tmp);
-
-      // glGetIntegerv(GL_GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX, &tmp);
-      // printf("  GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX:   %d kiB\n", tmp);
-
-      // glGetIntegerv(GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX, &tmp);
-      // printf("  GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX: %d kiB\n", tmp);
-
-      // glGetIntegerv(GL_GPU_MEMORY_INFO_EVICTION_COUNT_NVX, &tmp);
-      // printf("  GPU_MEMORY_INFO_EVICTION_COUNT_NVX: %d\n", tmp);
-
-      // glGetIntegerv(GL_GPU_MEMORY_INFO_EVICTED_MEMORY_NVX, &tmp);
-      // printf("  GPU_MEMORY_INFO_EVICTED_MEMORY_NVX: %d kiB\n", tmp);
     }
-    else if(img->load_state != LOAD_STATE_LOAD_FAILED)
+    else
     {
       result = true;
     }
@@ -1363,8 +1336,7 @@ internal void reload_input_paths(state_t* state)
         is_a_dir = true;
         char* path = dirent->d_name;
 
-        // if(!zstr_eq(path, ".") && !zstr_eq(path, ".."))
-        if(path[0] != '.')
+        if(path[0] != '.' && !is_directory(path))
         {
           char* full_path = 0;
           if(asprintf(&full_path, "%s/%s", arg, path) != -1)
@@ -2207,8 +2179,7 @@ int main(int argc, char** argv)
               loaded_img_t* loaded_img =
                 &shared->loaded_imgs[shared->next_finalized_img_id % array_count(shared->loaded_imgs)];
 
-              if(loaded_img->load_state != LOAD_STATE_LOADED_INTO_RAM &&
-                  loaded_img->load_state != LOAD_STATE_LOAD_FAILED)
+              if(loaded_img->load_state != LOAD_STATE_LOADED_INTO_RAM)
               {
                 // printf("Trying to upload loaded ID %ld (entry %d), but it's not ready yet.\n", shared->next_finalized_img_id, loaded_img->entry_idx);
                 break;
@@ -2222,10 +2193,18 @@ int main(int argc, char** argv)
               img_entry->h = loaded_img->h;
               img_entry->pixels = loaded_img->pixels;
               img_entry->bytes_used = loaded_img->bytes_used;
-              img_entry->load_state = loaded_img->load_state;
-
+              img_entry->load_state = LOAD_STATE_LOADED_INTO_RAM;
               __sync_synchronize();
               loaded_img->load_state = LOAD_STATE_UNLOADED;
+
+              if(!img_entry->pixels)
+              {
+                img_entry->flags |= IMG_FLAG_FAILED_TO_LOAD;
+              }
+              else
+              {
+                img_entry->flags &= ~IMG_FLAG_FAILED_TO_LOAD;
+              }
 
               assert(!img_entry->lru_prev);
               assert(!img_entry->lru_next);
@@ -4280,7 +4259,7 @@ _search_end_label:
                 GLuint texture_id = thumb->texture_id;
                 r32 tex_w = thumb->w;
                 r32 tex_h = thumb->h;
-                if(thumb->load_state == LOAD_STATE_LOAD_FAILED)
+                if(thumb->flags & IMG_FLAG_FAILED_TO_LOAD)
                 {
                   texture_id = state->test_texture_id;
                   tex_w = test_texture_w;
@@ -4351,7 +4330,7 @@ _search_end_label:
             GLuint texture_id = img->texture_id;
             r32 tex_w = img->w;
             r32 tex_h = img->h;
-            if(img->load_state == LOAD_STATE_LOAD_FAILED)
+            if(img->flags & IMG_FLAG_FAILED_TO_LOAD)
             {
               texture_id = state->test_texture_id;
               tex_w = test_texture_w;
