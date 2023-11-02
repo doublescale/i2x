@@ -188,8 +188,9 @@ typedef struct
 
   b32 vsync;
   b32 linear_sampling;
-  b32 alpha_blend;
   b32 zoom_from_original_size;  // If false, fit to window instead.
+  b32 alpha_blend;
+  b32 debug_font_atlas;
 
   b32 show_help;
   i32 help_tab_idx;
@@ -1383,10 +1384,7 @@ internal void reload_input_paths(state_t* state)
         img_entry_t* img = &state->img_entries[img_idx];
         // TODO: Possibly free the previous path string.
         img->path = wrap_str(paths_in_dir[path_idx]);
-        if(img->texture_id)
-        {
-          unload_texture(state, img);
-        }
+        unload_texture(state, img);
         img->load_state = LOAD_STATE_UNLOADED;
 
         if(str_eq(img->path, prev_viewing_path))
@@ -1404,10 +1402,7 @@ internal void reload_input_paths(state_t* state)
       i32 img_idx = state->total_img_count++;
       img_entry_t* img = &state->img_entries[img_idx];
       img->path = wrap_str(arg);
-      if(img->texture_id)
-      {
-        unload_texture(state, img);
-      }
+      unload_texture(state, img);
       img->load_state = LOAD_STATE_UNLOADED;
 
       if(str_eq(img->path, prev_viewing_path))
@@ -1696,30 +1691,28 @@ int main(int argc, char** argv)
   state->loader_count = 7;
   state->shared.total_bytes_limit = 1 * 1024 * 1024 * 1024LL;
 
-  for(i32 i = 1; i < argc; ++i)
+  if(argc <= 1
+      || zstr_eq(argv[1], "--help")
+      || zstr_eq(argv[1], "-h"))
   {
-    if(zstr_eq(argv[i], "--help")
-        || zstr_eq(argv[i], "-h"))
-    {
-      printf("Usage: %s <image files and directories>\n", argv[0]);
-      printf("\n");
-      printf("Press F1 for GUI help.\n");
-      printf("\n");
-      printf("Directories get expanded (one level, not recursive), contents sorted alphabetically.\n");
-      printf("If only one file is passed, its containing directory is opened, and the file focused.\n");
-      printf("\n");
-      printf("The following environment variables are used:\n");
-      printf("I2X_DISABLE_XINPUT2: Disables XInput2 handling, which allows\n");
-      printf("                     smooth scrolling and raw sub-pixel mouse motion,\n");
-      printf("                     but can be glitchy.\n");
-      printf("I2X_LOADER_THREADS:  The number of image-loader threads (default: %d).\n", state->loader_count);
-      printf("I2X_TARGET_VRAM_MB:  VRAM usage to target in MiB, will use more than this (default: %ld).\n",
-          state->shared.total_bytes_limit / (1024 * 1024));
-      printf("I2X_TTF_PATH:        Use an external font file instead of the internal one.\n");
-      printf("\n");
-      printf("Example invocation:  I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 %s\n", argv[0]);
-      return 0;
-    }
+    printf("Usage: %s <image files and directories>\n", argv[0]);
+    printf("\n");
+    printf("Press F1 for GUI help.\n");
+    printf("\n");
+    printf("Directories get expanded (one level, not recursive), contents sorted alphabetically.\n");
+    printf("If only one file is passed, its containing directory is opened, and the file focused.\n");
+    printf("\n");
+    printf("The following environment variables are used:\n");
+    printf("I2X_DISABLE_XINPUT2: Disables XInput2 handling, which allows\n");
+    printf("                     smooth scrolling and raw sub-pixel mouse motion,\n");
+    printf("                     but can be glitchy.\n");
+    printf("I2X_LOADER_THREADS:  The number of image-loader threads (default: %d).\n", state->loader_count);
+    printf("I2X_TARGET_VRAM_MB:  VRAM usage to target in MiB, will use more than this (default: %ld).\n",
+        state->shared.total_bytes_limit / (1024 * 1024));
+    printf("I2X_TTF_PATH:        Use an external font file instead of the internal one.\n");
+    printf("\n");
+    printf("Example invocation:  I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 %s\n", argv[0]);
+    return 0;
   }
 
   Display* display = XOpenDisplay(0);
@@ -3124,6 +3117,10 @@ int main(int argc, char** argv)
                       bflip(state->vsync);
                       glXSwapIntervalEXT(display, glx_window, (int)state->vsync);
                     }
+                    else if(shift_held && alt_held && keysym == '8')
+                    {
+                      bflip(state->debug_font_atlas);
+                    }
                   }
                   else
                   {
@@ -4373,13 +4370,14 @@ _search_end_label:
                 glDisable(GL_BLEND);
               }
 
-#if 0
-              // FONT TEST
-              texture_id = state->font_texture_id;
-              tex_w = state->font_texture_w;
-              tex_h = state->font_texture_h;
-              glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-#endif
+              if(state->debug_font_atlas)
+              {
+                // FONT TEST
+                texture_id = state->font_texture_id;
+                tex_w = state->font_texture_w;
+                tex_h = state->font_texture_h;
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+              }
 
               glBindTexture(GL_TEXTURE_2D, texture_id);
 
