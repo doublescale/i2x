@@ -1357,7 +1357,6 @@ internal void reload_input_paths(state_t* state)
         // TODO: Possibly free the previous path string.
         img->path = wrap_str(paths_in_dir[path_idx]);
         unload_texture(state, img);
-        img->load_state = LOAD_STATE_UNLOADED;
 
         if(str_eq(img->path, prev_viewing_path))
         {
@@ -1375,7 +1374,6 @@ internal void reload_input_paths(state_t* state)
       img_entry_t* img = &state->img_entries[img_idx];
       img->path = wrap_str(arg);
       unload_texture(state, img);
-      img->load_state = LOAD_STATE_UNLOADED;
 
       if(str_eq(img->path, prev_viewing_path))
       {
@@ -2187,7 +2185,10 @@ int main(int argc, char** argv)
               // printf("Uploading loaded ID %ld (entry %d).\n", shared->next_finalized_img_id, loaded_img->entry_idx);
 
               img_entry_t* img_entry = &state->img_entries[loaded_img->entry_idx];
-              // TODO: Unload previous image if a loaded slot gets overwritten?
+              if(img_entry->load_state == LOAD_STATE_LOADED_INTO_RAM)
+              {
+                unload_texture(state, img_entry);
+              }
               img_entry->timestamp = loaded_img->timestamp;
               img_entry->w = loaded_img->w;
               img_entry->h = loaded_img->h;
