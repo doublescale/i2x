@@ -313,45 +313,33 @@ internal str_t str_from_start_and_size(u8* start, size_t size)
 
 internal b32 str_eq(str_t a, str_t b)
 {
-  b32 result = true;
-  if(a.size == b.size)
+  b32 result = (a.size == b.size);
+
+  for(u64 i = 0; i < a.size && result; ++i)
   {
-    for(u32 i = 0;
-        i < a.size && result;
-        ++i)
+    if(a.data[i] != b.data[i])
     {
-      if(a.data[i] != b.data[i])
-      {
-        result = false;
-      }
+      result = false;
     }
   }
-  else
-  {
-    result = false;
-  }
+
   return result;
 }
 
 internal b32 str_eq_ignoring_case(str_t a, str_t b)
 {
-  b32 result = true;
-  if(a.size == b.size)
+  b32 result = (a.size == b.size);
+
+  for(u64 i = 0;
+      i < a.size && result;
+      ++i)
   {
-    for(u32 i = 0;
-        i < a.size && result;
-        ++i)
+    if(to_lower(a.data[i]) != to_lower(b.data[i]))
     {
-      if(to_lower(a.data[i]) != to_lower(b.data[i]))
-      {
-        result = false;
-      }
+      result = false;
     }
   }
-  else
-  {
-    result = false;
-  }
+
   return result;
 }
 
