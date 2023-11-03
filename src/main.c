@@ -80,20 +80,6 @@ internal b32 is_directory(char* path)
   return result;
 }
 
-static u8 test_texels[] = {
-  1, 1, 1, 255,
-  255, 0, 0, 255,
-  0, 255, 0, 255,
-  0, 0, 255, 255,
-  2, 2, 2, 255,
-  255, 255, 0, 255,
-  0, 255, 255, 255,
-  255, 0, 255, 255,
-  128, 128, 128, 255,
-};
-static i32 test_texture_w = 3;
-static i32 test_texture_h = 3;
-
 enum
 {
   LOAD_STATE_UNLOADED = 0,
@@ -210,8 +196,6 @@ typedef struct
 
   i32 show_info;
   r32 info_panel_width_ratio;
-
-  GLuint test_texture_id;
 
   GLuint font_texture_id;
   i32 chars_per_font_row;
@@ -1992,16 +1976,6 @@ int main(int argc, char** argv)
             }
           }
         }
-
-        glGenTextures(1, &state->test_texture_id);
-        glBindTexture(GL_TEXTURE_2D, state->test_texture_id);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-            test_texture_w, test_texture_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, test_texels);
-        glGenerateMipmap(GL_TEXTURE_2D);
 
         state->font_texture_w = 512;
         state->font_texture_h = 512;
@@ -4152,6 +4126,7 @@ _search_end_label:
             }
             glClear(GL_COLOR_BUFFER_BIT);
             glEnable(GL_SCISSOR_TEST);
+            glEnable(GL_TEXTURE_2D);
 
             if(state->win_w != 0 && state->win_h != 0)
             {
@@ -4165,6 +4140,11 @@ _search_end_label:
               glLoadMatrixf(matrix);
             }
 
+            r32 text_gray = bright_bg ? 0 : 1;
+            r32 label_gray = bright_bg ? 0.3f : 0.7f;
+            r32 highlight_gray = bright_bg ? 0.7f : 0.3f;
+            r32 background_gray = bright_bg ? 1 : 0;
+
             b32 still_loading = false;
 
             if(state->show_thumbnails)
@@ -4172,7 +4152,7 @@ _search_end_label:
               glScissor(0, 0, effective_thumbnail_panel_width, state->win_h);
 
               glDisable(GL_BLEND);
-              glDisable(GL_TEXTURE_2D);
+              glBindTexture(GL_TEXTURE_2D, 0);
 
               glBegin(GL_QUADS);
 
@@ -4230,7 +4210,6 @@ _search_end_label:
                 glDisable(GL_BLEND);
               }
 
-              glEnable(GL_TEXTURE_2D);
               glColor3f(1.0f, 1.0f, 1.0f);
               hovered_thumbnail_idx = -1;
 #if 0
@@ -4269,7 +4248,7 @@ _search_end_label:
 
                 if(filtered_idx == state->viewing_filtered_img_idx || filtered_idx == hovered_thumbnail_idx)
                 {
-                  glDisable(GL_TEXTURE_2D);
+                  glBindTexture(GL_TEXTURE_2D, 0);
 
                   r32 gray = (filtered_idx == state->viewing_filtered_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
                   glColor3f(gray, gray, gray);
@@ -4282,24 +4261,21 @@ _search_end_label:
                   glEnd();
                 }
 
-                GLuint texture_id = thumb->texture_id;
+                GLuint texture_id = 0;
                 r32 tex_w = thumb->w;
                 r32 tex_h = thumb->h;
-                if(thumb->flags & IMG_FLAG_FAILED_TO_LOAD)
+                if(!(thumb->flags & IMG_FLAG_FAILED_TO_LOAD))
                 {
-                  texture_id = state->test_texture_id;
-                  tex_w = test_texture_w;
-                  tex_h = test_texture_h;
+                  texture_id = thumb->texture_id;
                 }
 
                 if(texture_id)
                 {
-                  glEnable(GL_TEXTURE_2D);
                   glBindTexture(GL_TEXTURE_2D, texture_id);
                   glColor3f(1.0f, 1.0f, 1.0f);
 
                   r32 mag = 1.0f;
-                  if(thumbnail_w != 0 && thumbnail_h != 0)
+                  if(tex_w != 0 && tex_h != 0)
                   {
                     mag = min((r32)thumbnail_w / (r32)tex_w, (r32)thumbnail_h / (r32)tex_h);
                   }
@@ -4326,10 +4302,20 @@ _search_end_label:
                   glTexCoord2f(u0, v0); glVertex2f(x0, y1);
                   glEnd();
                 }
+                else
+                {
+                  str_t msg = (thumb->flags & IMG_FLAG_FAILED_TO_LOAD) ? str("Unsupported") : str("Loading...");
+                  r32 unscaled_msg_width = draw_str(state, DRAW_STR_MEASURE_ONLY, 1, 0, 0, msg);
+                  r32 msg_scale = min(2 * fs, 0.9f * thumbnail_w / max(1.0f, unscaled_msg_width));
+                  r32 x = 0.5f * (box_x0 + box_x1 - msg_scale * unscaled_msg_width);
+                  r32 y = 0.5f * (box_y0 + box_y1 - msg_scale * state->font_ascent);
+                  glColor3f(text_gray, text_gray, text_gray);
+                  draw_str(state, 0, msg_scale, x, y, msg);
+                }
 
                 if(thumb->flags & IMG_FLAG_MARKED)
                 {
-                  glDisable(GL_TEXTURE_2D);
+                  glBindTexture(GL_TEXTURE_2D, 0);
                   glLineWidth(2.0f);
                   glColor3f(0.0f, 0.0f, 0.0f);
                   glBegin(GL_LINE_STRIP);
@@ -4358,30 +4344,33 @@ _search_end_label:
             r32 tex_h = img->h;
             if(img->flags & IMG_FLAG_FAILED_TO_LOAD)
             {
-              texture_id = state->test_texture_id;
-              tex_w = test_texture_w;
-              tex_h = test_texture_h;
+              texture_id = 0;
+            }
+            if(state->debug_font_atlas)
+            {
+              // FONT TEST
+              texture_id = state->font_texture_id;
+              tex_w = state->font_texture_w;
+              tex_h = state->font_texture_h;
             }
 
-            // if(texture_id)
+            if(texture_id)
             {
               if(state->alpha_blend)
               {
-                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                if(texture_id == state->font_texture_id)
+                {
+                  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                }
+                else
+                {
+                  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                }
                 glEnable(GL_BLEND);
               }
               else
               {
                 glDisable(GL_BLEND);
-              }
-
-              if(state->debug_font_atlas)
-              {
-                // FONT TEST
-                texture_id = state->font_texture_id;
-                tex_w = state->font_texture_w;
-                tex_h = state->font_texture_h;
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
               }
 
               glBindTexture(GL_TEXTURE_2D, texture_id);
@@ -4437,7 +4426,6 @@ _search_end_label:
                 y1 += margin;
               }
 
-              glEnable(GL_TEXTURE_2D);
               glColor3f(1.0f, 1.0f, 1.0f);
               glBegin(GL_QUADS);
               glTexCoord2f(u0, v1); glVertex2f(x0, y0);
@@ -4446,11 +4434,6 @@ _search_end_label:
               glTexCoord2f(u0, v0); glVertex2f(x0, y1);
               glEnd();
             }
-
-            r32 text_gray = bright_bg ? 0 : 1;
-            r32 label_gray = bright_bg ? 0.3f : 0.7f;
-            r32 highlight_gray = bright_bg ? 0.7f : 0.3f;
-            r32 background_gray = bright_bg ? 1 : 0;
 
             if(state->show_info == 1)
             {
@@ -4496,16 +4479,6 @@ _search_end_label:
 
               r32 x = x0;
               r32 y = y1 + fs;
-
-#if 0
-              y -= fs;
-              x = x0;
-              glColor3f(label_gray, label_gray, label_gray);
-              x += draw_str(state, 0, fs, x, y, str("Text wrap test: "));
-              glColor3f(text_gray, text_gray, text_gray);
-              draw_wrapped_text(state, fs, x_indented, x1, &x, &y,
-                  str("\n ble afawpeij afweo a fafw pwfW\npfojawpovijpvij asdiopfj\n afjiop awiof pioawefj pioawjef\n"));
-#endif
 
               u8 tmp[256];
               str_t tmp_str = { tmp };
@@ -4785,7 +4758,7 @@ _search_end_label:
 
                 SHOW_LABEL_VALUE("Quit", "Ctrl + Q");
                 SHOW_LABEL_VALUE("Navigate images", "Space/Backspace, Arrows, HJKL, LMB/MMB, Alt + Scroll");
-                SHOW_LABEL_VALUE("Jump to first, last", "Home/End, G / Shift + G");
+                SHOW_LABEL_VALUE("Jump to first/last", "Home/End, G / Shift + G");
                 y -= ypad;
                 SHOW_LABEL_VALUE("Pan image", "LMB-Drag");
                 SHOW_LABEL_VALUE("Zoom image", "Scroll, 0/-/=, MMB-Drag, Ctrl + LMB-Drag");
@@ -4797,6 +4770,7 @@ _search_end_label:
                 SHOW_LABEL_VALUE("Toggle info bar/panel", "I");
                 SHOW_LABEL_VALUE("Toggle thumbnails", "T");
                 SHOW_LABEL_VALUE("Change thumbnail column count", "Alt + 0/-/=, Ctrl + Scroll on thumbnails");
+                SHOW_LABEL_VALUE("Navigate one page up/down", "Alt + PgUp/PgDn");
                 y -= ypad;
                 SHOW_LABEL_VALUE("Search", "/, Ctrl + F");
                 SHOW_LABEL_VALUE("Mark images", "M, Ctrl + A, Ctrl/Shift + LMB on thumbnails");
