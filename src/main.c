@@ -2446,7 +2446,7 @@ int main(int argc, char** argv)
                           {
                             r32* last = &state->xi_last_scroll_x_valuator;
                             r32 delta = (*value_ptr - *last) / state->xi_scroll_x_increment;
-                            if(absolute(delta < 10.0f) && inside_window)
+                            if(absolute(delta) < 5.0f && inside_window)
                             {
                               scroll_x += delta;
                             }
@@ -2456,7 +2456,7 @@ int main(int argc, char** argv)
                           {
                             r32* last = &state->xi_last_scroll_y_valuator;
                             r32 delta = (*value_ptr - *last) / state->xi_scroll_y_increment;
-                            if(absolute(delta < 10.0f) && inside_window)
+                            if(absolute(delta) < 5.0f && inside_window)
                             {
                               scroll_y -= delta;
                             }
