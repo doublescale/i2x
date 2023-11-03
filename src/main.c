@@ -1930,7 +1930,7 @@ int main(int argc, char** argv)
 
         if(state->inotify_fd == -1)
         {
-          fprintf(stderr, "No inotify available.");
+          fprintf(stderr, "No inotify available.\n");
         }
 
         state->input_path_count = argc - 1;
