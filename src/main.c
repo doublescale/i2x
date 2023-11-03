@@ -4315,24 +4315,13 @@ _search_end_label:
 
                 if(thumb->flags & IMG_FLAG_MARKED)
                 {
-                  glBindTexture(GL_TEXTURE_2D, 0);
-                  glLineWidth(2.0f);
-                  glColor3f(0.0f, 0.0f, 0.0f);
-                  glBegin(GL_LINE_STRIP);
-                  glVertex2f(lerp(box_x0, box_x1, 0.1f) + 2, lerp(box_y0, box_y1, 0.7f) - 2);
-                  glVertex2f(lerp(box_x0, box_x1, 0.1f) + 2, lerp(box_y0, box_y1, 0.9f) - 2);
-                  glVertex2f(lerp(box_x0, box_x1, 0.2f) + 2, lerp(box_y0, box_y1, 0.8f) - 2);
-                  glVertex2f(lerp(box_x0, box_x1, 0.3f) + 2, lerp(box_y0, box_y1, 0.9f) - 2);
-                  glVertex2f(lerp(box_x0, box_x1, 0.3f) + 2, lerp(box_y0, box_y1, 0.7f) - 2);
-                  glEnd();
-                  glColor3f(0.2f, 1.0f, 0.2f);
-                  glBegin(GL_LINE_STRIP);
-                  glVertex2f(lerp(box_x0, box_x1, 0.1f),     lerp(box_y0, box_y1, 0.7f));
-                  glVertex2f(lerp(box_x0, box_x1, 0.1f),     lerp(box_y0, box_y1, 0.9f));
-                  glVertex2f(lerp(box_x0, box_x1, 0.2f),     lerp(box_y0, box_y1, 0.8f));
-                  glVertex2f(lerp(box_x0, box_x1, 0.3f),     lerp(box_y0, box_y1, 0.9f));
-                  glVertex2f(lerp(box_x0, box_x1, 0.3f),     lerp(box_y0, box_y1, 0.7f));
-                  glEnd();
+                  r32 tag_scale = min(2 * fs, 0.4f * min(thumbnail_w, thumbnail_h));
+                  r32 x = lerp(box_x0, box_x1, 0.05f);
+                  r32 y = lerp(box_y0, box_y1, 0.95f) - tag_scale * state->font_ascent;
+                  glColor3f(0, 0, 0);
+                  draw_str(state, 0, tag_scale, x + 0.05f * tag_scale, y - 0.05f * tag_scale, str("M"));
+                  glColor3f(0, 1, 0);
+                  draw_str(state, 0, tag_scale, x, y, str("M"));
                 }
               }
             }
