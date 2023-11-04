@@ -1838,6 +1838,10 @@ int main(int argc, char** argv)
         }
         window_attributes.colormap = XCreateColormap(display, root_window, glx_visual, AllocNone);
 
+        // TODO: Handle WM_DELETE_WINDOW if a close-confirmation ever gets required,
+        //       or to not get an "X connection to :0 broken" message on some WMs.
+        //       https://tronche.com/gui/x/icccm/sec-4.html#s-4.2.8.1
+
         Window window = XCreateWindow(display, root_window,
             0, 0, WINDOW_INIT_W, WINDOW_INIT_H,
             0, visual_info->depth, InputOutput, glx_visual,
@@ -2357,7 +2361,7 @@ int main(int argc, char** argv)
           i32 image_region_w = 0;
           i32 image_region_h = 0;
 
-          for(;;)
+          while(!quitting)
           {
             win_min_side = min(state->win_w, state->win_h);
             fs = clamp(12, 36, (26.0f / 1080.0f) * win_min_side);
@@ -3749,6 +3753,8 @@ int main(int argc, char** argv)
             prev_mouse_x = mouse_x;
             prev_mouse_y = mouse_y;
           }
+
+          if(quitting) { break; }
 
           if(state->searching && search_changed)
           {
