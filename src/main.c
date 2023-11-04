@@ -782,7 +782,7 @@ internal void* metadata_loader_fun(void* raw_data)
           if(img->file_header_data.size >= 16)
           {
             u8* ptr = img->file_header_data.data;
-            u8* data_end = img->file_header_data.data + img->file_header_data.size;
+            u8* file_end = img->file_header_data.data + img->file_header_data.size;
             b32 bad = false;
 
             // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
@@ -799,24 +799,56 @@ internal void* metadata_loader_fun(void* raw_data)
             {
               // Convert big-endian to little-endian.
               u32 chunk_size = 0;
-              chunk_size |= *ptr++;
-              chunk_size <<= 8;
-              chunk_size |= *ptr++;
-              chunk_size <<= 8;
-              chunk_size |= *ptr++;
-              chunk_size <<= 8;
+              chunk_size |= *ptr++; chunk_size <<= 8;
+              chunk_size |= *ptr++; chunk_size <<= 8;
+              chunk_size |= *ptr++; chunk_size <<= 8;
               chunk_size |= *ptr++;
 
-              // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
-              b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
-              b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
-              if(tEXt_header || iTXt_header)
+              u8* value_end = ptr + 4 + chunk_size;
+              if(value_end > file_end)
               {
-                u8* key_start = ptr + 4;
-                u8* value_end = ptr + 4 + chunk_size;
+                bad = true;
+              }
+              else
+              {
+                b32 IHDR_header = (ptr[0] == 'I' && ptr[1] == 'H' && ptr[2] == 'D' && ptr[3] == 'R');
+                b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
+                b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
 
-                if(value_end <= data_end)
+                // https://www.w3.org/TR/2003/REC-PNG-20031110/#11IHDR
+                if(IHDR_header)
                 {
+                  if(chunk_size >= 8)
+                  {
+                    u8* p = ptr + 4;
+
+                    u32 w = 0;
+                    w |= *p++; w <<= 8;
+                    w |= *p++; w <<= 8;
+                    w |= *p++; w <<= 8;
+                    w |= *p++;
+
+                    u32 h = 0;
+                    h |= *p++; h <<= 8;
+                    h |= *p++; h <<= 8;
+                    h |= *p++; h <<= 8;
+                    h |= *p++;
+
+                    i64 bytes_used = 4 * w * h;
+
+                    // Use atomic compare-exchange to make sure that the other
+                    // loader threads have precedence on setting these fields.
+                    __sync_bool_compare_and_swap(&img->w, 0, w);
+                    __sync_bool_compare_and_swap(&img->h, 0, h);
+                    __sync_bool_compare_and_swap(&img->bytes_used, 0, bytes_used);
+
+                    // printf("%.*s: %d x %d\n", PF_STR(img->path), w, h);
+                  }
+                }
+                else if(tEXt_header || iTXt_header) // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+                {
+                  u8* key_start = ptr + 4;
+
                   i32 key_len = 0;
                   while(key_start[key_len] != 0 && key_start + key_len + 1 < value_end)
                   {
@@ -1008,15 +1040,11 @@ internal void* metadata_loader_fun(void* raw_data)
                     img->generation_parameters = value;
                   }
                 }
-                else
-                {
-                  bad = true;
-                }
               }
 
               ptr += 4 + chunk_size + 4;
 
-              bad |= (ptr + 8 >= data_end);
+              bad |= (ptr + 8 >= file_end);
             }
           }
 
