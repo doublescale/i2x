@@ -211,10 +211,10 @@ typedef struct
   i32 font_char_h;
   u32 fixed_codepoint_range_start;
   u32 fixed_codepoint_range_length;
-  u32* custom_codepoints;
-  i32 custom_codepoint_first_char_idx;
-  i32 custom_codepoint_count;
-  i32 next_custom_codepoint_idx;
+  i32* custom_glyphs;
+  i32 custom_glyphs_first_char_idx;
+  i32 custom_glyph_count;
+  i32 next_custom_glyph_idx;
 
   char** input_paths;
   i32 input_path_count;
@@ -1414,10 +1414,11 @@ enum
 typedef u32 draw_str_flags_t;
 
 internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
-    r32 x_scale_factor, r32 y_scale, r32 start_x, r32 y, str_t str, u32* last_codepoint)
+    r32 x_scale_factor, r32 y_scale, r32 start_x, r32 y, str_t str, i32* last_glyph_ptr)
 {
   r32 x = start_x;
   b32 measure_only = (flags & DRAW_STR_MEASURE_ONLY);
+  u32 last_glyph = last_glyph_ptr ? *last_glyph_ptr : 0;
 
   if(state->font_texture_id && str.size > 0)
   {
@@ -1436,29 +1437,31 @@ internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
         str_ptr < str_end;
        )
     {
-      i32 codepoint = decode_utf8(&str_ptr, str_end);
-
+      u32 codepoint = decode_utf8(&str_ptr, str_end);
       if(codepoint == '\t') { codepoint = ' '; }
 
-      i32 x_advance, left_side_bearing;
-      stbtt_GetCodepointHMetrics(&state->font, codepoint, &x_advance, &left_side_bearing);
+      i32 glyph = stbtt_FindGlyphIndex(&state->font, codepoint);
 
-      if(*last_codepoint)
+      i32 x_advance, left_side_bearing;
+      stbtt_GetGlyphHMetrics(&state->font, glyph, &x_advance, &left_side_bearing);
+
+      if(last_glyph)
       {
-        x += x_scale * stbtt_GetCodepointKernAdvance(&state->font, *last_codepoint, codepoint) * state->stb_font_scale / state->font_char_w;
+        x += x_scale * stbtt_GetGlyphKernAdvance(&state->font, last_glyph, glyph)
+          * state->stb_font_scale / state->font_char_w;
       }
 
       if(!measure_only)
       {
-        i32 char_idx = codepoint - state->fixed_codepoint_range_start;
+        i32 char_idx = (i32)codepoint - (i32)state->fixed_codepoint_range_start;
         if(char_idx < 0 || char_idx >= state->fixed_codepoint_range_length)
         {
           char_idx = 0;
           for(i32 custom_idx = 0;
-              custom_idx < state->custom_codepoint_count;
+              custom_idx < state->custom_glyph_count;
               ++custom_idx)
           {
-            if(state->custom_codepoints[custom_idx] == codepoint)
+            if(state->custom_glyphs[custom_idx] == glyph)
             {
               char_idx = custom_idx + state->fixed_codepoint_range_length;
               break;
@@ -1467,8 +1470,8 @@ internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
 
           if(!char_idx)
           {
-            char_idx = state->next_custom_codepoint_idx + state->fixed_codepoint_range_length;
-            state->custom_codepoints[state->next_custom_codepoint_idx] = codepoint;
+            char_idx = state->next_custom_glyph_idx + state->fixed_codepoint_range_length;
+            state->custom_glyphs[state->next_custom_glyph_idx] = glyph;
 
             i32 row = char_idx / state->chars_per_font_row;
             i32 col = char_idx % state->chars_per_font_row;
@@ -1476,8 +1479,6 @@ internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
             // printf("uploading codepoint %d\n", codepoint);
             // printf("  char_idx %d, row %d, col %d\n", char_idx, row, col);
 
-            // TODO: Put placeholder rectangle glyph at idx 0, re-use it for unavailable glyphs.
-            // TODO: Extract the code that's shared with the initial font rasterization.
             u8* texels_start = state->font_texels + row * state->font_char_h * state->font_texture_w + col * state->font_char_w;
             for_count(j, state->font_char_h)
             {
@@ -1486,20 +1487,25 @@ internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
                 texels_start[j * state->font_texture_w + i] = 0;
               }
             }
-            stbtt_MakeCodepointBitmap(&state->font, texels_start,
-                state->font_char_w, state->font_char_h, state->font_texture_w, state->stb_font_scale, state->stb_font_scale, codepoint);
+            stbtt_MakeGlyphBitmap(&state->font, texels_start,
+                state->font_char_w, state->font_char_h, state->font_texture_w,
+                state->stb_font_scale, state->stb_font_scale, glyph);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, state->font_texture_w);
             glTexSubImage2D(GL_TEXTURE_2D, 0,
                 col * state->font_char_w, row * state->font_char_h, state->font_char_w, state->font_char_h,
                 GL_ALPHA, GL_UNSIGNED_BYTE, texels_start);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
-            state->next_custom_codepoint_idx = (state->next_custom_codepoint_idx + 1) % state->custom_codepoint_count;
+            state->next_custom_glyph_idx = (state->next_custom_glyph_idx + 1) % state->custom_glyph_count;
           }
         }
 
         i32 ix0, iy0, ix1, iy1;
-        stbtt_GetCodepointBitmapBox(&state->font, codepoint, state->stb_font_scale, state->stb_font_scale, &ix0, &iy0, &ix1, &iy1);
+        stbtt_GetGlyphBitmapBox(&state->font, glyph, state->stb_font_scale, state->stb_font_scale, &ix0, &iy0, &ix1, &iy1);
+
+        // Without this extra padding, some of the antialiased edges get cut off slightly.
+        ix1 += 1;
+        iy1 += 1;
 
         r32 x0 = x + x_scale * (r32)left_side_bearing * state->stb_font_scale / state->font_char_w;
         r32 x1 = x0 + x_scale * (r32)(ix1 - ix0) / (r32)state->font_char_w;
@@ -1520,8 +1526,13 @@ internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
       }
 
       x += x_scale * x_advance * state->stb_font_scale / state->font_char_w;
-      *last_codepoint = codepoint;
+      last_glyph = glyph;
     }
+  }
+
+  if(last_glyph_ptr)
+  {
+    *last_glyph_ptr = last_glyph;
   }
 
   return x - start_x;
@@ -1529,8 +1540,7 @@ internal r32 draw_str_advanced(state_t* state, draw_str_flags_t flags,
 
 internal r32 draw_str(state_t* state, draw_str_flags_t flags, r32 y_scale, r32 start_x, r32 y, str_t str)
 {
-  u32 last_codepoint = 0;
-  return draw_str_advanced(state, flags, 1, y_scale, start_x, y, str, &last_codepoint);
+  return draw_str_advanced(state, flags, 1, y_scale, start_x, y, str, 0);
 }
 
 typedef struct
@@ -1566,7 +1576,7 @@ internal str_t wrap_next_line(wrapped_text_ctx_t* ctx, r32 x)
   if(!ctx->finished)
   {
     b32 first_word_can_get_split = (ctx->line_idx != 0 || x <= ctx->x0);
-    u32 last_codepoint = 0;
+    i32 last_glyph = 0;
     u8* line_start = ctx->remaining_text.data;
     u8* line_end = line_start;
     u8* remainder_start = line_start;
@@ -1607,7 +1617,7 @@ internal str_t wrap_next_line(wrapped_text_ctx_t* ctx, r32 x)
       }
 
       x += draw_str_advanced(ctx->state, DRAW_STR_MEASURE_ONLY, 1, ctx->fs, 0, 0,
-          str_from_span(chr_start, chr_end), &last_codepoint);
+          str_from_span(chr_start, chr_end), &last_glyph);
 
       if(x > ctx->x1)
       {
@@ -1985,9 +1995,8 @@ int main(int argc, char** argv)
         state->chars_per_font_col = state->font_texture_h / state->font_char_h;
         state->fixed_codepoint_range_start = 32;  // ' '
         state->fixed_codepoint_range_length = 127 - state->fixed_codepoint_range_start;  // '~'
-        state->custom_codepoint_count = state->chars_per_font_row * state->chars_per_font_col - state->fixed_codepoint_range_length;
-        state->custom_codepoints = malloc_array(state->custom_codepoint_count, u32);
-        for_count(i, state->custom_codepoint_count) { state->custom_codepoints[i] = ' '; }
+        state->custom_glyph_count = state->chars_per_font_row * state->chars_per_font_col - state->fixed_codepoint_range_length;
+        state->custom_glyphs = malloc_array(state->custom_glyph_count, i32);
 
         {
           u8* ttf_data = 0;
@@ -2007,6 +2016,12 @@ int main(int argc, char** argv)
 
           if(stbtt_InitFont(&state->font, ttf_data, stbtt_GetFontOffsetForIndex(ttf_data, 0)))
           {
+            i32 space_glyph = stbtt_FindGlyphIndex(&state->font, ' ');
+            for_count(i, state->custom_glyph_count)
+            {
+              state->custom_glyphs[i] = space_glyph;
+            }
+
             state->font_texels = malloc_array(state->font_texture_w * state->font_texture_h, u8);
             zero_bytes(state->font_texture_w * state->font_texture_h, state->font_texels);
 
@@ -2658,6 +2673,30 @@ int main(int argc, char** argv)
                       refresh_input_paths(state);
                       refreshed_paths = true;
                     }
+
+                    // Debug keys.
+                    else if(shift_held && alt_held && keysym == 'a')
+                    {
+                      bflip(border_sampling);
+                    }
+                    else if(shift_held && alt_held && keysym == '5')
+                    {
+                      bflip(show_fps);
+                    }
+                    else if(shift_held && alt_held && keysym == '6')
+                    {
+                      bflip(state->alpha_blend);
+                    }
+                    else if(shift_held && alt_held && keysym == '7')
+                    {
+                      bflip(state->vsync);
+                      glXSwapIntervalEXT(display, glx_window, (int)state->vsync);
+                    }
+                    else if(shift_held && alt_held && keysym == '8')
+                    {
+                      bflip(state->debug_font_atlas);
+                    }
+
                     else if(ctrl_held && keysym == 'f' || !state->searching && keysym == '/')
                     {
                       bflip(state->searching);
@@ -2953,10 +2992,6 @@ int main(int argc, char** argv)
                       clamp_thumbnail_scroll_rows(state);
                       scroll_thumbnail_into_view = true;
                     }
-                    else if(shift_held && alt_held && keysym == 'a')
-                    {
-                      bflip(border_sampling);
-                    }
                     else if(keysym == 'b')
                     {
                       bflip(bright_bg);
@@ -3082,23 +3117,6 @@ int main(int argc, char** argv)
                       {
                         zoom += 0.25f;
                       }
-                    }
-                    else if(shift_held && alt_held && keysym == '5')
-                    {
-                      bflip(show_fps);
-                    }
-                    else if(shift_held && alt_held && keysym == '6')
-                    {
-                      bflip(state->alpha_blend);
-                    }
-                    else if(shift_held && alt_held && keysym == '7')
-                    {
-                      bflip(state->vsync);
-                      glXSwapIntervalEXT(display, glx_window, (int)state->vsync);
-                    }
-                    else if(shift_held && alt_held && keysym == '8')
-                    {
-                      bflip(state->debug_font_atlas);
                     }
                   }
                   else
@@ -4602,8 +4620,8 @@ _search_end_label:
                   str_t span_in_selection = str_from_span(selection_min_in_line, selection_max_in_line);
                   str_t span_after_selection = str_from_span(selection_max_in_line, line_end);
 
-                  u32 last_codepoint = 0;
-                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_before_selection, &last_codepoint);
+                  i32 last_glyph = 0;
+                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_before_selection, &last_glyph);
 
                   r32 highlight_x0 = x;
                   r32 highlight_x1 = x;
@@ -4613,9 +4631,9 @@ _search_end_label:
                   }
                   else
                   {
-                    u32 scratch_codepoint = last_codepoint;
+                    i32 scratch_glyph = last_glyph;
                     highlight_x1 += draw_str_advanced(state, DRAW_STR_MEASURE_ONLY,
-                        1, fs, x, y, span_in_selection, &scratch_codepoint);
+                        1, fs, x, y, span_in_selection, &scratch_glyph);
                   }
                   if(highlight_x0 != highlight_x1)
                   {
@@ -4630,9 +4648,9 @@ _search_end_label:
                     glEnd();
                     glColor3f(text_gray, text_gray, text_gray);
                   }
-                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_in_selection, &last_codepoint);
+                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_in_selection, &last_glyph);
 
-                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_after_selection, &last_codepoint);
+                  x += draw_str_advanced(state, 0, 1, fs, x, y, span_after_selection, &last_glyph);
 
                   if(!cursor_found && text.data + state->selection_end <= line_end)
                   {
