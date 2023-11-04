@@ -4255,7 +4255,6 @@ _search_end_label:
 
               if(state->alpha_blend)
               {
-                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
                 glEnable(GL_BLEND);
               }
               else
@@ -4325,6 +4324,7 @@ _search_end_label:
                 if(texture_id)
                 {
                   glBindTexture(GL_TEXTURE_2D, texture_id);
+                  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
                   glColor3f(1.0f, 1.0f, 1.0f);
 
                   r32 mag = 1.0f;
