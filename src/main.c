@@ -1115,16 +1115,14 @@ internal b32 upload_img_texture(state_t* state, img_entry_t* img)
       if(state->linear_sampling)
       {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
       }
       else
       {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
       }
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-          img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
-      glGenerateMipmap(GL_TEXTURE_2D);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img->w, img->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
       ++num_uploads;
 
       // GLint tmp = 0;
@@ -1695,7 +1693,8 @@ int main(int argc, char** argv)
     printf("                     smooth scrolling and raw sub-pixel mouse motion,\n");
     printf("                     but can be glitchy.\n");
     printf("I2X_LOADER_THREADS:  The number of image-loader threads. Default: %d\n", state->loader_count);
-    printf("I2X_TARGET_VRAM_MB:  VRAM usage to target in MiB, will use more than this. Default: %ld\n",
+    printf("I2X_TARGET_VRAM_MB:  Video memory usage to target in MiB, very roughly.\n");
+    printf("                     Might use more than 2x this amount. Default: %ld\n",
         state->shared.total_bytes_limit / (1024 * 1024));
     printf("I2X_TTF_PATH:        Use an external font file instead of the internal one.\n");
     printf("\n");
@@ -3015,7 +3014,7 @@ int main(int argc, char** argv)
                         if(state->linear_sampling)
                         {
                           glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+                          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                         }
                         else
                         {
