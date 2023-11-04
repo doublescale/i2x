@@ -1874,7 +1874,7 @@ int main(int argc, char** argv)
           XISelectEvents(display, window, &window_evmask, 1);
 
           zero_struct(mask);
-          XISetMask(mask, XI_RawMotion);
+          // XISetMask(mask, XI_RawMotion);  // This can't be used reliably for mouse deltas :(
           XISetMask(mask, XI_Motion);  // This gets scroll events over the title bar.
 
           root_evmask.deviceid = 2;  // 2: Master pointer.
@@ -2579,11 +2579,11 @@ int main(int argc, char** argv)
                       }
                     }
 
-                    // TODO: This probably needs to happen for absolute pointers, e.g. tablet devices.
-                    // mouse_delta_x += mouse_x - prev_mouse_x;
-                    // mouse_delta_y += mouse_y - prev_mouse_y;
+                    mouse_delta_x = mouse_x - prev_mouse_x;
+                    mouse_delta_y = mouse_y - prev_mouse_y;
                   } break;
 
+#if 0
                   case XI_RawMotion:
                   {
                     if(has_focus)
@@ -2642,6 +2642,7 @@ int main(int argc, char** argv)
                       }
                     }
                   } break;
+#endif
 
                   case XI_DeviceChanged:
                   {
