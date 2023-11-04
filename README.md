@@ -4,6 +4,14 @@ Image viewer specialized for large PNG collections generated with Stable Diffusi
 ## Build & Run
 A C compiler and development packages for X11, Xi, GL, GLX must be installed.
 
+On Ubuntu,
+
+```bash
+sudo apt install gcc libx11-dev libxi-dev libgl-dev libglx-dev
+```
+
+Then, to build and run (try it on the test/ directory in this repo):
+
 ```bash
 OPTIMIZE=1 ./build
 ./i2x <files and directories>

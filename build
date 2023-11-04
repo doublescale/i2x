@@ -27,7 +27,7 @@ fi
 
 ld -r -b binary data/DejaVuSans.ttf -o obj/font.o
 
-$CC $extra_opts -std=c11 -Wshadow -pthread -I. -lm -lX11 -lGL -lGLX -lXi -o i2x obj/stb.o obj/font.o src/main.c
+$CC $extra_opts -std=c11 -Wshadow -pthread -I. -o i2x obj/stb.o obj/font.o src/main.c -lm -lX11 -lGL -lGLX -lXi
 
 if [ ${OPTIMIZE:-0} -ne 0 ]; then
   strip i2x

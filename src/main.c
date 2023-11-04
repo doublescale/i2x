@@ -1996,6 +1996,7 @@ int main(int argc, char** argv)
         state->img_entries = malloc_array(state->total_img_capacity, img_entry_t);
         zero_bytes(state->total_img_capacity * sizeof(img_entry_t), state->img_entries);
         state->filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
+        zero_bytes(state->total_img_capacity * sizeof(i32), state->filtered_img_idxs);
 
         sem_init(&state->metadata_loader_semaphore, 0, 0);
         pthread_create(&state->metadata_loader_thread, 0, metadata_loader_fun, state);
