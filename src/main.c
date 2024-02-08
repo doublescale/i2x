@@ -128,9 +128,10 @@ typedef struct img_entry_t
       str_t sampler;
       str_t sampling_steps;
       str_t cfg;
+      str_t score;
     };
     // KEEP THE LENGTH IN SYNC WITH struct ABOVE!
-    str_t parameter_strings[9];
+    str_t parameter_strings[10];
   };
 
   img_flags_t flags;
@@ -1029,6 +1030,14 @@ internal void* metadata_loader_fun(void* raw_data)
                         v.size = p - v.data;
 
                         img->model = v;
+                      }
+                      else if(advance_if_prefix_matches(&p, value_end, "Score: "))
+                      {
+                        str_t v = {p};
+                        while(p < value_end && *p != ',') { ++p; }
+                        v.size = p - v.data;
+
+                        img->score = v;
                       }
 
                       ++p;
@@ -4567,6 +4576,12 @@ _search_end_label:
                 SHOW_LABEL_VALUE("Seed: ", img->seed);
                 SHOW_LABEL_VALUE("Positive prompt: ", img->positive_prompt);
                 SHOW_LABEL_VALUE("Negative prompt: ", img->negative_prompt);
+                SHOW_LABEL_VALUE("Score: ", img->score);
+
+#if 0
+                y -= fs;
+                SHOW_LABEL_VALUE("All parameters: ", img->generation_parameters);
+#endif
               }
 #undef SHOW_LABEL_VALUE
             }

@@ -13,7 +13,7 @@ sudo apt install gcc libx11-dev libxi-dev libgl-dev libglx-dev
 Then, to build and run (try it on the test/ directory in this repo):
 
 ```bash
-OPTIMIZE=1 ./build
+./build
 ./i2x <files and directories>
 ```
 

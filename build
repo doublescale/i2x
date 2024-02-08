@@ -14,7 +14,7 @@ mkdir -p obj bin
 
 extra_opts=''
 
-if [ ${OPTIMIZE:-0} -ne 0 ]; then
+if [ ${OPTIMIZE:-1} -ne 0 ]; then
   extra_opts='-O3 -DRELEASE'
 else
   extra_opts='-g'
@@ -29,6 +29,6 @@ ld -r -b binary data/DejaVuSans.ttf -o obj/font.o
 
 $CC $extra_opts -std=c11 -Wshadow -pthread -I. -o i2x obj/stb.o obj/font.o src/main.c -lm -lX11 -lGL -lGLX -lXi
 
-if [ ${OPTIMIZE:-0} -ne 0 ]; then
+if [ ${OPTIMIZE:-1} -ne 0 ]; then
   strip i2x
 fi
