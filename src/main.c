@@ -109,30 +109,30 @@ enum
 };
 typedef u32 img_flags_t;
 
+enum
+{
+  IMG_STR_GENERATION_PARAMETERS = 0,
+  IMG_STR_POSITIVE_PROMPT,
+  IMG_STR_NEGATIVE_PROMPT,
+  IMG_STR_SEED,
+  IMG_STR_BATCH_SIZE,
+  IMG_STR_MODEL,
+  IMG_STR_SAMPLER,
+  IMG_STR_SAMPLING_STEPS,
+  IMG_STR_CFG,
+  IMG_STR_SCORE,
+
+  IMG_STR_COUNT,
+};
+typedef u32 img_str_t;
+
 typedef struct img_entry_t
 {
   str_t path;
   u64 timestamp;
 
   str_t file_header_data;
-  union
-  {
-    struct
-    {
-      str_t generation_parameters;
-      str_t positive_prompt;
-      str_t negative_prompt;
-      str_t seed;
-      str_t batch_size;
-      str_t model;
-      str_t sampler;
-      str_t sampling_steps;
-      str_t cfg;
-      str_t score;
-    };
-    // KEEP THE LENGTH IN SYNC WITH struct ABOVE!
-    str_t parameter_strings[10];
-  };
+  str_t parameter_strings[IMG_STR_COUNT];
 
   img_flags_t flags;
   i32 w;
@@ -890,7 +890,7 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && is_digit(*p)) { ++p; }
                         v.size = p - v.data;
 
-                        img->seed = v;
+                        img->parameter_strings[IMG_STR_SEED] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "\"steps\""))
                       {
@@ -899,7 +899,7 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && is_digit(*p)) { ++p; }
                         v.size = p - v.data;
 
-                        img->sampling_steps = v;
+                        img->parameter_strings[IMG_STR_SAMPLING_STEPS] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "\"cfg\""))
                       {
@@ -908,19 +908,19 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && (is_digit(*p) || *p == '.')) { ++p; }
                         v.size = p - v.data;
 
-                        img->cfg = v;
+                        img->parameter_strings[IMG_STR_CFG] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
                       {
                         str_t v = parse_next_json_str_destructively(&p, value_end);
-                        img->sampler = v;
+                        img->parameter_strings[IMG_STR_SAMPLER] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
                       {
                         str_t v = parse_next_json_str_destructively(&p, value_end);
                         v = str_remove_suffix(v, str(".ckpt"));
                         v = str_remove_suffix(v, str(".safetensors"));
-                        img->model = v;
+                        img->parameter_strings[IMG_STR_MODEL] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
                       {
@@ -929,13 +929,13 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && is_digit(*p)) { ++p; }
                         v.size = p - v.data;
 
-                        img->batch_size = v;
+                        img->parameter_strings[IMG_STR_BATCH_SIZE] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
                       {
                         str_t v = parse_next_json_str_destructively(&p, value_end);
-                        if(!img->positive_prompt.data) { img->positive_prompt = v; }
-                        else if(!img->negative_prompt.data) { img->negative_prompt = v; }
+                        if(!img->parameter_strings[IMG_STR_POSITIVE_PROMPT].data) { img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = v; }
+                        else if(!img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data) { img->parameter_strings[IMG_STR_NEGATIVE_PROMPT] = v; }
                       }
                       else
                       {
@@ -960,12 +960,12 @@ internal void* metadata_loader_fun(void* raw_data)
                       else if(advance_if_prefix_matches(&p, value_end, "\nNegative prompt: "))
                       {
                         negative_prompt_label_start = p_prev;
-                        img->negative_prompt.data = p;
+                        img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data = p;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "\nSteps: "))
                       {
                         steps_label_start = p_prev;
-                        img->sampling_steps.data = p;
+                        img->parameter_strings[IMG_STR_SAMPLING_STEPS].data = p;
                       }
 
                       ++p;
@@ -973,16 +973,16 @@ internal void* metadata_loader_fun(void* raw_data)
 
                     if(negative_prompt_label_start)
                     {
-                      img->positive_prompt = str_from_span(value_start, negative_prompt_label_start);
+                      img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = str_from_span(value_start, negative_prompt_label_start);
                     }
                     else
                     {
-                      img->positive_prompt = str_from_span(value_start, steps_label_start);
+                      img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = str_from_span(value_start, steps_label_start);
                     }
 
-                    if(img->negative_prompt.data)
+                    if(img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data)
                     {
-                      img->negative_prompt.size = steps_label_start - img->negative_prompt.data;
+                      img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].size = steps_label_start - img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data;
                     }
 
                     p = steps_label_start;
@@ -997,7 +997,7 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && *p != ',') { ++p; }
                         v.size = p - v.data;
 
-                        img->sampling_steps = v;
+                        img->parameter_strings[IMG_STR_SAMPLING_STEPS] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "Sampler: "))
                       {
@@ -1005,7 +1005,7 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && *p != ',') { ++p; }
                         v.size = p - v.data;
 
-                        img->sampler = v;
+                        img->parameter_strings[IMG_STR_SAMPLER] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "CFG scale: "))
                       {
@@ -1013,7 +1013,7 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && *p != ',') { ++p; }
                         v.size = p - v.data;
 
-                        img->cfg = v;
+                        img->parameter_strings[IMG_STR_CFG] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "Seed: "))
                       {
@@ -1021,7 +1021,7 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && *p != ',') { ++p; }
                         v.size = p - v.data;
 
-                        img->seed = v;
+                        img->parameter_strings[IMG_STR_SEED] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "Model: "))
                       {
@@ -1029,7 +1029,7 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && *p != ',') { ++p; }
                         v.size = p - v.data;
 
-                        img->model = v;
+                        img->parameter_strings[IMG_STR_MODEL] = v;
                       }
                       else if(advance_if_prefix_matches(&p, value_end, "Score: "))
                       {
@@ -1037,16 +1037,16 @@ internal void* metadata_loader_fun(void* raw_data)
                         while(p < value_end && *p != ',') { ++p; }
                         v.size = p - v.data;
 
-                        img->score = v;
+                        img->parameter_strings[IMG_STR_SCORE] = v;
                       }
 
                       ++p;
                     }
                   }
 
-                  if(!img->generation_parameters.size)
+                  if(!img->parameter_strings[IMG_STR_GENERATION_PARAMETERS].size)
                   {
-                    img->generation_parameters = value;
+                    img->parameter_strings[IMG_STR_GENERATION_PARAMETERS] = value;
                   }
                 }
               }
@@ -1059,16 +1059,16 @@ internal void* metadata_loader_fun(void* raw_data)
 
 #if 0
           printf("\n%.*s\n", PF_STR(img->path));
-#define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
-          // P(generation_parameters);
-          P(positive_prompt);
-          P(negative_prompt);
-          P(seed);
-          P(batch_size);
-          P(model);
-          P(sampler);
-          P(sampling_steps);
-          P(cfg);
+#define P(x) printf("  " #x ": %.*s\n", (int)img->parameter_strings[x].size, img->parameter_strings[x].data);
+          // P(IMG_STR_GENERATION_PARAMETERS);
+          P(IMG_STR_POSITIVE_PROMPT);
+          P(IMG_STR_NEGATIVE_PROMPT);
+          P(IMG_STR_SEED);
+          P(IMG_STR_BATCH_SIZE);
+          P(IMG_STR_MODEL);
+          P(IMG_STR_SAMPLER);
+          P(IMG_STR_SAMPLING_STEPS);
+          P(IMG_STR_CFG);
 #undef P
 #endif
         }
@@ -3080,7 +3080,7 @@ int main(int argc, char** argv)
                         img_entry_t* img = get_filtered_img(state, state->viewing_filtered_img_idx);
                         if(shift_held)
                         {
-                          state->clipboard_str = img->positive_prompt;
+                          state->clipboard_str = img->parameter_strings[IMG_STR_POSITIVE_PROMPT];
                         }
                         else
                         {
@@ -3766,6 +3766,7 @@ int main(int argc, char** argv)
 
           if(quitting) { break; }
 
+          // Search.
           if(state->searching && search_changed)
           {
             if(state->search_str.size == 0)
@@ -3957,9 +3958,9 @@ int main(int argc, char** argv)
                   search_item_t* first_item;
                 } search_tasks[] = {
                   { img->path, first_path_item },
-                  { img->model, first_model_item },
-                  { img->positive_prompt, first_positive_item },
-                  { img->negative_prompt, first_negative_item },
+                  { img->parameter_strings[IMG_STR_MODEL], first_model_item },
+                  { img->parameter_strings[IMG_STR_POSITIVE_PROMPT], first_positive_item },
+                  { img->parameter_strings[IMG_STR_NEGATIVE_PROMPT], first_negative_item },
                 };
                 for(i32 search_task_idx = 0;
                     search_task_idx < array_count(search_tasks);
@@ -4098,18 +4099,18 @@ _search_end_label:
 #if 0
               // if(state->show_info)
               {
-#define P(x) printf("  " #x ": %.*s\n", (int)img->x.size, img->x.data);
+#define P(x) printf("  " #x ": %.*s\n", (int)img->parameter_strings[x].size, img->parameter_strings[x].data);
                 puts("");
                 puts(txt);
-                // P(generation_parameters);
-                P(positive_prompt);
-                P(negative_prompt);
-                P(seed);
-                P(batch_size);
-                P(model);
-                P(sampler);
-                P(sampling_steps);
-                P(cfg);
+                // P(IMG_STR_GENERATION_PARAMETERS);
+                P(IMG_STR_POSITIVE_PROMPT);
+                P(IMG_STR_NEGATIVE_PROMPT);
+                P(IMG_STR_SEED);
+                P(IMG_STR_BATCH_SIZE);
+                P(IMG_STR_MODEL);
+                P(IMG_STR_SAMPLER);
+                P(IMG_STR_SAMPLING_STEPS);
+                P(IMG_STR_CFG);
 #undef P
               }
 #endif
@@ -4494,7 +4495,7 @@ _search_end_label:
 
               r32 x = image_region_x0 + 0.2f * fs;
               r32 y = fs * (state->font_descent + 0.1f);
-              str_t str = img->positive_prompt;
+              str_t str = img->parameter_strings[IMG_STR_POSITIVE_PROMPT];
               draw_str(state, 0, fs, x, y, str);
             }
             if(state->show_info == 2)
@@ -4568,19 +4569,19 @@ _search_end_label:
               }
               else
               {
-                SHOW_LABEL_VALUE("Model: ", img->model);
-                SHOW_LABEL_VALUE("Sampler: ", img->sampler);
-                SHOW_LABEL_VALUE("Sampling steps: ", img->sampling_steps);
-                SHOW_LABEL_VALUE("CFG: ", img->cfg);
-                SHOW_LABEL_VALUE("Batch size: ", img->batch_size);
-                SHOW_LABEL_VALUE("Seed: ", img->seed);
-                SHOW_LABEL_VALUE("Positive prompt: ", img->positive_prompt);
-                SHOW_LABEL_VALUE("Negative prompt: ", img->negative_prompt);
-                SHOW_LABEL_VALUE("Score: ", img->score);
+                SHOW_LABEL_VALUE("Model: ", img->parameter_strings[IMG_STR_MODEL]);
+                SHOW_LABEL_VALUE("Sampler: ", img->parameter_strings[IMG_STR_SAMPLER]);
+                SHOW_LABEL_VALUE("Sampling steps: ", img->parameter_strings[IMG_STR_SAMPLING_STEPS]);
+                SHOW_LABEL_VALUE("CFG: ", img->parameter_strings[IMG_STR_CFG]);
+                SHOW_LABEL_VALUE("Batch size: ", img->parameter_strings[IMG_STR_BATCH_SIZE]);
+                SHOW_LABEL_VALUE("Seed: ", img->parameter_strings[IMG_STR_SEED]);
+                SHOW_LABEL_VALUE("Positive prompt: ", img->parameter_strings[IMG_STR_POSITIVE_PROMPT]);
+                SHOW_LABEL_VALUE("Negative prompt: ", img->parameter_strings[IMG_STR_NEGATIVE_PROMPT]);
+                SHOW_LABEL_VALUE("Score: ", img->parameter_strings[IMG_STR_SCORE]);
 
 #if 0
                 y -= fs;
-                SHOW_LABEL_VALUE("All parameters: ", img->generation_parameters);
+                SHOW_LABEL_VALUE("All parameters: ", img->parameter_strings[IMG_STR_GENERATION_PARAMETERS]);
 #endif
               }
 #undef SHOW_LABEL_VALUE
@@ -4811,7 +4812,7 @@ _search_end_label:
               if(0) {}
               else if(state->help_tab_idx == 0)
               {
-                // Keys.
+                // Keys help.
 
                 SHOW_LABEL_VALUE("Quit", "Ctrl + Q");
                 SHOW_LABEL_VALUE("Navigate images", "Space/Backspace, Arrows, HJKL, LMB/MMB, Alt + Scroll");
@@ -4842,7 +4843,7 @@ _search_end_label:
               }
               else if(state->help_tab_idx == 1)
               {
-                // Search.
+                // Search help.
 
                 y -= fs;
                 x = x0;
