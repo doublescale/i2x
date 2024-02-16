@@ -111,7 +111,7 @@ typedef u32 img_flags_t;
 
 enum
 {
-  IMG_STR_GENERATION_PARAMETERS = 0,
+  IMG_STR_GENERATION_PARAMETERS,
   IMG_STR_POSITIVE_PROMPT,
   IMG_STR_NEGATIVE_PROMPT,
   IMG_STR_SEED,
@@ -126,6 +126,16 @@ enum
 };
 typedef u32 img_str_t;
 
+enum
+{
+  PARSED_R32_SAMPLING_STEPS,
+  PARSED_R32_CFG,
+  PARSED_R32_SCORE,
+
+  PARSED_R32_COUNT,
+};
+typedef u32 parsed_r32_t;
+
 typedef struct img_entry_t
 {
   str_t path;
@@ -133,6 +143,7 @@ typedef struct img_entry_t
 
   str_t file_header_data;
   str_t parameter_strings[IMG_STR_COUNT];
+  r32 parsed_r32s[PARSED_R32_COUNT];
 
   img_flags_t flags;
   i32 w;
@@ -572,6 +583,57 @@ internal b32 str_replace_selection(i64 str_capacity, str_t* str,
   }
 
   return result;
+}
+
+internal r64 parse_next_r64(u8** p, u8* end)
+{
+  r64 result = 0;
+  b32 negative = false;
+
+  if(*p < end && **p == '-')
+  {
+    negative = true;
+    ++*p;
+  }
+
+  while(*p < end && **p >= '0' && **p <= '9')
+  {
+    result *= 10;
+    result += **p - '0';
+    ++*p;
+  }
+
+  if(*p < end && **p == '.')
+  {
+    ++*p;
+
+    i64 divisor = 1;
+
+    while(*p < end && **p >= '0' && **p <= '9')
+    {
+      result *= 10;
+      result += **p - '0';
+      divisor *= 10;
+      ++*p;
+    }
+
+    result /= (r64)divisor;
+  }
+
+  if(negative)
+  {
+    result = -result;
+  }
+
+  return result;
+}
+
+internal r32 parse_r32(str_t str)
+{
+  u8* start = str.data;
+  u8* end = str.data + str.size;
+
+  return (r32)parse_next_r64(&start, end);
 }
 
 internal void* loader_fun(void* raw_data)
@@ -1047,6 +1109,27 @@ internal void* metadata_loader_fun(void* raw_data)
                   if(!img->parameter_strings[IMG_STR_GENERATION_PARAMETERS].size)
                   {
                     img->parameter_strings[IMG_STR_GENERATION_PARAMETERS] = value;
+                  }
+
+                  // Parse r32 values.
+                  struct
+                  {
+                    img_str_t str_idx;
+                    parsed_r32_t parsed_idx;
+                  } parse_tasks[] = {
+                    { IMG_STR_SAMPLING_STEPS, PARSED_R32_SAMPLING_STEPS },
+                    { IMG_STR_CFG,            PARSED_R32_CFG },
+                    { IMG_STR_SCORE,          PARSED_R32_SCORE },
+                  };
+                  for_count(task_idx, array_count(parse_tasks))
+                  {
+                    str_t param_str = img->parameter_strings[parse_tasks[task_idx].str_idx];
+                    r32* parsed_ptr = &img->parsed_r32s[parse_tasks[task_idx].parsed_idx];
+                    if(param_str.size > 0)
+                    {
+                      *parsed_ptr = parse_r32(param_str);
+                      // printf("[%d]: \"%.*s\" -> %f\n", parse_tasks[task_idx].parsed_idx, PF_STR(param_str), *parsed_ptr);
+                    }
                   }
                 }
               }
@@ -3803,7 +3886,15 @@ int main(int argc, char** argv)
 
               typedef struct search_flags_t
               {
-                str_t word;
+                union
+                {
+                  str_t word;
+                  struct
+                  {
+                    r32 min_r32;
+                    r32 max_r32;
+                  };
+                };
                 search_flags_t flags;
 
                 struct search_flags_t* next;
@@ -3816,6 +3907,12 @@ int main(int argc, char** argv)
               search_item_t* first_model_item = 0;
               search_item_t* first_positive_item = 0;
               search_item_t* first_negative_item = 0;
+              search_item_t* first_width_item = 0;
+              search_item_t* first_height_item = 0;
+              search_item_t* first_aspect_item = 0;
+              search_item_t* first_steps_item = 0;
+              search_item_t* first_cfg_item = 0;
+              search_item_t* first_score_item = 0;
 
               // TODO: Separate bloom filter for each search task.
               u64 bloom = 0;
@@ -3838,6 +3935,7 @@ int main(int argc, char** argv)
                 }
 
                 search_item_t* last_alternative = 0;
+                b32 is_r32 = false;
                 do
                 {
                   word_end = word_start;
@@ -3860,8 +3958,12 @@ int main(int argc, char** argv)
                     if(exclude) { item->flags |= SEARCH_EXCLUDE; }
                     if(last_alternative)
                     {
-                      item->word = str_from_span(word_start, word_end);
-                      last_alternative->next_alternative = item;
+                      if(!is_r32)
+                      {
+                        item->word = str_from_span(word_start, word_end);
+                        last_alternative->next_alternative = item;
+                      }
+                      // TODO: Handle number range alternatives.
                     }
                     else
                     {
@@ -3873,26 +3975,84 @@ int main(int argc, char** argv)
                         post_column = str_from_span(column_at + 1, word_end);
                       }
 
-                      if(0) {}
-                      else if(str_eq(pre_column, str("f")) && post_column.size > 0)
+                      struct
                       {
-                        item->word = post_column;
-                        item->next = first_path_item;
-                        first_path_item = item;
-                      }
-                      else if(str_eq(pre_column, str("m")) && post_column.size > 0)
+                        str_t key;
+                        search_item_t** first_item_ptr;
+                        b32 is_r32;
+                      } search_keywords[] = {
+                        { str("f"), &first_path_item },
+                        { str("m"), &first_model_item },
+                        { str("n"), &first_negative_item },
+                        { str("width"), &first_width_item, true },
+                        { str("height"), &first_height_item, true },
+                        { str("aspect"), &first_aspect_item, true },
+                        { str("steps"), &first_steps_item, true },
+                        { str("cfg"), &first_cfg_item, true },
+                        { str("score"), &first_score_item, true },
+                      };
+
+                      b32 keyword_found = false;
+
+                      for_count(keyword_idx, array_count(search_keywords))
                       {
-                        item->word = post_column;
-                        item->next = first_model_item;
-                        first_model_item = item;
+                        search_item_t** first_item_ptr = search_keywords[keyword_idx].first_item_ptr;
+                        if(!search_keywords[keyword_idx].is_r32)
+                        {
+                          if(str_eq(pre_column, search_keywords[keyword_idx].key) && post_column.size > 0)
+                          {
+                            keyword_found = true;
+                            item->word = post_column;
+                            item->next = *first_item_ptr;
+                            *first_item_ptr = item;
+                          }
+                        }
+                        else
+                        {
+                          if(str_eq(pre_column, search_keywords[keyword_idx].key) && post_column.size >= 2)
+                          {
+                            keyword_found = true;
+                            is_r32 = true;
+                            b32 inequality = true;
+                            str_t number_str = post_column;
+                            ++number_str.data;  --number_str.size;
+                            if(post_column.data[1] == '=')
+                            {
+                              ++number_str.data;  --number_str.size;
+                              inequality = false;
+                            }
+                            r32 parsed = parse_r32(number_str);
+                            b32 valid_item = true;
+                            if(post_column.data[0] == '=')
+                            {
+                              item->min_r32 = parsed;
+                              item->max_r32 = parsed;
+                            }
+                            else if(post_column.data[0] == '>')
+                            {
+                              item->min_r32 = inequality ? nextafterf(parsed, R32_MAX) : parsed;
+                              item->max_r32 = R32_MAX;
+                            }
+                            else if(post_column.data[0] == '<')
+                            {
+                              item->min_r32 = R32_MIN;
+                              item->max_r32 = inequality ? nextafterf(parsed, R32_MIN) : parsed;
+                            }
+                            else
+                            {
+                              valid_item = false;
+                            }
+
+                            if(valid_item)
+                            {
+                              item->next = *first_item_ptr;
+                              *first_item_ptr = item;
+                            }
+                          }
+                        }
                       }
-                      else if(str_eq(pre_column, str("n")) && post_column.size > 0)
-                      {
-                        item->word = post_column;
-                        item->next = first_negative_item;
-                        first_negative_item = item;
-                      }
-                      else
+
+                      if(!keyword_found)
                       {
                         item->word = str_from_span(word_start, word_end);
                         item->next = first_positive_item;
@@ -3900,10 +4060,13 @@ int main(int argc, char** argv)
                       }
                     }
 
-                    // The upper-case region of ASCII maps into the control-code region
-                    // when taking off the two highest bits;  use this to avoid collisions
-                    // with the symbols and digits, which would get mapped from lower-case.
-                    bloom |= (1 << (to_upper(item->word.data[0]) >> 2));
+                    if(!is_r32)
+                    {
+                      // The upper-case region of ASCII maps into the control-code region
+                      // when taking off the two highest bits;  use this to avoid collisions
+                      // with the symbols and digits, which would get mapped from lower-case.
+                      bloom |= (1 << (to_upper(item->word.data[0]) >> 2));
+                    }
 
                     last_alternative = item;
                   }
@@ -3952,85 +4115,136 @@ int main(int argc, char** argv)
                 b32 overall_match = true;
                 img_entry_t* img = &state->img_entries[img_idx];
 
-                struct
+                // String search.
                 {
-                  str_t haystack;
-                  search_item_t* first_item;
-                } search_tasks[] = {
-                  { img->path, first_path_item },
-                  { img->parameter_strings[IMG_STR_MODEL], first_model_item },
-                  { img->parameter_strings[IMG_STR_POSITIVE_PROMPT], first_positive_item },
-                  { img->parameter_strings[IMG_STR_NEGATIVE_PROMPT], first_negative_item },
-                };
-                for(i32 search_task_idx = 0;
-                    search_task_idx < array_count(search_tasks);
-                    ++search_task_idx)
-                {
-                  str_t haystack = search_tasks[search_task_idx].haystack;
-                  search_item_t* first_item = search_tasks[search_task_idx].first_item;
-                  if(!first_item) { continue; }
-
-                  for(search_item_t* item = first_item;
-                      item;
-                      item = item->next)
+                  struct
                   {
-                    item->flags &= ~SEARCH_MATCHED;
-                  }
-
-                  for(i64 offset = 0;
-                      offset < (i64)haystack.size && overall_match;
-                      ++offset)
+                    str_t haystack;
+                    search_item_t* first_item;
+                  } search_tasks[] = {
+                    { img->path, first_path_item },
+                    { img->parameter_strings[IMG_STR_MODEL], first_model_item },
+                    { img->parameter_strings[IMG_STR_POSITIVE_PROMPT], first_positive_item },
+                    { img->parameter_strings[IMG_STR_NEGATIVE_PROMPT], first_negative_item },
+                  };
+                  for(i32 search_task_idx = 0;
+                      search_task_idx < array_count(search_tasks);
+                      ++search_task_idx)
                   {
-                    if(!(bloom & (1 << (to_upper(haystack.data[offset]) >> 2)))) { continue; }
-
-                    for(search_item_t* item = first_item;
-                        item;
-                        item = item->next)
+                    str_t haystack = search_tasks[search_task_idx].haystack;
+                    search_item_t* first_item = search_tasks[search_task_idx].first_item;
+                    if(first_item)
                     {
-                      if(!(item->flags & SEARCH_MATCHED))
+                      for(search_item_t* item = first_item;
+                          item;
+                          item = item->next)
                       {
-                        for(search_item_t* alternative = item;
-                            alternative;
-                            alternative = alternative->next_alternative)
-                        {
-                          str_t query_word = alternative->word;
+                        item->flags &= ~SEARCH_MATCHED;
+                      }
 
-                          if(haystack.size >= query_word.size + offset)
+                      for(i64 offset = 0;
+                          offset < (i64)haystack.size && overall_match;
+                          ++offset)
+                      {
+                        if(!(bloom & (1 << (to_upper(haystack.data[offset]) >> 2)))) { continue; }
+
+                        for(search_item_t* item = first_item;
+                            item;
+                            item = item->next)
+                        {
+                          if(!(item->flags & SEARCH_MATCHED))
                           {
-                            // TODO: If multiple query word prefixes match, pick the longest one eagerly.
-                            str_t prompt_substr = { haystack.data + offset, query_word.size };
-                            if(str_eq_ignoring_case(prompt_substr, query_word))
+                            for(search_item_t* alternative = item;
+                                alternative;
+                                alternative = alternative->next_alternative)
                             {
-                              // TODO: Think about whether to consider already-matched words
-                              //       earlier in the prompt for exclusion.
-                              if(item->flags & SEARCH_EXCLUDE)
+                              str_t query_word = alternative->word;
+
+                              if(haystack.size >= query_word.size + offset)
                               {
-                                overall_match = false;
+                                // TODO: If multiple query word prefixes match, pick the longest one eagerly.
+                                str_t prompt_substr = { haystack.data + offset, query_word.size };
+                                if(str_eq_ignoring_case(prompt_substr, query_word))
+                                {
+                                  // TODO: Think about whether to consider already-matched words
+                                  //       earlier in the prompt for exclusion.
+                                  if(item->flags & SEARCH_EXCLUDE)
+                                  {
+                                    overall_match = false;
+                                  }
+                                  else
+                                  {
+                                    item->flags |= SEARCH_MATCHED;
+                                  }
+                                  goto _search_end_label;
+                                }
                               }
-                              else
-                              {
-                                item->flags |= SEARCH_MATCHED;
-                              }
-                              goto _search_end_label;
                             }
+                          }
+                        }
+_search_end_label:
+                        offset = offset;  // Dummy expression to avoid compiler warning.
+                      }
+
+                      for(search_item_t* item = first_item;
+                          item;
+                          item = item->next)
+                      {
+                        if(!(item->flags & SEARCH_EXCLUDE))
+                        {
+                          overall_match = overall_match && (item->flags & SEARCH_MATCHED);
+                        }
+                      }
+                    }
+                  }
+                }
+
+#if 1
+                // Numeric search.
+                {
+                  struct
+                  {
+                    b32 img_has_value;
+                    r32 img_r32;
+                    search_item_t* first_item;
+                  } search_tasks[] = {
+                    { true, (r32)img->w, first_width_item },
+                    { true, (r32)img->h, first_height_item },
+                    { true, img->h == 0 ? 0 : (r32)img->w / (r32)img->h, first_aspect_item },
+                    { (img->parameter_strings[IMG_STR_SAMPLING_STEPS].size > 0), img->parsed_r32s[PARSED_R32_SAMPLING_STEPS], first_steps_item },
+                    { (img->parameter_strings[IMG_STR_CFG].size > 0), img->parsed_r32s[PARSED_R32_CFG], first_cfg_item },
+                    { (img->parameter_strings[IMG_STR_SCORE].size > 0), img->parsed_r32s[PARSED_R32_SCORE], first_score_item },
+                  };
+                  for(i32 search_task_idx = 0;
+                      search_task_idx < array_count(search_tasks);
+                      ++search_task_idx)
+                  {
+                    r32 img_r32 = search_tasks[search_task_idx].img_r32;
+                    search_item_t* first_item = search_tasks[search_task_idx].first_item;
+                    if(first_item)
+                    {
+                      if(!search_tasks[search_task_idx].img_has_value)
+                      {
+                        overall_match = false;
+                      }
+                      else
+                      {
+                        for(search_item_t* item = first_item;
+                            item;
+                            item = item->next)
+                        {
+                          b32 matches = ((img_r32 >= item->min_r32) && (img_r32 <= item->max_r32));
+                          b32 should_match = ((item->flags & SEARCH_EXCLUDE) == 0);
+                          if(matches != should_match)
+                          {
+                            overall_match = false;
                           }
                         }
                       }
                     }
-_search_end_label:
-                    offset = offset;  // Dummy expression to avoid compiler warning.
-                  }
-
-                  for(search_item_t* item = first_item;
-                      item;
-                      item = item->next)
-                  {
-                    if(!(item->flags & SEARCH_EXCLUDE))
-                    {
-                      overall_match = overall_match && (item->flags & SEARCH_MATCHED);
-                    }
                   }
                 }
+#endif
 
                 if(overall_match)
                 {
@@ -4859,14 +5073,20 @@ _search_end_label:
                       "\"blue car\" or \"blue jay sketch\".\n"
                       "\n"
                       "Additional parameters can be specified with these special prefixes:\n"
-                      "  f:<file path>\n"
-                      "  m:<model name>\n"
-                      "  n:<negative prompt>\n"
+                      "  f:<file path>  m:<model name>  n:<negative prompt>\n"
+                      "  width:<op><width>  height:<op><height>  aspect:<op><aspect ratio>\n"
+                      "  steps:<op><sampling steps>  cfg:<op><CFG value>  score:<op><score>\n"
                       "\n"
                       "EXAMPLE:  m:sd -f:bad|tmp m:0.9\n"
                       "This will match images created with a model that includes both \"sd\" and \"0.9\" "
                       "(e.g. \"SDXL_0.9vae\", but neither \"sd_xl_1.0\" nor \"v1-5-pruned\"), "
                       "but only if their filepath does NOT include \"bad\" or \"tmp\" (so \"good/pic.png\" is OK, but \"tmp/pic.png\" is excluded).\n"
+                      "\n"
+                      "Numeric values can be compared with an <op> including <, <=, =, >=, >.\n"
+                      "EXAMPLE:  width:>=500 width:<600 -cfg:=7\n"
+                      "This will match images with a width between 500 inclusive and 600 exclusive, "
+                      "but only if their CFG value is known and does not equal 7.\n"
+                      "Alternatives (e.g. width:<500|>600) are NOT supported for numbers.\n"
                       "\n"
                       "If the search is aborted with Escape (instead of accepted with Enter), all images get shown again.\n"
                       "If image metadata are still getting loaded (e.g. from a slow filesystem), "
