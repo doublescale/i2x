@@ -343,6 +343,27 @@ internal b32 str_eq_ignoring_case(str_t a, str_t b)
   return result;
 }
 
+internal int str_compare(str_t a, str_t b)
+{
+  int result = 0;
+
+  for(u64 i = 0;
+      i < a.size && i < b.size && result == 0;
+      ++i)
+  {
+    if(a.data[i] < b.data[i]) { result = -1; }
+    if(a.data[i] > b.data[i]) { result =  1; }
+  }
+
+  if(result == 0)
+  {
+    if(a.size < b.size) { result = -1; }
+    if(a.size > b.size) { result =  1; }
+  }
+
+  return result;
+}
+
 internal b32 str_eq_zstr(str_t a, char* b)
 {
   b32 result = true;

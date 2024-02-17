@@ -92,7 +92,7 @@ typedef struct
 {
   i32 entry_idx;
 
-  u64 timestamp;
+  u64 loaded_at_time;
 
   i32 w;
   i32 h;
@@ -139,7 +139,8 @@ typedef u32 parsed_r32_t;
 typedef struct img_entry_t
 {
   str_t path;
-  u64 timestamp;
+  struct timespec modified_at_time;
+  u64 filesize;
 
   str_t file_header_data;
   str_t parameter_strings[IMG_STR_COUNT];
@@ -149,8 +150,10 @@ typedef struct img_entry_t
   i32 w;
   i32 h;
   u8* pixels;
+  u64 loaded_at_time;
   GLuint texture_id;
   i64 bytes_used;
+  u32 random_number;
 
   struct img_entry_t* lru_prev;
   struct img_entry_t* lru_next;
@@ -186,6 +189,30 @@ typedef struct
   sem_t* semaphore;
   shared_loader_data_t* shared;
 } loader_data_t;
+
+enum
+{
+  SORT_MODE_FILEPATH,
+  SORT_MODE_TIMESTAMP,
+  SORT_MODE_FILESIZE,
+  SORT_MODE_RANDOM,
+  SORT_MODE_PIXELCOUNT,
+  SORT_MODE_PROMPT,
+  SORT_MODE_MODEL,
+  SORT_MODE_SCORE,
+  SORT_MODE_COUNT,
+};
+typedef u32 sort_mode_t;
+internal str_t sort_mode_labels[] = {
+  str("[f]ilepath"),
+  str("[t]imestamp"),
+  str("file[s]ize"),
+  str("rand[o]m"),
+  str("pi[x]elcount"),
+  str("[p]rompt"),
+  str("[m]odel"),
+  str("sco[r]e"),
+};
 
 typedef struct
 {
@@ -235,6 +262,11 @@ typedef struct
   i32 total_img_capacity;
   i32 total_img_count;
 
+  b32 sorting_modal;
+  sort_mode_t sort_mode;
+  b32 sort_descending;
+  i32* sorted_img_idxs;
+
   i32* filtered_img_idxs;
   i32 filtered_img_count;
 
@@ -243,11 +275,11 @@ typedef struct
   u8 clipboard_str_buffer[64 * 1024];
   str_t clipboard_str;
 
-  b32 searching;
+  b32 filtering_modal;
   u8 search_str_buffer[64 * 1024];
   str_t search_str;
   i64 search_str_capacity;
-  i32 img_idx_viewed_before_search;
+  i32 sorted_idx_viewed_before_search;
   i64 selection_start;
   i64 selection_end;
   i32 metadata_loaded_count;
@@ -731,10 +763,10 @@ internal void* loader_fun(void* raw_data)
           printf("WARNING: Loaded image slot %ld was not unloaded, but will be overwritten!\n", loaded_img_id);
         }
 
-        loaded_img->timestamp = timestamp;
+        loaded_img->loaded_at_time = timestamp;
         loaded_img->entry_idx = img_idx;
 
-        if(img_entry->pixels && img_entry->timestamp >= timestamp)
+        if(img_entry->pixels && img_entry->loaded_at_time >= timestamp)
         {
           loaded_img->w = img_entry->w;
           loaded_img->h = img_entry->h;
@@ -836,6 +868,8 @@ internal void* metadata_loader_fun(void* raw_data)
         size_t bytes_to_read = 4 * 1024;
         img->file_header_data.data = malloc_array(bytes_to_read, u8);
         ssize_t bytes_actually_read = read(fd, img->file_header_data.data, bytes_to_read);
+        // off_t lseek_result = lseek(fd, 0, SEEK_END);
+        // if(lseek_result != -1) { img->filesize = lseek_result; }
         close(fd);
         if(bytes_actually_read != -1)
         {
@@ -1419,15 +1453,121 @@ internal void set_or_unset_filtered_img_flag(state_t* state, i32 filtered_idx, i
   }
 }
 
-internal int compare_paths(const void* void_a, const void* void_b, void* void_data)
+#define COMPARE_SCALARS(a, b) ((a) < (b) ? -1 : ((a) > (b) ? 1 : 0))
+
+internal int compare_img_entries(const void* void_a, const void* void_b, void* void_data)
 {
-  return strcmp(*(char**)void_a, *(char**)void_b);
+  i32 idx_a = *(i32*)void_a;
+  i32 idx_b = *(i32*)void_b;
+  state_t* state = (state_t*)void_data;
+  img_entry_t* img_a = &state->img_entries[idx_a];
+  img_entry_t* img_b = &state->img_entries[idx_b];
+  int result = 0;
+
+  switch(state->sort_mode)
+  {
+    case SORT_MODE_TIMESTAMP:
+    {
+      result = COMPARE_SCALARS(img_a->modified_at_time.tv_sec, img_b->modified_at_time.tv_sec);
+      if(result == 0)
+      {
+        result = COMPARE_SCALARS(img_a->modified_at_time.tv_nsec, img_b->modified_at_time.tv_nsec);
+      }
+    } break;
+
+    case SORT_MODE_FILESIZE:
+    {
+      result = COMPARE_SCALARS(img_a->filesize, img_b->filesize);
+    } break;
+
+    case SORT_MODE_RANDOM:
+    {
+      result = COMPARE_SCALARS(img_a->random_number, img_b->random_number);
+    } break;
+
+    case SORT_MODE_PIXELCOUNT:
+    {
+      i32 pixels_a = img_a->w * img_a->h;
+      i32 pixels_b = img_b->w * img_b->h;
+      result = COMPARE_SCALARS(pixels_a, pixels_b);
+    } break;
+
+    case SORT_MODE_PROMPT:
+    {
+      result = str_compare(img_a->parameter_strings[IMG_STR_POSITIVE_PROMPT], img_b->parameter_strings[IMG_STR_POSITIVE_PROMPT]);
+    } break;
+
+    case SORT_MODE_MODEL:
+    {
+      result = str_compare(img_a->parameter_strings[IMG_STR_MODEL], img_b->parameter_strings[IMG_STR_MODEL]);
+    } break;
+
+    case SORT_MODE_SCORE:
+    {
+      result = COMPARE_SCALARS(img_a->parsed_r32s[PARSED_R32_SCORE], img_b->parsed_r32s[PARSED_R32_SCORE]);
+    } break;
+  }
+
+  if(result == 0)
+  {
+    // Tie-break.
+    result = str_compare(img_a->path, img_b->path);
+  }
+
+  if(state->sort_descending)
+  {
+    result = -result;
+  }
+
+  return result;
+}
+
+internal void reset_filtered_images(state_t* state)
+{
+  for_count(i, state->total_img_count)
+  {
+    state->filtered_img_idxs[i] = state->sorted_img_idxs[i];
+  }
+  state->filtered_img_count = state->total_img_count;
+}
+
+internal i32 find_sorted_idx_of_img_idx(state_t* state, i32 img_idx)
+{
+  i32 result = 0;
+
+  for_count(i, state->total_img_count)
+  {
+    if(state->sorted_img_idxs[i] == img_idx)
+    {
+      result = i;
+      break;
+    }
+  }
+
+  return result;
+}
+
+internal i32 find_filtered_idx_of_img_idx(state_t* state, i32 img_idx)
+{
+  i32 result = 0;
+
+  for_count(i, state->filtered_img_count)
+  {
+    if(state->filtered_img_idxs[i] == img_idx)
+    {
+      result = i;
+      break;
+    }
+  }
+
+  return result;
 }
 
 internal void refresh_input_paths(state_t* state)
 {
   i32 prev_viewing_idx = state->filtered_img_idxs[state->viewing_filtered_img_idx];
   str_t prev_viewing_path = state->img_entries[prev_viewing_idx].path;
+  i32 new_viewing_img_idx = -1;
   prev_viewing_path.data = (u8*)strndupa((char*)prev_viewing_path.data, prev_viewing_path.size);
   // TODO: Keep the marks and filtered images.
 
@@ -1464,8 +1604,6 @@ internal void refresh_input_paths(state_t* state)
         }
       }
       closedir(dir);
-
-      qsort_r(paths, paths_count, sizeof(paths[0]), compare_paths, 0);
     }
 
     if(!is_a_dir)
@@ -1485,7 +1623,7 @@ internal void refresh_input_paths(state_t* state)
       img->path = wrap_str(paths[path_idx]);
       if(!str_eq(img->path, old_path))
       {
-        img->timestamp = 0;
+        img->loaded_at_time = 0;
         img->bytes_used = 0;
         unload_texture(state, img);
         // TODO: Increment some sort of reload-generation ID
@@ -1498,9 +1636,21 @@ internal void refresh_input_paths(state_t* state)
 
       if(old_path.data) { free(old_path.data); }
 
+      struct stat stats = {0};
+      if(stat(paths[path_idx], &stats) == 0)
+      {
+        img->filesize = stats.st_size;
+        img->modified_at_time = stats.st_mtim;
+      }
+
+      if(!img->random_number)
+      {
+        img->random_number = max(1, (u32)rand());
+      }
+
       if(str_eq(img->path, prev_viewing_path))
       {
-        state->viewing_filtered_img_idx = img_idx;
+        new_viewing_img_idx = img_idx;
       }
     }
 
@@ -1513,14 +1663,11 @@ internal void refresh_input_paths(state_t* state)
   }
 
   free(paths);
-
-  for(i32 idx = 0;
-      idx < state->total_img_count;
-      ++idx)
+  reset_filtered_images(state);
+  if(new_viewing_img_idx != -1)
   {
-    state->filtered_img_idxs[idx] = idx;
+    state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state, new_viewing_img_idx);
   }
-  state->filtered_img_count = state->total_img_count;
 
   sem_post(&state->metadata_loader_semaphore);
 }
@@ -1786,10 +1933,19 @@ internal void draw_wrapped_text(state_t* state,
   } while(finish_wrapped_line(&wrap_ctx, x, y));
 }
 
+internal b32 sort_mode_needs_metadata(sort_mode_t mode)
+{
+  return mode != SORT_MODE_FILEPATH
+    && mode != SORT_MODE_TIMESTAMP
+    && mode != SORT_MODE_FILESIZE
+    && mode != SORT_MODE_RANDOM;
+}
+
 int main(int argc, char** argv)
 {
   debug_out = fopen("/tmp/i2x-debug.log", "wb");
   // if(!debug_out) { debug_out = stderr; }
+  srand(get_nanoseconds());
 
   state_t* state = malloc_struct(state_t);
   zero_struct(*state);
@@ -1804,10 +1960,14 @@ int main(int argc, char** argv)
     printf("\n");
     printf("Press F1 for GUI help.\n");
     printf("\n");
-    printf("Directories get expanded (one level, not recursive), contents sorted alphabetically.\n");
+    printf("Directories get expanded (one level, not recursive).\n");
     printf("If only one file is passed, its containing directory is opened, and the file focused.\n");
     printf("\n");
     printf("The following environment variables are used:\n");
+    printf("I2X_SORT_ORDER:      Sets an initial sort order (Default: path). One of:\n");
+    printf("                     path, time, filesize, random, pixelcount*, prompt*, model*, score*.\n");
+    printf("                     Can be suffixed by \"_desc\" for descending (default is ascending).\n");
+    printf("                     *: Orderings which depend on metadata may delay startup.\n");
     printf("I2X_DISABLE_INOTIFY: Disables automatic directory refresh using inotify.\n");
     printf("I2X_DISABLE_XINPUT2: Disables XInput2 handling, which allows\n");
     printf("                     smooth scrolling and raw sub-pixel mouse motion,\n");
@@ -1818,7 +1978,7 @@ int main(int argc, char** argv)
         state->shared.total_bytes_limit / (1024 * 1024));
     printf("I2X_TTF_PATH:        Use an external font file instead of the internal one.\n");
     printf("\n");
-    printf("Example invocation:  I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 %s\n", argv[0]);
+    printf("Example invocation:\n  I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 I2X_SORT_ORDER=time_desc %s\n", argv[0]);
     return 0;
   }
 
@@ -2036,6 +2196,33 @@ int main(int argc, char** argv)
 
         glXMakeContextCurrent(display, glx_window, glx_window, glx_context);
 
+        char* sort_order_envvar = getenv("I2X_SORT_ORDER");
+        if(sort_order_envvar)
+        {
+          str_t str = wrap_str(sort_order_envvar);
+          if(0) {}
+          else if(str_eq_ignoring_case(str, str("path"))) { state->sort_mode = SORT_MODE_FILEPATH; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("path_desc"))) { state->sort_mode = SORT_MODE_FILEPATH; state->sort_descending = true; }
+          else if(str_eq_ignoring_case(str, str("time"))) { state->sort_mode = SORT_MODE_TIMESTAMP; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("time_desc"))) { state->sort_mode = SORT_MODE_TIMESTAMP; state->sort_descending = true; }
+          else if(str_eq_ignoring_case(str, str("filesize"))) { state->sort_mode = SORT_MODE_FILESIZE; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("filesize_desc"))) { state->sort_mode = SORT_MODE_FILESIZE; state->sort_descending = true; }
+          else if(str_eq_ignoring_case(str, str("random"))) { state->sort_mode = SORT_MODE_RANDOM; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("random_desc"))) { state->sort_mode = SORT_MODE_RANDOM; state->sort_descending = true; }
+          else if(str_eq_ignoring_case(str, str("pixelcount"))) { state->sort_mode = SORT_MODE_PIXELCOUNT; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("pixelcount_desc"))) { state->sort_mode = SORT_MODE_PIXELCOUNT; state->sort_descending = true; }
+          else if(str_eq_ignoring_case(str, str("prompt"))) { state->sort_mode = SORT_MODE_PROMPT; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("prompt_desc"))) { state->sort_mode = SORT_MODE_PROMPT; state->sort_descending = true; }
+          else if(str_eq_ignoring_case(str, str("model"))) { state->sort_mode = SORT_MODE_MODEL; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("model_desc"))) { state->sort_mode = SORT_MODE_MODEL; state->sort_descending = true; }
+          else if(str_eq_ignoring_case(str, str("score"))) { state->sort_mode = SORT_MODE_SCORE; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("score_desc"))) { state->sort_mode = SORT_MODE_SCORE; state->sort_descending = true; }
+          else
+          {
+            fprintf(stderr, "Ignoring unknown I2X_SORT_ORDER: \"%.*s\"\n", PF_STR(str));
+          }
+        }
+
         if(!getenv("I2X_DISABLE_INOTIFY"))
         {
           state->inotify_fd = inotify_init1(IN_NONBLOCK);
@@ -2091,6 +2278,8 @@ int main(int argc, char** argv)
         state->total_img_capacity = max(state->input_path_count, 128 * 1024);
         state->img_entries = malloc_array(state->total_img_capacity, img_entry_t);
         zero_bytes(state->total_img_capacity * sizeof(img_entry_t), state->img_entries);
+        state->sorted_img_idxs = malloc_array(state->total_img_capacity, i32);
+        for_count(i, state->total_img_capacity) { state->sorted_img_idxs[i] = i; }
         state->filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
         zero_bytes(state->total_img_capacity * sizeof(i32), state->filtered_img_idxs);
 
@@ -2099,13 +2288,25 @@ int main(int argc, char** argv)
 
         refresh_input_paths(state);
 
+        if(sort_mode_needs_metadata(state->sort_mode) && !open_single_directory_on.size)
+        {
+          while(state->metadata_loaded_count < state->total_img_count)
+          {
+            usleep(100000);
+          }
+        }
+
+        qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
+        reset_filtered_images(state);
+
         if(open_single_directory_on.size)
         {
-          for_count(img_idx, state->total_img_count)
+          for_count(i, state->total_img_count)
           {
+            i32 img_idx = state->sorted_img_idxs[i];
             if(str_has_suffix(state->img_entries[img_idx].path, open_single_directory_on))
             {
-              state->viewing_filtered_img_idx = img_idx;
+              state->viewing_filtered_img_idx = i;
               break;
             }
           }
@@ -2294,8 +2495,9 @@ int main(int argc, char** argv)
         while(!quitting)
         {
           b32 dirty = false;
-          b32 refreshed_paths = false;
+          b32 signal_loaders = false;
           b32 search_changed = false;
+          b32 need_to_sort = false;
 
           {
             shared_loader_data_t* shared = &state->shared;
@@ -2333,7 +2535,7 @@ int main(int argc, char** argv)
               {
                 unload_texture(state, img_entry);
               }
-              img_entry->timestamp = loaded_img->timestamp;
+              img_entry->loaded_at_time = loaded_img->loaded_at_time;
               img_entry->w = loaded_img->w;
               img_entry->h = loaded_img->h;
               img_entry->pixels = loaded_img->pixels;
@@ -2396,6 +2598,11 @@ int main(int argc, char** argv)
             // printf("Loading metadata %d/%d\n", state->metadata_loaded_count, state->total_img_count);
             dirty = true;
             search_changed = true;
+
+            if(sort_mode_needs_metadata(state->sort_mode))
+            {
+              need_to_sort = true;
+            }
           }
           state->all_metadata_loaded = (state->metadata_loaded_count >= state->total_img_count);
 
@@ -2438,7 +2645,7 @@ int main(int argc, char** argv)
               )
             {
               refresh_input_paths(state);
-              refreshed_paths = true;
+              signal_loaders = true;
               dirty = true;
             }
           }
@@ -2796,7 +3003,7 @@ int main(int argc, char** argv)
                     else if(ctrl_held && keysym == 'r')
                     {
                       refresh_input_paths(state);
-                      refreshed_paths = true;
+                      signal_loaders = true;
                     }
 
                     // Debug keys.
@@ -2822,31 +3029,32 @@ int main(int argc, char** argv)
                       bflip(state->debug_font_atlas);
                     }
 
-                    else if(ctrl_held && keysym == 'f' || !state->searching && keysym == '/')
+                    else if(!state->sorting_modal && (ctrl_held && keysym == 'f' || !state->filtering_modal && keysym == '/'))
                     {
-                      bflip(state->searching);
-                      if(state->searching)
+                      bflip(state->filtering_modal);
+                      if(state->filtering_modal)
                       {
                         state->selection_start = state->search_str.size;
                         state->selection_end   = state->search_str.size;
-                        state->img_idx_viewed_before_search = state->filtered_img_idxs[state->viewing_filtered_img_idx];
+                        state->sorted_idx_viewed_before_search = find_sorted_idx_of_img_idx(state,
+                            state->filtered_img_idxs[state->viewing_filtered_img_idx]);
                         search_changed = true;
                       }
                     }
-                    else if(state->searching)
+                    else if(!state->sorting_modal && state->filtering_modal)
                     {
                       if(0) {}
                       else if(keysym == XK_Escape)
                       {
-                        state->searching = false;
-                        for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
-                        state->filtered_img_count = state->total_img_count;
-                        state->viewing_filtered_img_idx = state->img_idx_viewed_before_search;
+                        state->filtering_modal = false;
+                        reset_filtered_images(state);
+                        state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state,
+                            state->sorted_img_idxs[state->sorted_idx_viewed_before_search]);
                         scroll_thumbnail_into_view = true;
                       }
                       else if(keysym == XK_Return)
                       {
-                        state->searching = false;
+                        state->filtering_modal = false;
                       }
                       else if(ctrl_held && keysym == 'a')
                       {
@@ -2972,6 +3180,94 @@ int main(int argc, char** argv)
                         }
                       }
                     }
+
+                    else if(state->sorting_modal)
+                    {
+                      if(0) {}
+                      else if(keysym == XK_Escape || keysym == XK_Return)
+                      {
+                        state->sorting_modal = false;
+                      }
+                      else if(keysym == XK_Left || keysym == XK_Up)
+                      {
+                        if(state->sort_mode > 0)
+                        {
+                          --state->sort_mode;
+                        }
+                        else
+                        {
+                          state->sort_mode = SORT_MODE_COUNT - 1;
+                        }
+                        need_to_sort = true;
+                      }
+                      else if(keysym == XK_Right || keysym == XK_Down)
+                      {
+                        ++state->sort_mode;
+                        if(state->sort_mode >= SORT_MODE_COUNT)
+                        {
+                          state->sort_mode = 0;
+                        }
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 'd')
+                      {
+                        bflip(state->sort_descending);
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 'f')
+                      {
+                        state->sort_mode = SORT_MODE_FILEPATH;
+                        state->sort_descending = shift_held;
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 't')
+                      {
+                        state->sort_mode = SORT_MODE_TIMESTAMP;
+                        state->sort_descending = shift_held;
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 's')
+                      {
+                        state->sort_mode = SORT_MODE_FILESIZE;
+                        state->sort_descending = shift_held;
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 'o')
+                      {
+                        state->sort_mode = SORT_MODE_RANDOM;
+                        state->sort_descending = shift_held;
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 'x')
+                      {
+                        state->sort_mode = SORT_MODE_PIXELCOUNT;
+                        state->sort_descending = shift_held;
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 'p')
+                      {
+                        state->sort_mode = SORT_MODE_PROMPT;
+                        state->sort_descending = shift_held;
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 'm')
+                      {
+                        state->sort_mode = SORT_MODE_MODEL;
+                        state->sort_descending = shift_held;
+                        need_to_sort = true;
+                      }
+                      else if(keysym == 'r')
+                      {
+                        state->sort_mode = SORT_MODE_SCORE;
+                        state->sort_descending = shift_held;
+                        need_to_sort = true;
+                      }
+                    }
+                    else if(shift_held && keysym == 's')
+                    {
+                      state->sorting_modal = true;
+                    }
+
                     else if(keysym == XK_Escape)
                     {
                       // TODO: Better to persist the marking-state.
@@ -3089,30 +3385,33 @@ int main(int argc, char** argv)
                     }
                     else if(keysym == 'o')
                     {
-                      i32 prev_viewing_idx = state->filtered_img_idxs[state->viewing_filtered_img_idx];
+                      i32 prev_sorted_idx = find_sorted_idx_of_img_idx(state,
+                          state->filtered_img_idxs[state->viewing_filtered_img_idx]);
                       state->viewing_filtered_img_idx = 0;
 
                       if(state->filtered_img_count == state->total_img_count)
                       {
                         state->filtered_img_count = 0;
-                        for_count(idx, state->total_img_count)
+                        for_count(sorted_idx, state->total_img_count)
                         {
-                          if(state->img_entries[idx].flags & IMG_FLAG_MARKED)
+                          i32 img_idx = state->sorted_img_idxs[sorted_idx];
+
+                          if(state->img_entries[img_idx].flags & IMG_FLAG_MARKED)
                           {
-                            if(prev_viewing_idx >= idx)
+                            if(prev_sorted_idx >= sorted_idx)
                             {
                               state->viewing_filtered_img_idx = state->filtered_img_count;
                             }
 
-                            state->filtered_img_idxs[state->filtered_img_count++] = idx;
+                            state->filtered_img_idxs[state->filtered_img_count++] = img_idx;
                           }
                         }
                       }
                       else
                       {
-                        for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
-                        state->filtered_img_count = state->total_img_count;
-                        state->viewing_filtered_img_idx = prev_viewing_idx;
+                        reset_filtered_images(state);
+                        state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state,
+                            state->sorted_img_idxs[prev_sorted_idx]);
                       }
                       clamp_thumbnail_scroll_rows(state);
                       scroll_thumbnail_into_view = true;
@@ -3406,7 +3705,7 @@ int main(int argc, char** argv)
                     {
                       printf("Paste: INCR!\n");
                     }
-                    if(state->searching)
+                    if(state->filtering_modal)
                     {
                       str_replace_selection(array_count(state->search_str_buffer),
                           &state->search_str, &state->selection_start, &state->selection_end,
@@ -3849,14 +4148,35 @@ int main(int argc, char** argv)
 
           if(quitting) { break; }
 
+          if(need_to_sort)
+          {
+            if(state->sort_mode == SORT_MODE_RANDOM)
+            {
+              for_count(i, state->total_img_count)
+              {
+                state->img_entries[i].random_number = max(1, (u32)rand());
+              }
+            }
+
+            i32 viewing_img_idx = state->filtered_img_idxs[state->viewing_filtered_img_idx];
+            qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
+            qsort_r(state->filtered_img_idxs, state->filtered_img_count, sizeof(state->filtered_img_idxs[0]), compare_img_entries, state);
+            state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state, viewing_img_idx);
+
+            scroll_thumbnail_into_view = true;
+            need_to_sort = false;
+            dirty = true;
+            signal_loaders = true;
+          }
+
           // Search.
-          if(state->searching && search_changed)
+          if(state->filtering_modal && search_changed)
           {
             if(state->search_str.size == 0)
             {
-              for_count(i, state->total_img_count) { state->filtered_img_idxs[i] = i; }
-              state->filtered_img_count = state->total_img_count;
-              state->viewing_filtered_img_idx = state->img_idx_viewed_before_search;
+              reset_filtered_images(state);
+              state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state,
+                  state->sorted_img_idxs[state->sorted_idx_viewed_before_search]);
             }
             else
             {
@@ -3884,7 +4204,7 @@ int main(int argc, char** argv)
               };
               typedef u32 search_flags_t;
 
-              typedef struct search_flags_t
+              typedef struct search_item_t
               {
                 union
                 {
@@ -3897,8 +4217,8 @@ int main(int argc, char** argv)
                 };
                 search_flags_t flags;
 
-                struct search_flags_t* next;
-                struct search_flags_t* next_alternative;
+                struct search_item_t* next;
+                struct search_item_t* next_alternative;
               } search_item_t;
 
               search_item_t search_items[256];
@@ -4110,10 +4430,11 @@ int main(int argc, char** argv)
               }
 #endif
 
-              for_count(img_idx, state->total_img_count)
+              for_count(sorted_idx, state->total_img_count)
               {
-                b32 overall_match = true;
+                i32 img_idx = state->sorted_img_idxs[sorted_idx];
                 img_entry_t* img = &state->img_entries[img_idx];
+                b32 overall_match = true;
 
                 // String search.
                 {
@@ -4199,7 +4520,6 @@ _search_end_label:
                   }
                 }
 
-#if 1
                 // Numeric search.
                 {
                   struct
@@ -4244,14 +4564,15 @@ _search_end_label:
                     }
                   }
                 }
-#endif
 
                 if(overall_match)
                 {
-                  if(state->img_idx_viewed_before_search >= img_idx)
+#if 1
+                  if(state->sorted_idx_viewed_before_search >= sorted_idx)
                   {
                     state->viewing_filtered_img_idx = state->filtered_img_count;
                   }
+#endif
 
                   state->filtered_img_idxs[state->filtered_img_count++] = img_idx;
                 }
@@ -4360,7 +4681,7 @@ _search_end_label:
                 || first_visible_thumbnail_idx != state->shared.first_visible_thumbnail_idx
                 || last_visible_thumbnail_idx != state->shared.last_visible_thumbnail_idx
                 || state->filtered_img_count != state->shared.filtered_img_count
-                || refreshed_paths
+                || signal_loaders
               )
             {
               state->shared.viewing_filtered_img_idx = state->viewing_filtered_img_idx;
@@ -4766,6 +5087,27 @@ _search_end_label:
 
               y -= fs;
               SHOW_LABEL_VALUE("File: ", img->path);
+              {
+                struct tm t = {0};
+                localtime_r(&img->modified_at_time.tv_sec, &t);
+                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%04d-%02d-%02d %02d:%02d:%02d",
+                    t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                    t.tm_hour, t.tm_min, t.tm_sec);
+              }
+              SHOW_LABEL_VALUE("Time: ", tmp_str);
+              if(img->filesize < 10000)
+              {
+                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%lu B", img->filesize);
+              }
+              else if(img->filesize < 10000000)
+              {
+                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%.0f kB", 1e-3 * (r64)img->filesize);
+              }
+              else
+              {
+                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%.0f MB", 1e-6 * (r64)img->filesize);
+              }
+              SHOW_LABEL_VALUE("Size: ", tmp_str);
               if(img->w || img->h)
               {
                 tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%dx%d", img->w, img->h);
@@ -4801,7 +5143,7 @@ _search_end_label:
 #undef SHOW_LABEL_VALUE
             }
 
-            if(state->searching)
+            if(state->filtering_modal)
             {
               str_t text = state->search_str;
               u8* selection_min = text.data + min(state->selection_start, state->selection_end);
@@ -4944,6 +5286,82 @@ _search_end_label:
               }
             }
 
+            if(state->sorting_modal)
+            {
+              glScissor(0, 0, state->win_w, state->win_h);
+              r32 x0 = image_region_x0 + 0.5f * fs;
+              r32 x1 = state->win_w - 0.6f * fs;
+              r32 y1 = state->win_h - 1.5f * fs;
+              r32 x_indented = x0 + fs;
+
+              // Background rectangle.
+              {
+                r32 x = x0;
+                r32 y = y1;
+
+                r32 box_x0 = x0 - 0.3f * fs;
+                r32 box_x1 = x0 + 36.0f * fs;
+                r32 box_y0 = y - fs * (state->font_descent + 2.2f);
+                r32 box_y1 = y1 + fs * (state->font_ascent + 0.2f);
+
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_BLEND);
+                glBegin(GL_QUADS);
+                glColor3f(background_gray, background_gray, background_gray);
+                glVertex2f(box_x0, box_y0);
+                glVertex2f(box_x1, box_y0);
+                glVertex2f(box_x1, box_y1);
+                glVertex2f(box_x0, box_y1);
+                glEnd();
+              }
+
+              {
+                r32 x = x0;
+                r32 y = y1;
+
+                glColor3f(label_gray, label_gray, label_gray);
+                x += draw_str(state, 0, fs, x, y, str("Sort by (hold Shift for descending):"));
+
+                y -= fs;
+                x = x_indented;
+                for_count(mode_idx, SORT_MODE_COUNT)
+                {
+                  x += 0.3 * fs;
+                  if(mode_idx == state->sort_mode)
+                  {
+                    glColor3f(text_gray, text_gray, text_gray);
+                  }
+                  else
+                  {
+                    glColor3f(label_gray, label_gray, label_gray);
+                  }
+                  x += draw_str(state, 0, fs, x, y, sort_mode_labels[mode_idx]);
+                }
+
+                y -= fs;
+                x = x_indented;
+                if(!state->sort_descending)
+                {
+                  glColor3f(text_gray, text_gray, text_gray);
+                }
+                else
+                {
+                  glColor3f(label_gray, label_gray, label_gray);
+                }
+                x += draw_str(state, 0, fs, x, y, str("ascending"));
+                x += 0.3 * fs;
+                if(state->sort_descending)
+                {
+                  glColor3f(text_gray, text_gray, text_gray);
+                }
+                else
+                {
+                  glColor3f(label_gray, label_gray, label_gray);
+                }
+                x += draw_str(state, 0, fs, x, y, str("[d]escending"));
+              }
+            }
+
             if(state->show_help)
             {
               r32 box_width = min(state->win_w, 45 * fs);
@@ -5026,7 +5444,7 @@ _search_end_label:
               if(0) {}
               else if(state->help_tab_idx == 0)
               {
-                // Keys help.
+                // Key help.
 
                 SHOW_LABEL_VALUE("Quit", "Ctrl + Q");
                 SHOW_LABEL_VALUE("Navigate images", "Space/Backspace, Arrows, HJKL, LMB/MMB, Alt + Scroll");
@@ -5044,6 +5462,7 @@ _search_end_label:
                 SHOW_LABEL_VALUE("Change thumbnail column count", "Alt + 0/-/=, Ctrl + Scroll on thumbnails");
                 SHOW_LABEL_VALUE("Navigate one page up/down", "Alt + PgUp/PgDn");
                 y -= ypad;
+                SHOW_LABEL_VALUE("Sort", "Shift + S");
                 SHOW_LABEL_VALUE("Search", "/, Ctrl + F");
                 SHOW_LABEL_VALUE("Mark images", "M, Ctrl + A, Ctrl/Shift + LMB on thumbnails");
                 SHOW_LABEL_VALUE("Mark image and go to next", "Shift + M");
