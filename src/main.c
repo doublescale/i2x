@@ -270,10 +270,11 @@ typedef struct
   sort_mode_t prev_sort_mode;
   b32 prev_sort_descending;
   i32* prev_sorted_img_idxs;
-  i32* prev_filtered_img_idxs;
 
   i32* filtered_img_idxs;
+  i32* prev_filtered_img_idxs;
   i32 filtered_img_count;
+  i32 prev_filtered_img_count;
 
   i32 viewing_filtered_img_idx;
 
@@ -282,8 +283,9 @@ typedef struct
 
   b32 filtering_modal;
   u8 search_str_buffer[64 * 1024];
+  u8 prev_search_str_buffer[64 * 1024];
   str_t search_str;
-  i64 search_str_capacity;
+  str_t prev_search_str;
   i32 sorted_idx_viewed_before_search;
   i64 selection_start;
   i64 selection_end;
@@ -2465,6 +2467,7 @@ int main(int argc, char** argv)
         i32 hovered_thumbnail_idx = -1;
         // state->show_info = 2;
         state->search_str.data = state->search_str_buffer;
+        state->prev_search_str.data = state->prev_search_str_buffer;
         state->info_panel_width_ratio = 0.2f;
 
         str_t help_tab_labels[] = {
@@ -3057,8 +3060,13 @@ int main(int argc, char** argv)
                       {
                         state->selection_start = state->search_str.size;
                         state->selection_end   = state->search_str.size;
+                        for_count(i, state->filtered_img_count) { state->prev_filtered_img_idxs[i] = state->filtered_img_idxs[i]; }
+                        state->prev_filtered_img_count = state->filtered_img_count;
                         state->sorted_idx_viewed_before_search = find_sorted_idx_of_img_idx(state,
                             state->filtered_img_idxs[state->viewing_filtered_img_idx]);
+                        copy_bytes(state->search_str.size, state->search_str_buffer, state->prev_search_str_buffer);
+                        state->prev_search_str.size = state->search_str.size;
+
                         search_changed = true;
                       }
                     }
@@ -3068,9 +3076,13 @@ int main(int argc, char** argv)
                       else if(keysym == XK_Escape)
                       {
                         state->filtering_modal = false;
-                        reset_filtered_images(state);
+
+                        state->filtered_img_count = state->prev_filtered_img_count;
+                        for_count(i, state->filtered_img_count) { state->filtered_img_idxs[i] = state->prev_filtered_img_idxs[i]; }
                         state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state,
                             state->sorted_img_idxs[state->sorted_idx_viewed_before_search]);
+                        copy_bytes(state->prev_search_str.size, state->prev_search_str_buffer, state->search_str_buffer);
+                        state->search_str.size = state->prev_search_str.size;
                         scroll_thumbnail_into_view = true;
                       }
                       else if(keysym == XK_Return || keysym == XK_KP_Enter)
@@ -5140,11 +5152,18 @@ _search_end_label:
                 draw_wrapped_text(state, fs, x_indented, x1, &x, &y, value); \
               }
 
-              tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
-                  state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->total_img_count);
+              if(state->filtered_img_count == state->total_img_count)
+              {
+                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d",
+                    state->viewing_filtered_img_idx + 1, state->filtered_img_count);
+              }
+              else
+              {
+                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
+                    state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->total_img_count);
+              }
               SHOW_LABEL_VALUE("", tmp_str);
 
-              y -= fs;
               SHOW_LABEL_VALUE("File: ", img->path);
               {
                 struct tm t = {0};
@@ -5569,7 +5588,7 @@ _search_end_label:
                       "Simple multiplications and divisions get evaluated, e.g. aspect:=16/9 pixelcount:>64*64.\n"
                       "Alternatives (e.g. width:<500|>600) are NOT supported for numbers.\n"
                       "\n"
-                      "If the search is aborted with Escape (instead of accepted with Enter), all images get shown again.\n"
+                      "The search can be accepted with Enter or canceled with Escape.\n"
                       "If image metadata are still getting loaded (e.g. from a slow filesystem), "
                       "the search box turns into a progress bar. "
                       "While it is not full, the search results may be incomplete."
