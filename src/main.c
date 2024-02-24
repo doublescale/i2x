@@ -3052,7 +3052,7 @@ int main(int argc, char** argv)
                             state->sorted_img_idxs[state->sorted_idx_viewed_before_search]);
                         scroll_thumbnail_into_view = true;
                       }
-                      else if(keysym == XK_Return)
+                      else if(keysym == XK_Return || keysym == XK_KP_Enter)
                       {
                         state->filtering_modal = false;
                       }
@@ -3184,7 +3184,7 @@ int main(int argc, char** argv)
                     else if(state->sorting_modal)
                     {
                       if(0) {}
-                      else if(keysym == XK_Escape || keysym == XK_Return)
+                      else if(keysym == XK_Escape || keysym == XK_Return || keysym == XK_KP_Enter)
                       {
                         state->sorting_modal = false;
                       }
@@ -4229,6 +4229,7 @@ int main(int argc, char** argv)
               search_item_t* first_negative_item = 0;
               search_item_t* first_width_item = 0;
               search_item_t* first_height_item = 0;
+              search_item_t* first_pixelcount_item = 0;
               search_item_t* first_aspect_item = 0;
               search_item_t* first_steps_item = 0;
               search_item_t* first_cfg_item = 0;
@@ -4306,6 +4307,7 @@ int main(int argc, char** argv)
                         { str("n"), &first_negative_item },
                         { str("width"), &first_width_item, true },
                         { str("height"), &first_height_item, true },
+                        { str("pixelcount"), &first_pixelcount_item, true },
                         { str("aspect"), &first_aspect_item, true },
                         { str("steps"), &first_steps_item, true },
                         { str("cfg"), &first_cfg_item, true },
@@ -4334,19 +4336,47 @@ int main(int argc, char** argv)
                             keyword_found = true;
                             is_r32 = true;
                             b32 inequality = true;
-                            str_t number_str = post_column;
-                            ++number_str.data;  --number_str.size;
+                            b32 did_arithmetic = false;
+                            u8* numbers_ptr = post_column.data + 1;
+                            u8* numbers_end = post_column.data + post_column.size;
                             if(post_column.data[1] == '=')
                             {
-                              ++number_str.data;  --number_str.size;
+                              ++numbers_ptr;
                               inequality = false;
                             }
-                            r32 parsed = parse_r32(number_str);
-                            b32 valid_item = true;
-                            if(post_column.data[0] == '=')
+                            r64 parsed_r64 = parse_next_r64(&numbers_ptr, numbers_end);
+                            while(numbers_ptr + 2 <= numbers_end)
                             {
-                              item->min_r32 = parsed;
-                              item->max_r32 = parsed;
+                              if(*numbers_ptr == '*' || *numbers_ptr == 'x')
+                              {
+                                ++numbers_ptr;
+                                r64 next_num = parse_next_r64(&numbers_ptr, numbers_end);
+                                parsed_r64 *= next_num;
+                              }
+                              else if(*numbers_ptr == '/')
+                              {
+                                ++numbers_ptr;
+                                r64 next_num = parse_next_r64(&numbers_ptr, numbers_end);
+                                parsed_r64 /= next_num;
+                              }
+                              else
+                              {
+                                break;
+                              }
+                            }
+                            r32 parsed = (r32)parsed_r64;
+
+                            b32 valid_item = true;
+                            if(post_column.data[0] == '=' || post_column.data[0] == '!')
+                            {
+                              item->min_r32 = did_arithmetic ? 0.999f * parsed : parsed;
+                              item->max_r32 = did_arithmetic ? 1.001f * parsed : parsed;
+                              if(post_column.data[0] == '!') { item->flags |= SEARCH_EXCLUDE; }
+                            }
+                            else if(post_column.data[0] == '~')
+                            {
+                              item->min_r32 = 0.9f * parsed;
+                              item->max_r32 = 1.1f * parsed;
                             }
                             else if(post_column.data[0] == '>')
                             {
@@ -4530,6 +4560,7 @@ _search_end_label:
                   } search_tasks[] = {
                     { true, (r32)img->w, first_width_item },
                     { true, (r32)img->h, first_height_item },
+                    { true, (r32)(img->w * img->h), first_pixelcount_item },
                     { true, img->h == 0 ? 0 : (r32)img->w / (r32)img->h, first_aspect_item },
                     { (img->parameter_strings[IMG_STR_SAMPLING_STEPS].size > 0), img->parsed_r32s[PARSED_R32_SAMPLING_STEPS], first_steps_item },
                     { (img->parameter_strings[IMG_STR_CFG].size > 0), img->parsed_r32s[PARSED_R32_CFG], first_cfg_item },
@@ -5368,7 +5399,7 @@ _search_end_label:
               r32 box_x0 = 0.5f * (state->win_w - box_width);
               r32 box_x1 = 0.5f * (state->win_w + box_width);
               r32 box_y0 = 0;
-              r32 box_y1 = min(state->win_h, 30 * fs);
+              r32 box_y1 = min(state->win_h, 32 * fs);
 
               glScissor(box_x0, box_y0, box_x1 - box_x0, box_y1 - box_y0);
 
@@ -5493,7 +5524,7 @@ _search_end_label:
                       "\n"
                       "Additional parameters can be specified with these special prefixes:\n"
                       "  f:<file path>  m:<model name>  n:<negative prompt>\n"
-                      "  width:<op><width>  height:<op><height>  aspect:<op><aspect ratio>\n"
+                      "  width:<op><w>  height:<op><h>  pixelcount:<op><w*h>  aspect:<op><w/h>\n"
                       "  steps:<op><sampling steps>  cfg:<op><CFG value>  score:<op><score>\n"
                       "\n"
                       "EXAMPLE:  m:sd -f:bad|tmp m:0.9\n"
@@ -5501,10 +5532,11 @@ _search_end_label:
                       "(e.g. \"SDXL_0.9vae\", but neither \"sd_xl_1.0\" nor \"v1-5-pruned\"), "
                       "but only if their filepath does NOT include \"bad\" or \"tmp\" (so \"good/pic.png\" is OK, but \"tmp/pic.png\" is excluded).\n"
                       "\n"
-                      "Numeric values can be compared with an <op> including <, <=, =, >=, >.\n"
+                      "Numeric values can be compared with an <op> including <, <=, =, >=, >, ~= (±10%), !=.\n"
                       "EXAMPLE:  width:>=500 width:<600 -cfg:=7\n"
                       "This will match images with a width between 500 inclusive and 600 exclusive, "
                       "but only if their CFG value is known and does not equal 7.\n"
+                      "Simple multiplications and divisions get evaluated, e.g. aspect:=16/9 pixelcount:>64*64.\n"
                       "Alternatives (e.g. width:<500|>600) are NOT supported for numbers.\n"
                       "\n"
                       "If the search is aborted with Escape (instead of accepted with Enter), all images get shown again.\n"
