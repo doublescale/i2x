@@ -283,9 +283,13 @@ typedef struct
 
   b32 filtering_modal;
   u8 search_str_buffer[64 * 1024];
-  u8 prev_search_str_buffer[64 * 1024];
+  u8 search_history_buffer[4 * 1024 * 1024];
   str_t search_str;
-  str_t prev_search_str;
+  b32 search_str_adjusted;
+  str_t search_history_entries[1024];
+  i32 first_search_history_entry_idx;
+  i32 current_search_history_entry_idx;
+  i32 selected_search_history_entry_idx;
   i32 sorted_idx_viewed_before_search;
   i64 selection_start;
   i64 selection_end;
@@ -2467,7 +2471,7 @@ int main(int argc, char** argv)
         i32 hovered_thumbnail_idx = -1;
         // state->show_info = 2;
         state->search_str.data = state->search_str_buffer;
-        state->prev_search_str.data = state->prev_search_str_buffer;
+        state->search_history_entries[0].data = state->search_history_buffer;
         state->info_panel_width_ratio = 0.2f;
 
         str_t help_tab_labels[] = {
@@ -3064,10 +3068,10 @@ int main(int argc, char** argv)
                         state->prev_filtered_img_count = state->filtered_img_count;
                         state->sorted_idx_viewed_before_search = find_sorted_idx_of_img_idx(state,
                             state->filtered_img_idxs[state->viewing_filtered_img_idx]);
-                        copy_bytes(state->search_str.size, state->search_str_buffer, state->prev_search_str_buffer);
-                        state->prev_search_str.size = state->search_str.size;
+                        state->selected_search_history_entry_idx = state->current_search_history_entry_idx;
 
                         search_changed = true;
+                        state->search_str_adjusted = false;
                       }
                     }
                     else if(!state->sorting_modal && state->filtering_modal)
@@ -3079,15 +3083,37 @@ int main(int argc, char** argv)
 
                         state->filtered_img_count = state->prev_filtered_img_count;
                         for_count(i, state->filtered_img_count) { state->filtered_img_idxs[i] = state->prev_filtered_img_idxs[i]; }
+
+                        str_t last_history_entry = state->search_history_entries[state->current_search_history_entry_idx];
+                        copy_bytes(last_history_entry.size, last_history_entry.data, state->search_str.data);
+                        state->search_str.size = last_history_entry.size;
+
                         state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state,
                             state->sorted_img_idxs[state->sorted_idx_viewed_before_search]);
-                        copy_bytes(state->prev_search_str.size, state->prev_search_str_buffer, state->search_str_buffer);
-                        state->search_str.size = state->prev_search_str.size;
                         scroll_thumbnail_into_view = true;
                       }
                       else if(keysym == XK_Return || keysym == XK_KP_Enter)
                       {
                         state->filtering_modal = false;
+
+                        str_t last_history_entry = state->search_history_entries[state->current_search_history_entry_idx];
+                        if(!str_eq(state->search_str, last_history_entry))
+                        {
+                          if(state->current_search_history_entry_idx < array_count(state->search_history_entries) &&
+                              last_history_entry.data + last_history_entry.size + state->search_str.size <=
+                              state->search_history_buffer + sizeof(state->search_history_buffer))
+                          {
+                            ++state->current_search_history_entry_idx;
+                            str_t* new_history_entry = &state->search_history_entries[state->current_search_history_entry_idx];
+                            new_history_entry->data = last_history_entry.data + last_history_entry.size;
+                            new_history_entry->size = state->search_str.size;
+                            copy_bytes(state->search_str.size, state->search_str.data, new_history_entry->data);
+                          }
+                          else
+                          {
+                            // TODO: Reuse first history entries again.
+                          }
+                        }
                       }
                       else if(ctrl_held && keysym == 'a')
                       {
@@ -3108,6 +3134,7 @@ int main(int argc, char** argv)
                           str_replace_selection(0, &state->search_str,
                               &state->selection_start, &state->selection_end, str(""));
                           search_changed = true;
+                          state->search_str_adjusted = true;
                         }
                         XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
                       }
@@ -3125,6 +3152,7 @@ int main(int argc, char** argv)
                         str_replace_selection(0, &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
                         search_changed = true;
+                        state->search_str_adjusted = true;
                       }
                       else if(keysym == XK_Delete)
                       {
@@ -3136,6 +3164,7 @@ int main(int argc, char** argv)
                         str_replace_selection(0, &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
                         search_changed = true;
+                        state->search_str_adjusted = true;
                       }
                       else if(keysym == XK_Left)
                       {
@@ -3152,6 +3181,7 @@ int main(int argc, char** argv)
                         {
                           state->selection_start = state->selection_end;
                         }
+                        state->search_str_adjusted = true;
                       }
                       else if(keysym == XK_Right)
                       {
@@ -3168,6 +3198,7 @@ int main(int argc, char** argv)
                         {
                           state->selection_start = state->selection_end;
                         }
+                        state->search_str_adjusted = true;
                       }
                       else if(keysym == XK_Home)
                       {
@@ -3176,6 +3207,7 @@ int main(int argc, char** argv)
                           state->selection_start = 0;
                         }
                         state->selection_end = 0;
+                        state->search_str_adjusted = true;
                       }
                       else if(keysym == XK_End)
                       {
@@ -3184,6 +3216,49 @@ int main(int argc, char** argv)
                           state->selection_start = state->search_str.size;
                         }
                         state->selection_end = state->search_str.size;
+                        state->search_str_adjusted = true;
+                      }
+                      else if(keysym == XK_Up || keysym == XK_Down)
+                      {
+                        // Search history.
+                        b32 going_up = (keysym == XK_Up);
+                        str_t prefix = {0};
+                        if(state->search_str_adjusted)
+                        {
+                          prefix.data = state->search_str.data;
+                          prefix.size = state->selection_end;
+                        }
+
+                        b32 entry_found = false;
+                        i32 step = (going_up ? -1 : 1);
+                        for(i32 entry_idx = state->selected_search_history_entry_idx + step;
+                            entry_idx != (going_up ? 0 : state->current_search_history_entry_idx + 1) && !entry_found;
+                            entry_idx += step)
+                        {
+                          str_t entry = state->search_history_entries[entry_idx];
+                          if(entry.size > 0)
+                          {
+                            entry.size = min(entry.size, prefix.size);
+                            if(str_eq(entry, prefix))
+                            {
+                              state->selected_search_history_entry_idx = entry_idx;
+                              entry_found = true;
+                            }
+                          }
+                        }
+
+                        if(entry_found)
+                        {
+                          str_t history_entry = state->search_history_entries[state->selected_search_history_entry_idx];
+                          copy_bytes(history_entry.size, history_entry.data, state->search_str.data);
+                          state->search_str.size = history_entry.size;
+                          if(!state->search_str_adjusted)
+                          {
+                            state->selection_end = state->search_str.size;
+                          }
+                          state->selection_start = state->selection_end;
+                          search_changed = true;
+                        }
                       }
                       else if(!ctrl_held)
                       {
@@ -3209,6 +3284,7 @@ int main(int argc, char** argv)
                                 &state->selection_start, &state->selection_end, entered_str))
                           {
                             search_changed = true;
+                            state->search_str_adjusted = true;
                           }
                         }
                       }
@@ -3746,7 +3822,7 @@ int main(int argc, char** argv)
                     }
                     if(state->filtering_modal)
                     {
-                      str_replace_selection(array_count(state->search_str_buffer),
+                      str_replace_selection(sizeof(state->search_str_buffer),
                           &state->search_str, &state->selection_start, &state->selection_end,
                           str_from_start_and_size(data, item_count));
                       search_changed = true;
@@ -5588,7 +5664,8 @@ _search_end_label:
                       "Simple multiplications and divisions get evaluated, e.g. aspect:=16/9 pixelcount:>64*64.\n"
                       "Alternatives (e.g. width:<500|>600) are NOT supported for numbers.\n"
                       "\n"
-                      "The search can be accepted with Enter or canceled with Escape.\n"
+                      "The search is accepted with Enter or canceled with Escape. "
+                      "History is available via Up/Down.\n"
                       "If image metadata are still getting loaded (e.g. from a slow filesystem), "
                       "the search box turns into a progress bar. "
                       "While it is not full, the search results may be incomplete."
