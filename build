@@ -12,12 +12,16 @@ fi
 
 mkdir -p obj bin
 
-extra_opts=''
+extra_opts=""
 
 if [ ${OPTIMIZE:-1} -ne 0 ]; then
-  extra_opts='-O3 -DRELEASE'
+  extra_opts="-O3 -DRELEASE"
 else
-  extra_opts='-g'
+  extra_opts="-g"
+fi
+
+if [ ${ALWAYS_PERSIST_SEARCH_HISTORY:-0} -ne 0 ]; then
+  extra_opts="$extra_opts -DALWAYS_PERSIST_SEARCH_HISTORY"
 fi
 
 if [ ${FULL_REBUILD:-0} -ne 0 -o ! -e obj/stb.o ]; then

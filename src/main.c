@@ -579,6 +579,7 @@ internal i64 seek_right_in_str(str_t str, b32 word_wise, i64 start_idx)
   return result;
 }
 
+// Also replaces newlines by spaces.
 internal b32 str_replace_selection(i64 str_capacity, str_t* str,
     i64* selection_start, i64* selection_end, str_t new_contents)
 {
@@ -607,7 +608,9 @@ internal b32 str_replace_selection(i64 str_capacity, str_t* str,
         new_idx < new_contents.size;
         ++new_idx)
     {
-      str->data[selection_min + new_idx] = new_contents.data[new_idx];
+      u8 c = new_contents.data[new_idx];
+      if(c == '\n' || c == '\r') { c = ' '; }
+      str->data[selection_min + new_idx] = c;
     }
 
     if(str_length_change < 0)
@@ -1973,14 +1976,14 @@ int main(int argc, char** argv)
   char* default_search_history_path = 0;
   if(xdg_state_home)
   {
-    asprintf(&default_search_history_path, "%s/i2x/search-history.txt", xdg_state_home);
+    asprintf(&default_search_history_path, "%s/i2x/searches.txt", xdg_state_home);
   }
   else
   {
     char* home = getenv("HOME");
     if(home)
     {
-      asprintf(&default_search_history_path, "%s/.local/state/i2x/search-history.txt", home);
+      asprintf(&default_search_history_path, "%s/.local/state/i2x/searches.txt", home);
     }
   }
 
@@ -2002,7 +2005,8 @@ int main(int argc, char** argv)
     printf("                     *: Orderings which depend on metadata may delay startup.\n");
     printf("I2X_SEARCH_HISTORY:  When set, persists the search history to disk.\n");
     printf("                     The string this is set to determines the path.\n");
-    printf("                     When set to an empty string, defaults to: %s\n", default_search_history_path);
+    printf("                     When set to an empty string, defaults to:\n");
+    printf("                     %s\n", default_search_history_path);
     printf("I2X_DISABLE_INOTIFY: Disables automatic directory refresh using inotify.\n");
     printf("I2X_DISABLE_XINPUT2: Disables XInput2 handling, which allows\n");
     printf("                     smooth scrolling and raw sub-pixel mouse motion,\n");
@@ -2327,20 +2331,90 @@ int main(int argc, char** argv)
 
         refresh_input_paths(state);
 
+        state->search_history_entries[0].data = state->search_history_buffer;
         {
           char* search_history_envvar = getenv("I2X_SEARCH_HISTORY");
+#if !ALWAYS_PERSIST_SEARCH_HISTORY
           if(search_history_envvar)
+#endif
           {
-            char* path = default_search_history_path;
-            if(search_history_envvar[0] != 0)
+            char* search_history_path = default_search_history_path;
+            if(search_history_envvar && search_history_envvar[0] != 0)
             {
-              path = search_history_envvar;
+              search_history_path = search_history_envvar;
             }
-            state->search_history_file = fopen(path, "rwb");
+
+            // Create parent directories first.
+            for(i32 char_idx = 0;
+                search_history_path[char_idx] != 0;
+                ++char_idx)
+            {
+              if(search_history_path[char_idx] == '/')
+              {
+                search_history_path[char_idx] = 0;
+                mkdir(search_history_path, 0700);
+                search_history_path[char_idx] = '/';
+              }
+            }
+
+            state->search_history_file = fopen(search_history_path, "a+b");
 
             if(state->search_history_file)
             {
-              // TODO
+              int file_size = 0;
+              if(fseek(state->search_history_file, 0, SEEK_END) != -1 &&
+                  (file_size = ftell(state->search_history_file)) != -1)
+              {
+                int read_start = max(0, file_size - (int)(sizeof(state->search_history_buffer) / 2));
+                int read_length = file_size - read_start;
+                fseek(state->search_history_file, read_start, SEEK_SET);
+                if(fread(state->search_history_buffer, 1, read_length, state->search_history_file) == read_length)
+                {
+                  u8* p = state->search_history_buffer;
+                  u8* history_end = state->search_history_buffer + read_length;
+
+                  if(read_start != 0)
+                  {
+                    while(p < history_end && *p != '\n' && *p != '\r') { ++p; }
+                  }
+
+                  while(p < history_end)
+                  {
+                    str_t entry = { p };
+                    while(p < history_end && *p != '\n' && *p != '\r') { ++p; }
+                    entry.size = p - entry.data;
+                    while(p < history_end && (*p == '\n' || *p == '\r')) { ++p; }
+
+                    if(entry.size > 0)
+                    {
+                      if(state->current_search_history_entry_idx < array_count(state->search_history_entries) - 1)
+                      {
+                        if(state->current_search_history_entry_idx == 0 ||
+                            !str_eq(entry, state->search_history_entries[state->current_search_history_entry_idx - 1]))
+                        {
+                          state->search_history_entries[state->current_search_history_entry_idx] = entry;
+                          ++state->current_search_history_entry_idx;
+                        }
+                      }
+                      else
+                      {
+                        // TODO: Reuse first history entries again.
+                      }
+                    }
+                  }
+
+                  if(state->current_search_history_entry_idx > 0)
+                  {
+                    str_t last_entry = state->search_history_entries[state->current_search_history_entry_idx - 1];
+                    state->search_history_entries[state->current_search_history_entry_idx].data =
+                      last_entry.data + last_entry.size;
+                  }
+                }
+              }
+            }
+            else
+            {
+              fprintf(stderr, "Search history file \"%s\" could not be opened.\n", search_history_path);
             }
           }
         }
@@ -2513,7 +2587,6 @@ int main(int argc, char** argv)
         i32 hovered_thumbnail_idx = -1;
         // state->show_info = 2;
         state->search_str.data = state->search_str_buffer;
-        state->search_history_entries[0].data = state->search_history_buffer;
         state->info_panel_width_ratio = 0.2f;
 
         str_t help_tab_labels[] = {
@@ -3140,6 +3213,10 @@ int main(int argc, char** argv)
 
                         str_t last_history_entry = state->search_history_entries[state->current_search_history_entry_idx];
                         if(!str_eq(state->search_str, last_history_entry))
+                            // && (state->search_str.size == 0 ||
+                            //  state->current_search_history_entry_idx == 0 ||
+                            //  !str_eq(state->search_str,  // There may be an empty-string entry since the last duplicate.
+                            //    state->search_history_entries[state->current_search_history_entry_idx - 1])))
                         {
                           if(state->current_search_history_entry_idx < array_count(state->search_history_entries) &&
                               last_history_entry.data + last_history_entry.size + state->search_str.size <=
@@ -3154,6 +3231,17 @@ int main(int argc, char** argv)
                           else
                           {
                             // TODO: Reuse first history entries again.
+                          }
+
+                          if(state->search_str.size > 0 && state->search_history_file)
+                          {
+                            // Seek to end in case another i2x instance also appended.
+                            if(fseek(state->search_history_file, 0, SEEK_END) != -1)
+                            {
+                              fwrite(state->search_str.data, 1, state->search_str.size, state->search_history_file);
+                              fwrite("\n", 1, 1, state->search_history_file);
+                              fflush(state->search_history_file);
+                            }
                           }
                         }
                       }
@@ -3263,43 +3351,40 @@ int main(int argc, char** argv)
                       else if(keysym == XK_Up || keysym == XK_Down)
                       {
                         // Search history.
-                        b32 going_up = (keysym == XK_Up);
-                        str_t prefix = {0};
-                        if(state->search_str_adjusted)
+                        if(state->current_search_history_entry_idx > 0)
                         {
-                          prefix.data = state->search_str.data;
-                          prefix.size = state->selection_end;
-                        }
-
-                        b32 entry_found = false;
-                        i32 step = (going_up ? -1 : 1);
-                        for(i32 entry_idx = state->selected_search_history_entry_idx + step;
-                            entry_idx != (going_up ? 0 : state->current_search_history_entry_idx + 1) && !entry_found;
-                            entry_idx += step)
-                        {
-                          str_t entry = state->search_history_entries[entry_idx];
-                          if(entry.size > 0)
+                          b32 going_up = (keysym == XK_Up);
+                          str_t search_prefix = {0};
+                          if(state->search_str_adjusted)
                           {
-                            entry.size = min(entry.size, prefix.size);
-                            if(str_eq(entry, prefix))
+                            search_prefix.data = state->search_str.data;
+                            search_prefix.size = state->selection_end;
+                          }
+
+                          i32 step = (going_up ? -1 : 1);
+                          for(i32 entry_idx = state->selected_search_history_entry_idx + step;
+                              entry_idx != (going_up ? -1 : state->current_search_history_entry_idx + 1);
+                              entry_idx += step)
+                          {
+                            str_t entry = state->search_history_entries[entry_idx];
+                            if(entry.size > 0)
                             {
-                              state->selected_search_history_entry_idx = entry_idx;
-                              entry_found = true;
+                              str_t entry_prefix = { entry.data, min(entry.size, search_prefix.size) };
+                              if(str_eq(entry_prefix, search_prefix) && !str_eq(entry, state->search_str))
+                              {
+                                state->selected_search_history_entry_idx = entry_idx;
+                                copy_bytes(entry.size, entry.data, state->search_str.data);
+                                state->search_str.size = entry.size;
+                                if(!state->search_str_adjusted)
+                                {
+                                  state->selection_end = state->search_str.size;
+                                }
+                                state->selection_start = state->selection_end;
+                                search_changed = true;
+                                break;
+                              }
                             }
                           }
-                        }
-
-                        if(entry_found)
-                        {
-                          str_t history_entry = state->search_history_entries[state->selected_search_history_entry_idx];
-                          copy_bytes(history_entry.size, history_entry.data, state->search_str.data);
-                          state->search_str.size = history_entry.size;
-                          if(!state->search_str_adjusted)
-                          {
-                            state->selection_end = state->search_str.size;
-                          }
-                          state->selection_start = state->selection_end;
-                          search_changed = true;
                         }
                       }
                       else if(!ctrl_held)
