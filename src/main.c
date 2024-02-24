@@ -52,8 +52,11 @@
 #define PROGRAM_NAME "i2x"
 
 static FILE* debug_out = 0;
+#if !RELEASE
 #define DEBUG_LOG(...) if(debug_out) { fprintf(debug_out, __VA_ARGS__); }
-// #define DEBUG_LOG(...)
+#else
+#define DEBUG_LOG(...)
+#endif
 
 // static void (*glXSwapIntervalEXT)(Display *dpy, GLXDrawable drawable, int interval);
 
@@ -287,7 +290,8 @@ typedef struct
   str_t search_str;
   b32 search_str_adjusted;
   str_t search_history_entries[1024];
-  i32 first_search_history_entry_idx;
+  FILE* search_history_file;
+  // i32 first_search_history_entry_idx;  // TODO: Make the history a ring-buffer.
   i32 current_search_history_entry_idx;
   i32 selected_search_history_entry_idx;
   i32 sorted_idx_viewed_before_search;
@@ -1954,14 +1958,31 @@ internal b32 sort_mode_needs_metadata(sort_mode_t mode)
 
 int main(int argc, char** argv)
 {
+#if !RELEASE
   debug_out = fopen("/tmp/i2x-debug.log", "wb");
   // if(!debug_out) { debug_out = stderr; }
+#endif
   srand(get_nanoseconds());
 
   state_t* state = malloc_struct(state_t);
   zero_struct(*state);
   state->loader_count = 7;
   state->shared.total_bytes_limit = 1 * 1024 * 1024 * 1024LL;
+
+  char* xdg_state_home = getenv("XDG_STATE_HOME");
+  char* default_search_history_path = 0;
+  if(xdg_state_home)
+  {
+    asprintf(&default_search_history_path, "%s/i2x/search-history.txt", xdg_state_home);
+  }
+  else
+  {
+    char* home = getenv("HOME");
+    if(home)
+    {
+      asprintf(&default_search_history_path, "%s/.local/state/i2x/search-history.txt", home);
+    }
+  }
 
   if(argc <= 1
       || zstr_eq(argv[1], "--help")
@@ -1979,6 +2000,9 @@ int main(int argc, char** argv)
     printf("                     path, time, filesize, random, pixelcount*, prompt*, model*, score*.\n");
     printf("                     Can be suffixed by \"_desc\" for descending (default is ascending).\n");
     printf("                     *: Orderings which depend on metadata may delay startup.\n");
+    printf("I2X_SEARCH_HISTORY:  When set, persists the search history to disk.\n");
+    printf("                     The string this is set to determines the path.\n");
+    printf("                     When set to an empty string, defaults to: %s\n", default_search_history_path);
     printf("I2X_DISABLE_INOTIFY: Disables automatic directory refresh using inotify.\n");
     printf("I2X_DISABLE_XINPUT2: Disables XInput2 handling, which allows\n");
     printf("                     smooth scrolling and raw sub-pixel mouse motion,\n");
@@ -1989,7 +2013,7 @@ int main(int argc, char** argv)
         state->shared.total_bytes_limit / (1024 * 1024));
     printf("I2X_TTF_PATH:        Use an external font file instead of the internal one.\n");
     printf("\n");
-    printf("Example invocation:\n  I2X_DISABLE_XINPUT2= I2X_LOADER_THREADS=3 I2X_SORT_ORDER=time_desc %s\n", argv[0]);
+    printf("Example invocation:\n  I2X_DISABLE_XINPUT2=1 I2X_LOADER_THREADS=3 I2X_SORT_ORDER=time_desc %s\n", argv[0]);
     return 0;
   }
 
@@ -2302,6 +2326,24 @@ int main(int argc, char** argv)
         pthread_create(&state->metadata_loader_thread, 0, metadata_loader_fun, state);
 
         refresh_input_paths(state);
+
+        {
+          char* search_history_envvar = getenv("I2X_SEARCH_HISTORY");
+          if(search_history_envvar)
+          {
+            char* path = default_search_history_path;
+            if(search_history_envvar[0] != 0)
+            {
+              path = search_history_envvar;
+            }
+            state->search_history_file = fopen(path, "rwb");
+
+            if(state->search_history_file)
+            {
+              // TODO
+            }
+          }
+        }
 
         if(sort_mode_needs_metadata(state->sort_mode) && !open_single_directory_on.size)
         {
