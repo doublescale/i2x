@@ -5209,8 +5209,9 @@ _search_end_label:
               u8* selection_max = text.data + max(state->selection_start, state->selection_end);
 
               glScissor(0, 0, state->win_w, state->win_h);
-              r32 x0 = image_region_x0 + 0.5f * fs;
+              r32 min_box_width = 10 * fs;
               r32 x1 = state->win_w - 0.6f * fs;
+              r32 x0 = max(0, min(image_region_x0 + 0.5f * fs, x1 - min_box_width));
               r32 y1 = state->win_h - 1.5f * fs;
               r32 x_indented = x0 + fs;
               str_t label = str("Search: ");
@@ -5348,8 +5349,9 @@ _search_end_label:
             if(state->sorting_modal)
             {
               glScissor(0, 0, state->win_w, state->win_h);
-              r32 x0 = image_region_x0 + 0.5f * fs;
+              r32 box_width = 36 * fs;
               r32 x1 = state->win_w - 0.6f * fs;
+              r32 x0 = max(0, min(image_region_x0 + 0.5f * fs, x1 - box_width));
               r32 y1 = state->win_h - 1.5f * fs;
               r32 x_indented = x0 + fs;
 
@@ -5359,7 +5361,7 @@ _search_end_label:
                 r32 y = y1;
 
                 r32 box_x0 = x0 - 0.3f * fs;
-                r32 box_x1 = x0 + 36.0f * fs;
+                r32 box_x1 = x0 + box_width;
                 r32 box_y0 = y - fs * (state->font_descent + 2.2f);
                 r32 box_y1 = y1 + fs * (state->font_ascent + 0.2f);
 
