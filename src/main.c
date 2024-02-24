@@ -266,6 +266,11 @@ typedef struct
   sort_mode_t sort_mode;
   b32 sort_descending;
   i32* sorted_img_idxs;
+  i32 filtered_idx_viewed_before_sort;
+  sort_mode_t prev_sort_mode;
+  b32 prev_sort_descending;
+  i32* prev_sorted_img_idxs;
+  i32* prev_filtered_img_idxs;
 
   i32* filtered_img_idxs;
   i32 filtered_img_count;
@@ -2280,8 +2285,12 @@ int main(int argc, char** argv)
         zero_bytes(state->total_img_capacity * sizeof(img_entry_t), state->img_entries);
         state->sorted_img_idxs = malloc_array(state->total_img_capacity, i32);
         for_count(i, state->total_img_capacity) { state->sorted_img_idxs[i] = i; }
+        state->prev_sorted_img_idxs = malloc_array(state->total_img_capacity, i32);
+        for_count(i, state->total_img_capacity) { state->prev_sorted_img_idxs[i] = i; }
         state->filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
         zero_bytes(state->total_img_capacity * sizeof(i32), state->filtered_img_idxs);
+        state->prev_filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
+        zero_bytes(state->total_img_capacity * sizeof(i32), state->prev_filtered_img_idxs);
 
         sem_init(&state->metadata_loader_semaphore, 0, 0);
         pthread_create(&state->metadata_loader_thread, 0, metadata_loader_fun, state);
@@ -2980,6 +2989,18 @@ int main(int argc, char** argv)
                   if(went_down)
                   {
                     if(0) {}
+                    else if(keysym == XK_Shift_L || keysym == XK_Shift_R)
+                    {
+                      shift_held = true;
+                    }
+                    else if(keysym == XK_Control_L || keysym == XK_Control_R)
+                    {
+                      ctrl_held = true;
+                    }
+                    else if(keysym == XK_Alt_L || keysym == XK_Alt_R)
+                    {
+                      alt_held = true;
+                    }
                     else if(ctrl_held && keysym == 'q')
                     {
                       quitting = true;
@@ -3181,14 +3202,74 @@ int main(int argc, char** argv)
                       }
                     }
 
+                    else if(keysym == XK_Up || keysym == 'k')
+                    {
+                      if(state->viewing_filtered_img_idx - state->thumbnail_columns >= 0)
+                      {
+                        state->viewing_filtered_img_idx -= state->thumbnail_columns;
+                      }
+                      scroll_thumbnail_into_view = true;
+                    }
+                    else if(keysym == XK_Down || keysym == 'j')
+                    {
+                      if(state->viewing_filtered_img_idx + state->thumbnail_columns < state->filtered_img_count)
+                      {
+                        state->viewing_filtered_img_idx += state->thumbnail_columns;
+                      }
+                      scroll_thumbnail_into_view = true;
+                    }
+                    else if(keysym == XK_Home || (!shift_held && keysym == 'g'))
+                    {
+                      state->viewing_filtered_img_idx = 0;
+                      scroll_thumbnail_into_view = true;
+                    }
+                    else if(keysym == XK_End || (shift_held && keysym == 'g'))
+                    {
+                      state->viewing_filtered_img_idx = state->filtered_img_count - 1;
+                      scroll_thumbnail_into_view = true;
+                    }
+                    else if(alt_held && keysym == XK_Page_Up)
+                    {
+                      state->viewing_filtered_img_idx -= state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      state->viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
+                      scroll_thumbnail_into_view = true;
+                    }
+                    else if(alt_held && keysym == XK_Page_Down)
+                    {
+                      state->viewing_filtered_img_idx += state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      state->viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
+                      scroll_thumbnail_into_view = true;
+                    }
+                    else if(keysym == XK_Page_Up)
+                    {
+                      state->thumbnail_scroll_rows -= (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      clamp_thumbnail_scroll_rows(state);
+                    }
+                    else if(keysym == XK_Page_Down)
+                    {
+                      state->thumbnail_scroll_rows += (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      clamp_thumbnail_scroll_rows(state);
+                    }
+
                     else if(state->sorting_modal)
                     {
                       if(0) {}
-                      else if(keysym == XK_Escape || keysym == XK_Return || keysym == XK_KP_Enter)
+                      else if(keysym == XK_Escape)
+                      {
+                        state->sorting_modal = false;
+
+                        for_count(i, state->total_img_count) { state->sorted_img_idxs[i] = state->prev_sorted_img_idxs[i]; }
+                        for_count(i, state->filtered_img_count) { state->filtered_img_idxs[i] = state->prev_filtered_img_idxs[i]; }
+                        state->viewing_filtered_img_idx = state->filtered_idx_viewed_before_sort;
+                        scroll_thumbnail_into_view = true;
+                        state->sort_mode = state->prev_sort_mode;
+                        state->sort_descending = state->prev_sort_descending;
+                      }
+                      else if(keysym == XK_Return || keysym == XK_KP_Enter)
                       {
                         state->sorting_modal = false;
                       }
-                      else if(keysym == XK_Left || keysym == XK_Up)
+                      else if(keysym == XK_Left)
                       {
                         if(state->sort_mode > 0)
                         {
@@ -3200,7 +3281,7 @@ int main(int argc, char** argv)
                         }
                         need_to_sort = true;
                       }
-                      else if(keysym == XK_Right || keysym == XK_Down)
+                      else if(keysym == XK_Right)
                       {
                         ++state->sort_mode;
                         if(state->sort_mode >= SORT_MODE_COUNT)
@@ -3266,6 +3347,12 @@ int main(int argc, char** argv)
                     else if(shift_held && keysym == 's')
                     {
                       state->sorting_modal = true;
+
+                      for_count(i, state->total_img_count) { state->prev_sorted_img_idxs[i] = state->sorted_img_idxs[i]; }
+                      for_count(i, state->filtered_img_count) { state->prev_filtered_img_idxs[i] = state->filtered_img_idxs[i]; }
+                      state->filtered_idx_viewed_before_sort = state->viewing_filtered_img_idx;
+                      state->prev_sort_mode = state->sort_mode;
+                      state->prev_sort_descending = state->sort_descending;
                     }
 
                     else if(keysym == XK_Escape)
@@ -3274,18 +3361,6 @@ int main(int argc, char** argv)
                       b32 any_marked = false;
                       for_count(i, state->total_img_count) { any_marked = any_marked || (state->img_entries[i].flags & IMG_FLAG_MARKED); }
                       if(!any_marked) { quitting = true; }
-                    }
-                    else if(keysym == XK_Shift_L || keysym == XK_Shift_R)
-                    {
-                      shift_held = true;
-                    }
-                    else if(keysym == XK_Control_L || keysym == XK_Control_R)
-                    {
-                      ctrl_held = true;
-                    }
-                    else if(keysym == XK_Alt_L || keysym == XK_Alt_R)
-                    {
-                      alt_held = true;
                     }
                     else if(keysym == XK_BackSpace || keysym == XK_Left || keysym == 'h')
                     {
@@ -3302,54 +3377,6 @@ int main(int argc, char** argv)
                         state->viewing_filtered_img_idx += 1;
                       }
                       scroll_thumbnail_into_view = true;
-                    }
-                    else if(keysym == XK_Up || keysym == 'k')
-                    {
-                      if(state->viewing_filtered_img_idx - state->thumbnail_columns >= 0)
-                      {
-                        state->viewing_filtered_img_idx -= state->thumbnail_columns;
-                      }
-                      scroll_thumbnail_into_view = true;
-                    }
-                    else if(keysym == XK_Down || keysym == 'j')
-                    {
-                      if(state->viewing_filtered_img_idx + state->thumbnail_columns < state->filtered_img_count)
-                      {
-                        state->viewing_filtered_img_idx += state->thumbnail_columns;
-                      }
-                      scroll_thumbnail_into_view = true;
-                    }
-                    else if(keysym == XK_Home || (!shift_held && keysym == 'g'))
-                    {
-                      state->viewing_filtered_img_idx = 0;
-                      scroll_thumbnail_into_view = true;
-                    }
-                    else if(keysym == XK_End || (shift_held && keysym == 'g'))
-                    {
-                      state->viewing_filtered_img_idx = state->filtered_img_count - 1;
-                      scroll_thumbnail_into_view = true;
-                    }
-                    else if(alt_held && keysym == XK_Page_Up)
-                    {
-                      state->viewing_filtered_img_idx -= state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      state->viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
-                      scroll_thumbnail_into_view = true;
-                    }
-                    else if(alt_held && keysym == XK_Page_Down)
-                    {
-                      state->viewing_filtered_img_idx += state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      state->viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
-                      scroll_thumbnail_into_view = true;
-                    }
-                    else if(keysym == XK_Page_Up)
-                    {
-                      state->thumbnail_scroll_rows -= (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      clamp_thumbnail_scroll_rows(state);
-                    }
-                    else if(keysym == XK_Page_Down)
-                    {
-                      state->thumbnail_scroll_rows += (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      clamp_thumbnail_scroll_rows(state);
                     }
                     else if(ctrl_held && keysym == 'a')
                     {
@@ -4158,11 +4185,10 @@ int main(int argc, char** argv)
               }
             }
 
-            i32 viewing_img_idx = state->filtered_img_idxs[state->viewing_filtered_img_idx];
             qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
             qsort_r(state->filtered_img_idxs, state->filtered_img_count, sizeof(state->filtered_img_idxs[0]), compare_img_entries, state);
-            state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state, viewing_img_idx);
 
+            state->viewing_filtered_img_idx = 0;
             scroll_thumbnail_into_view = true;
             need_to_sort = false;
             dirty = true;
