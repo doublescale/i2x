@@ -4352,12 +4352,14 @@ int main(int argc, char** argv)
                                 ++numbers_ptr;
                                 r64 next_num = parse_next_r64(&numbers_ptr, numbers_end);
                                 parsed_r64 *= next_num;
+                                did_arithmetic = true;
                               }
                               else if(*numbers_ptr == '/')
                               {
                                 ++numbers_ptr;
                                 r64 next_num = parse_next_r64(&numbers_ptr, numbers_end);
                                 parsed_r64 /= next_num;
+                                did_arithmetic = true;
                               }
                               else
                               {
