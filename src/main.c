@@ -107,8 +107,10 @@ typedef struct
 
 enum
 {
-  IMG_FLAG_FAILED_TO_LOAD = (1 << 0),
-  IMG_FLAG_MARKED         = (1 << 1),
+  IMG_FLAG_UNUSED         = (1 << 0),  // Set if a file got deleted at a refresh.
+  IMG_FLAG_FAILED_TO_LOAD = (1 << 1),
+  IMG_FLAG_MARKED         = (1 << 2),
+  IMG_FLAG_FILTERED       = (1 << 3),  // Only temporary, used during file refresh.
 };
 typedef u32 img_flags_t;
 
@@ -168,7 +170,6 @@ typedef struct
 {
   i32 total_loader_count;
 
-  i32 total_img_count;
   img_entry_t* img_entries;
 
   i32 filtered_img_count;
@@ -269,6 +270,7 @@ typedef struct
   sort_mode_t sort_mode;
   b32 sort_descending;
   i32* sorted_img_idxs;
+  i32 sorted_img_count;
   i32 filtered_idx_viewed_before_sort;
   sort_mode_t prev_sort_mode;
   b32 prev_sort_descending;
@@ -775,8 +777,6 @@ internal void* loader_fun(void* raw_data)
         loaded_img->load_generation = load_generation;
         loaded_img->entry_idx = img_idx;
 
-        // printf("Loader %d [%5d/%d] %s\n", thread_idx, img_idx, shared->total_img_count, img_entry->path.data);
-
         loaded_img->bytes_used = 0;
         i32 original_channel_count = 0;
         loaded_img->pixels = stbi_load((char*)img_entry->path.data,  // XXX: This path string may have been freed!
@@ -854,339 +854,342 @@ internal void* metadata_loader_fun(void* raw_data)
       img_entry_t* img = &state->img_entries[img_idx];
       // printf("meta %d / %d\n", img_idx, state->total_img_count);
 
-      if(img->file_header_data.size)
+      if(!(img->flags & IMG_FLAG_UNUSED))
       {
-        zero_struct(img->parameter_strings);
-        free(img->file_header_data.data);
-        zero_struct(img->file_header_data);
-      }
-
-      int fd = open((char*)img->path.data, O_RDONLY);
-      if(fd != -1)
-      {
-        size_t bytes_to_read = 4 * 1024;
-        img->file_header_data.data = malloc_array(bytes_to_read, u8);
-        ssize_t bytes_actually_read = read(fd, img->file_header_data.data, bytes_to_read);
-        // off_t lseek_result = lseek(fd, 0, SEEK_END);
-        // if(lseek_result != -1) { img->filesize = lseek_result; }
-        close(fd);
-        if(bytes_actually_read != -1)
+        if(img->file_header_data.size)
         {
-          img->file_header_data.size = bytes_actually_read;
+          zero_struct(img->parameter_strings);
+          free(img->file_header_data.data);
+          zero_struct(img->file_header_data);
+        }
 
-          // Look for PNG metadata.
-          if(img->file_header_data.size >= 16)
+        int fd = open((char*)img->path.data, O_RDONLY);
+        if(fd != -1)
+        {
+          size_t bytes_to_read = 4 * 1024;
+          img->file_header_data.data = malloc_array(bytes_to_read, u8);
+          ssize_t bytes_actually_read = read(fd, img->file_header_data.data, bytes_to_read);
+          // off_t lseek_result = lseek(fd, 0, SEEK_END);
+          // if(lseek_result != -1) { img->filesize = lseek_result; }
+          close(fd);
+          if(bytes_actually_read != -1)
           {
-            u8* ptr = img->file_header_data.data;
-            u8* file_end = img->file_header_data.data + img->file_header_data.size;
-            b32 bad = false;
+            img->file_header_data.size = bytes_actually_read;
 
-            // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
-            bad |= (*ptr++ != 0x89);
-            bad |= (*ptr++ != 'P');
-            bad |= (*ptr++ != 'N');
-            bad |= (*ptr++ != 'G');
-            bad |= (*ptr++ != 0x0d);
-            bad |= (*ptr++ != 0x0a);
-            bad |= (*ptr++ != 0x1a);
-            bad |= (*ptr++ != 0x0a);
-
-            while(!bad)
+            // Look for PNG metadata.
+            if(img->file_header_data.size >= 16)
             {
-              // Convert big-endian to little-endian.
-              u32 chunk_size = 0;
-              chunk_size |= *ptr++; chunk_size <<= 8;
-              chunk_size |= *ptr++; chunk_size <<= 8;
-              chunk_size |= *ptr++; chunk_size <<= 8;
-              chunk_size |= *ptr++;
+              u8* ptr = img->file_header_data.data;
+              u8* file_end = img->file_header_data.data + img->file_header_data.size;
+              b32 bad = false;
 
-              u8* value_end = ptr + 4 + chunk_size;
-              if(value_end > file_end)
-              {
-                bad = true;
-              }
-              else
-              {
-                b32 IHDR_header = (ptr[0] == 'I' && ptr[1] == 'H' && ptr[2] == 'D' && ptr[3] == 'R');
-                b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
-                b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
+              // https://www.w3.org/TR/2003/REC-PNG-20031110/#5PNG-file-signature
+              bad |= (*ptr++ != 0x89);
+              bad |= (*ptr++ != 'P');
+              bad |= (*ptr++ != 'N');
+              bad |= (*ptr++ != 'G');
+              bad |= (*ptr++ != 0x0d);
+              bad |= (*ptr++ != 0x0a);
+              bad |= (*ptr++ != 0x1a);
+              bad |= (*ptr++ != 0x0a);
 
-                // https://www.w3.org/TR/2003/REC-PNG-20031110/#11IHDR
-                if(IHDR_header)
+              while(!bad)
+              {
+                // Convert big-endian to little-endian.
+                u32 chunk_size = 0;
+                chunk_size |= *ptr++; chunk_size <<= 8;
+                chunk_size |= *ptr++; chunk_size <<= 8;
+                chunk_size |= *ptr++; chunk_size <<= 8;
+                chunk_size |= *ptr++;
+
+                u8* value_end = ptr + 4 + chunk_size;
+                if(value_end > file_end)
                 {
-                  if(chunk_size >= 8)
-                  {
-                    u8* p = ptr + 4;
-
-                    u32 w = 0;
-                    w |= *p++; w <<= 8;
-                    w |= *p++; w <<= 8;
-                    w |= *p++; w <<= 8;
-                    w |= *p++;
-
-                    u32 h = 0;
-                    h |= *p++; h <<= 8;
-                    h |= *p++; h <<= 8;
-                    h |= *p++; h <<= 8;
-                    h |= *p++;
-
-                    i64 bytes_used = 4 * w * h;
-
-                    // Use atomic compare-exchange to make sure that the other
-                    // loader threads have precedence on setting these fields.
-                    __sync_bool_compare_and_swap(&img->w, 0, w);
-                    __sync_bool_compare_and_swap(&img->h, 0, h);
-                    __sync_bool_compare_and_swap(&img->bytes_used, 0, bytes_used);
-
-                    // printf("%.*s: %d x %d\n", PF_STR(img->path), w, h);
-                  }
+                  bad = true;
                 }
-                else if(tEXt_header || iTXt_header) // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+                else
                 {
-                  u8* key_start = ptr + 4;
+                  b32 IHDR_header = (ptr[0] == 'I' && ptr[1] == 'H' && ptr[2] == 'D' && ptr[3] == 'R');
+                  b32 tEXt_header = (ptr[0] == 't' && ptr[1] == 'E' && ptr[2] == 'X' && ptr[3] == 't');
+                  b32 iTXt_header = (ptr[0] == 'i' && ptr[1] == 'T' && ptr[2] == 'X' && ptr[3] == 't');
 
-                  i32 key_len = 0;
-                  while(key_start[key_len] != 0 && key_start + key_len + 1 < value_end)
+                  // https://www.w3.org/TR/2003/REC-PNG-20031110/#11IHDR
+                  if(IHDR_header)
                   {
-                    ++key_len;
-                  }
-
-                  u8* value_start = key_start + key_len + 1;
-                  // https://www.w3.org/TR/2003/REC-PNG-20031110/#11iTXt
-                  if(iTXt_header)
-                  {
-                    value_start += 2;
-                    while(*value_start) { ++value_start; }
-                    ++value_start;
-                    while(*value_start) { ++value_start; }
-                    ++value_start;
-                  }
-
-                  str_t key = { key_start, key_len };
-                  str_t value = str_from_span(value_start, value_end);
-                  // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
-
-                  if(str_eq_zstr(key, "prompt"))
-                  {
-                    // comfyanonymous/ComfyUI JSON.
-                    // TODO: Tokenize properly, or string contents might get mistaken for object keys,
-                    //       like {"seed": "tricky \"seed:"}
-
-                    for(u8* p = value_start;
-                        p < value_end;
-                       )
+                    if(chunk_size >= 8)
                     {
-                      if(0) {}
-                      else if(advance_if_prefix_matches(&p, value_end, "\"seed\"")
-                          || advance_if_prefix_matches(&p, value_end, "\"noise_seed\""))
-                      {
-                        while(p < value_end && !is_digit(*p)) { ++p; }
-                        str_t v = {p};
-                        while(p < value_end && is_digit(*p)) { ++p; }
-                        v.size = p - v.data;
+                      u8* p = ptr + 4;
 
-                        img->parameter_strings[IMG_STR_SEED] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "\"steps\""))
-                      {
-                        while(p < value_end && !is_digit(*p)) { ++p; }
-                        str_t v = {p};
-                        while(p < value_end && is_digit(*p)) { ++p; }
-                        v.size = p - v.data;
+                      u32 w = 0;
+                      w |= *p++; w <<= 8;
+                      w |= *p++; w <<= 8;
+                      w |= *p++; w <<= 8;
+                      w |= *p++;
 
-                        img->parameter_strings[IMG_STR_SAMPLING_STEPS] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "\"cfg\""))
-                      {
-                        while(p < value_end && !(is_digit(*p) || *p == '.')) { ++p; }
-                        str_t v = {p};
-                        while(p < value_end && (is_digit(*p) || *p == '.')) { ++p; }
-                        v.size = p - v.data;
+                      u32 h = 0;
+                      h |= *p++; h <<= 8;
+                      h |= *p++; h <<= 8;
+                      h |= *p++; h <<= 8;
+                      h |= *p++;
 
-                        img->parameter_strings[IMG_STR_CFG] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
-                      {
-                        str_t v = parse_next_json_str_destructively(&p, value_end);
-                        img->parameter_strings[IMG_STR_SAMPLER] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
-                      {
-                        str_t v = parse_next_json_str_destructively(&p, value_end);
-                        v = str_remove_suffix(v, str(".ckpt"));
-                        v = str_remove_suffix(v, str(".safetensors"));
-                        img->parameter_strings[IMG_STR_MODEL] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
-                      {
-                        while(p < value_end && !is_digit(*p)) { ++p; }
-                        str_t v = {p};
-                        while(p < value_end && is_digit(*p)) { ++p; }
-                        v.size = p - v.data;
+                      i64 bytes_used = 4 * w * h;
 
-                        img->parameter_strings[IMG_STR_BATCH_SIZE] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
+                      // Use atomic compare-exchange to make sure that the other
+                      // loader threads have precedence on setting these fields.
+                      __sync_bool_compare_and_swap(&img->w, 0, w);
+                      __sync_bool_compare_and_swap(&img->h, 0, h);
+                      __sync_bool_compare_and_swap(&img->bytes_used, 0, bytes_used);
+
+                      // printf("%.*s: %d x %d\n", PF_STR(img->path), w, h);
+                    }
+                  }
+                  else if(tEXt_header || iTXt_header) // https://www.w3.org/TR/2003/REC-PNG-20031110/#11tEXt
+                  {
+                    u8* key_start = ptr + 4;
+
+                    i32 key_len = 0;
+                    while(key_start[key_len] != 0 && key_start + key_len + 1 < value_end)
+                    {
+                      ++key_len;
+                    }
+
+                    u8* value_start = key_start + key_len + 1;
+                    // https://www.w3.org/TR/2003/REC-PNG-20031110/#11iTXt
+                    if(iTXt_header)
+                    {
+                      value_start += 2;
+                      while(*value_start) { ++value_start; }
+                      ++value_start;
+                      while(*value_start) { ++value_start; }
+                      ++value_start;
+                    }
+
+                    str_t key = { key_start, key_len };
+                    str_t value = str_from_span(value_start, value_end);
+                    // printf("tEXt: %.*s: %.*s\n", (int)key.size, key.data, (int)value.size, value.data);
+
+                    if(str_eq_zstr(key, "prompt"))
+                    {
+                      // comfyanonymous/ComfyUI JSON.
+                      // TODO: Tokenize properly, or string contents might get mistaken for object keys,
+                      //       like {"seed": "tricky \"seed:"}
+
+                      for(u8* p = value_start;
+                          p < value_end;
+                         )
                       {
-                        str_t v = parse_next_json_str_destructively(&p, value_end);
-                        if(!img->parameter_strings[IMG_STR_POSITIVE_PROMPT].data) { img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = v; }
-                        else if(!img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data) { img->parameter_strings[IMG_STR_NEGATIVE_PROMPT] = v; }
+                        if(0) {}
+                        else if(advance_if_prefix_matches(&p, value_end, "\"seed\"")
+                            || advance_if_prefix_matches(&p, value_end, "\"noise_seed\""))
+                        {
+                          while(p < value_end && !is_digit(*p)) { ++p; }
+                          str_t v = {p};
+                          while(p < value_end && is_digit(*p)) { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_SEED] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "\"steps\""))
+                        {
+                          while(p < value_end && !is_digit(*p)) { ++p; }
+                          str_t v = {p};
+                          while(p < value_end && is_digit(*p)) { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_SAMPLING_STEPS] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "\"cfg\""))
+                        {
+                          while(p < value_end && !(is_digit(*p) || *p == '.')) { ++p; }
+                          str_t v = {p};
+                          while(p < value_end && (is_digit(*p) || *p == '.')) { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_CFG] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "\"sampler_name\""))
+                        {
+                          str_t v = parse_next_json_str_destructively(&p, value_end);
+                          img->parameter_strings[IMG_STR_SAMPLER] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
+                        {
+                          str_t v = parse_next_json_str_destructively(&p, value_end);
+                          v = str_remove_suffix(v, str(".ckpt"));
+                          v = str_remove_suffix(v, str(".safetensors"));
+                          img->parameter_strings[IMG_STR_MODEL] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
+                        {
+                          while(p < value_end && !is_digit(*p)) { ++p; }
+                          str_t v = {p};
+                          while(p < value_end && is_digit(*p)) { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_BATCH_SIZE] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "\"text\""))
+                        {
+                          str_t v = parse_next_json_str_destructively(&p, value_end);
+                          if(!img->parameter_strings[IMG_STR_POSITIVE_PROMPT].data) { img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = v; }
+                          else if(!img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data) { img->parameter_strings[IMG_STR_NEGATIVE_PROMPT] = v; }
+                        }
+                        else
+                        {
+                          ++p;
+                        }
+                      }
+                    }
+                    else if(str_eq_zstr(key, "parameters"))
+                    {
+                      // AUTOMATIC1111/stable-diffusion-webui.
+                      // Be careful with newlines and misleading labels in the
+                      // positive and negative prompts; use the last found keywords.
+
+                      u8* p = value_start;
+                      u8* negative_prompt_label_start = 0;
+                      u8* steps_label_start = value_end;
+
+                      while(p < value_end)
+                      {
+                        u8* p_prev = p;
+                        if(0) {}
+                        else if(advance_if_prefix_matches(&p, value_end, "\nNegative prompt: "))
+                        {
+                          negative_prompt_label_start = p_prev;
+                          img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data = p;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "\nSteps: "))
+                        {
+                          steps_label_start = p_prev;
+                          img->parameter_strings[IMG_STR_SAMPLING_STEPS].data = p;
+                        }
+
+                        ++p;
+                      }
+
+                      if(negative_prompt_label_start)
+                      {
+                        img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = str_from_span(value_start, negative_prompt_label_start);
                       }
                       else
                       {
+                        img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = str_from_span(value_start, steps_label_start);
+                      }
+
+                      if(img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data)
+                      {
+                        img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].size = steps_label_start - img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data;
+                      }
+
+                      p = steps_label_start;
+
+                      while(p < value_end)
+                      {
+                        u8* p_prev = p;
+                        if(0) {}
+                        else if(advance_if_prefix_matches(&p, value_end, "Steps: "))
+                        {
+                          str_t v = {p};
+                          while(p < value_end && *p != ',') { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_SAMPLING_STEPS] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "Sampler: "))
+                        {
+                          str_t v = {p};
+                          while(p < value_end && *p != ',') { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_SAMPLER] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "CFG scale: "))
+                        {
+                          str_t v = {p};
+                          while(p < value_end && *p != ',') { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_CFG] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "Seed: "))
+                        {
+                          str_t v = {p};
+                          while(p < value_end && *p != ',') { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_SEED] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "Model: "))
+                        {
+                          str_t v = {p};
+                          while(p < value_end && *p != ',') { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_MODEL] = v;
+                        }
+                        else if(advance_if_prefix_matches(&p, value_end, "Score: "))
+                        {
+                          str_t v = {p};
+                          while(p < value_end && *p != ',') { ++p; }
+                          v.size = p - v.data;
+
+                          img->parameter_strings[IMG_STR_SCORE] = v;
+                        }
+
                         ++p;
                       }
                     }
-                  }
-                  else if(str_eq_zstr(key, "parameters"))
-                  {
-                    // AUTOMATIC1111/stable-diffusion-webui.
-                    // Be careful with newlines and misleading labels in the
-                    // positive and negative prompts; use the last found keywords.
 
-                    u8* p = value_start;
-                    u8* negative_prompt_label_start = 0;
-                    u8* steps_label_start = value_end;
-
-                    while(p < value_end)
+                    if(!img->parameter_strings[IMG_STR_GENERATION_PARAMETERS].size)
                     {
-                      u8* p_prev = p;
-                      if(0) {}
-                      else if(advance_if_prefix_matches(&p, value_end, "\nNegative prompt: "))
-                      {
-                        negative_prompt_label_start = p_prev;
-                        img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data = p;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "\nSteps: "))
-                      {
-                        steps_label_start = p_prev;
-                        img->parameter_strings[IMG_STR_SAMPLING_STEPS].data = p;
-                      }
-
-                      ++p;
+                      img->parameter_strings[IMG_STR_GENERATION_PARAMETERS] = value;
                     }
 
-                    if(negative_prompt_label_start)
+                    // Parse r32 values.
+                    struct
                     {
-                      img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = str_from_span(value_start, negative_prompt_label_start);
-                    }
-                    else
+                      img_str_t str_idx;
+                      parsed_r32_t parsed_idx;
+                    } parse_tasks[] = {
+                      { IMG_STR_SAMPLING_STEPS, PARSED_R32_SAMPLING_STEPS },
+                      { IMG_STR_CFG,            PARSED_R32_CFG },
+                      { IMG_STR_SCORE,          PARSED_R32_SCORE },
+                    };
+                    for_count(task_idx, array_count(parse_tasks))
                     {
-                      img->parameter_strings[IMG_STR_POSITIVE_PROMPT] = str_from_span(value_start, steps_label_start);
-                    }
-
-                    if(img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data)
-                    {
-                      img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].size = steps_label_start - img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].data;
-                    }
-
-                    p = steps_label_start;
-
-                    while(p < value_end)
-                    {
-                      u8* p_prev = p;
-                      if(0) {}
-                      else if(advance_if_prefix_matches(&p, value_end, "Steps: "))
+                      str_t param_str = img->parameter_strings[parse_tasks[task_idx].str_idx];
+                      r32* parsed_ptr = &img->parsed_r32s[parse_tasks[task_idx].parsed_idx];
+                      if(param_str.size > 0)
                       {
-                        str_t v = {p};
-                        while(p < value_end && *p != ',') { ++p; }
-                        v.size = p - v.data;
-
-                        img->parameter_strings[IMG_STR_SAMPLING_STEPS] = v;
+                        *parsed_ptr = parse_r32(param_str);
+                        // printf("[%d]: \"%.*s\" -> %f\n", parse_tasks[task_idx].parsed_idx, PF_STR(param_str), *parsed_ptr);
                       }
-                      else if(advance_if_prefix_matches(&p, value_end, "Sampler: "))
-                      {
-                        str_t v = {p};
-                        while(p < value_end && *p != ',') { ++p; }
-                        v.size = p - v.data;
-
-                        img->parameter_strings[IMG_STR_SAMPLER] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "CFG scale: "))
-                      {
-                        str_t v = {p};
-                        while(p < value_end && *p != ',') { ++p; }
-                        v.size = p - v.data;
-
-                        img->parameter_strings[IMG_STR_CFG] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "Seed: "))
-                      {
-                        str_t v = {p};
-                        while(p < value_end && *p != ',') { ++p; }
-                        v.size = p - v.data;
-
-                        img->parameter_strings[IMG_STR_SEED] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "Model: "))
-                      {
-                        str_t v = {p};
-                        while(p < value_end && *p != ',') { ++p; }
-                        v.size = p - v.data;
-
-                        img->parameter_strings[IMG_STR_MODEL] = v;
-                      }
-                      else if(advance_if_prefix_matches(&p, value_end, "Score: "))
-                      {
-                        str_t v = {p};
-                        while(p < value_end && *p != ',') { ++p; }
-                        v.size = p - v.data;
-
-                        img->parameter_strings[IMG_STR_SCORE] = v;
-                      }
-
-                      ++p;
-                    }
-                  }
-
-                  if(!img->parameter_strings[IMG_STR_GENERATION_PARAMETERS].size)
-                  {
-                    img->parameter_strings[IMG_STR_GENERATION_PARAMETERS] = value;
-                  }
-
-                  // Parse r32 values.
-                  struct
-                  {
-                    img_str_t str_idx;
-                    parsed_r32_t parsed_idx;
-                  } parse_tasks[] = {
-                    { IMG_STR_SAMPLING_STEPS, PARSED_R32_SAMPLING_STEPS },
-                    { IMG_STR_CFG,            PARSED_R32_CFG },
-                    { IMG_STR_SCORE,          PARSED_R32_SCORE },
-                  };
-                  for_count(task_idx, array_count(parse_tasks))
-                  {
-                    str_t param_str = img->parameter_strings[parse_tasks[task_idx].str_idx];
-                    r32* parsed_ptr = &img->parsed_r32s[parse_tasks[task_idx].parsed_idx];
-                    if(param_str.size > 0)
-                    {
-                      *parsed_ptr = parse_r32(param_str);
-                      // printf("[%d]: \"%.*s\" -> %f\n", parse_tasks[task_idx].parsed_idx, PF_STR(param_str), *parsed_ptr);
                     }
                   }
                 }
+
+                ptr += 4 + chunk_size + 4;
+
+                bad |= (ptr + 8 >= file_end);
               }
-
-              ptr += 4 + chunk_size + 4;
-
-              bad |= (ptr + 8 >= file_end);
             }
-          }
 
 #if 0
-          printf("\n%.*s\n", PF_STR(img->path));
+            printf("\n%.*s\n", PF_STR(img->path));
 #define P(x) printf("  " #x ": %.*s\n", (int)img->parameter_strings[x].size, img->parameter_strings[x].data);
-          // P(IMG_STR_GENERATION_PARAMETERS);
-          P(IMG_STR_POSITIVE_PROMPT);
-          P(IMG_STR_NEGATIVE_PROMPT);
-          P(IMG_STR_SEED);
-          P(IMG_STR_BATCH_SIZE);
-          P(IMG_STR_MODEL);
-          P(IMG_STR_SAMPLER);
-          P(IMG_STR_SAMPLING_STEPS);
-          P(IMG_STR_CFG);
+            // P(IMG_STR_GENERATION_PARAMETERS);
+            P(IMG_STR_POSITIVE_PROMPT);
+            P(IMG_STR_NEGATIVE_PROMPT);
+            P(IMG_STR_SEED);
+            P(IMG_STR_BATCH_SIZE);
+            P(IMG_STR_MODEL);
+            P(IMG_STR_SAMPLER);
+            P(IMG_STR_SAMPLING_STEPS);
+            P(IMG_STR_CFG);
 #undef P
 #endif
+          }
         }
       }
 
@@ -1523,18 +1526,18 @@ internal int compare_img_entries(const void* void_a, const void* void_b, void* v
 
 internal void reset_filtered_images(state_t* state)
 {
-  for_count(i, state->total_img_count)
+  for_count(i, state->sorted_img_count)
   {
     state->filtered_img_idxs[i] = state->sorted_img_idxs[i];
   }
-  state->filtered_img_count = state->total_img_count;
+  state->filtered_img_count = state->sorted_img_count;
 }
 
 internal i32 find_sorted_idx_of_img_idx(state_t* state, i32 img_idx)
 {
   i32 result = 0;
 
-  for_count(i, state->total_img_count)
+  for_count(i, state->sorted_img_count)
   {
     if(state->sorted_img_idxs[i] == img_idx)
     {
@@ -1562,25 +1565,67 @@ internal i32 find_filtered_idx_of_img_idx(state_t* state, i32 img_idx)
   return result;
 }
 
+internal u32 hash_str(str_t str)
+{
+  u32 result = 0;
+  for_count(i, str.size)
+  {
+    result *= 1021;
+    result += str.data[i];
+  }
+  return result;
+}
+
 internal void refresh_input_paths(state_t* state)
 {
-  i32 prev_viewing_idx = state->filtered_img_idxs[state->viewing_filtered_img_idx];
-  str_t prev_viewing_path = state->img_entries[prev_viewing_idx].path;
-  i32 new_viewing_img_idx = -1;
-  prev_viewing_path.data = (u8*)strndupa((char*)prev_viewing_path.data, prev_viewing_path.size);
-  // TODO: Keep the marks and filtered images.
+  // u64 nsecs_start = get_nanoseconds();
 
-  state->filtered_img_count = 0;
-  state->total_img_count = 0;
+  b32 first_run = (state->sorted_img_count == 0);
+  b32 all_files_were_filtered = (state->filtered_img_count == state->sorted_img_count);
+  i32 prev_viewing_img_idx = state->filtered_img_idxs[state->viewing_filtered_img_idx];
+  state->sorted_img_count = 0;
 
-  i32 paths_capacity = state->total_img_capacity;
-  char** paths = malloc_array(paths_capacity, char*);
+  for_count(i, state->filtered_img_count)
+  {
+    img_entry_t* img = &state->img_entries[state->filtered_img_idxs[i]];
+    img->flags |= IMG_FLAG_FILTERED;
+  }
+
+  // Build path -> img_idx hash map, internally linked.
+  u32 path_hash_size = 64 * 1024;
+  while(path_hash_size < 4 * state->total_img_count) { path_hash_size *= 2; }
+  i32* path_hashes = malloc_array(path_hash_size, i32);
+  for_count(i, path_hash_size) { path_hashes[i] = -1; }
+  for_count(img_idx, state->total_img_count)
+  {
+    img_entry_t* img = &state->img_entries[img_idx];
+    if(!(img->flags & IMG_FLAG_UNUSED))
+    {
+      u32 hash = hash_str(img->path);
+      i32 slot = (i32)(hash % path_hash_size);
+      for(i32 offset = 0;
+          offset < path_hash_size;
+          ++offset)
+      {
+        i32* entry = &path_hashes[(slot + offset) % path_hash_size];
+        if(*entry == -1)
+        {
+          *entry = img_idx;
+          break;
+        }
+      }
+
+      state->img_entries[img_idx].flags |= IMG_FLAG_UNUSED;
+    }
+  }
+
+  char** paths = malloc_array(state->total_img_capacity, char*);
+  i32 path_count = 0;
 
   for(i32 input_path_idx = 0;
       input_path_idx < state->input_path_count;
       ++input_path_idx)
   {
-    i32 paths_count = 0;
     char* arg = state->input_paths[input_path_idx];
     b32 is_a_dir = false;
 
@@ -1588,7 +1633,7 @@ internal void refresh_input_paths(state_t* state)
     if(dir)
     {
       struct dirent* dirent;
-      while((dirent = readdir(dir)) && paths_count < paths_capacity)
+      while((dirent = readdir(dir)) && path_count < state->total_img_capacity)
       {
         is_a_dir = true;
         char* path = dirent->d_name;
@@ -1598,80 +1643,16 @@ internal void refresh_input_paths(state_t* state)
           char* full_path = 0;
           if(asprintf(&full_path, "%s/%s", arg, path) != -1)
           {
-            paths[paths_count++] = full_path;
+            paths[path_count++] = full_path;
           }
         }
       }
       closedir(dir);
     }
 
-    if(!is_a_dir)
+    if(!is_a_dir && path_count < state->total_img_capacity)
     {
-      paths[paths_count++] = strdup(arg);
-    }
-
-    for(i32 path_idx = 0;
-        // TODO: Memory for heap-allocated strings may leak if there are more paths than
-        //       total_img_capacity.
-        path_idx < paths_count && state->total_img_count < state->total_img_capacity;
-        ++path_idx)
-    {
-      i32 img_idx = state->total_img_count++;
-      img_entry_t* img = &state->img_entries[img_idx];
-      str_t old_path = img->path;
-      str_t new_path = wrap_str(paths[path_idx]);
-      b32 path_changed = !str_eq(old_path, new_path);
-
-      if(path_changed)
-      {
-        img->path = new_path;
-        // TODO: Right now, this will leak the memory of the old paths.
-        //       Those must be freed up, without risking the loader threads
-        //       trying to read from that freed memory.
-        //       Also, changing the path while the loaders are running might be problematic.
-      }
-      else
-      {
-        if(new_path.data)
-        {
-          free(new_path.data);
-          zero_struct(new_path);
-        }
-      }
-
-      b32 timestamp_may_have_changed = true;
-      struct stat stats = {0};
-      if(stat((char*)img->path.data, &stats) == 0)
-      {
-        if(stats.st_mtim.tv_sec == img->modified_at_time.tv_sec &&
-            stats.st_mtim.tv_nsec == img->modified_at_time.tv_nsec)
-        {
-          timestamp_may_have_changed = false;
-        }
-        img->modified_at_time = stats.st_mtim;
-        img->filesize = stats.st_size;
-      }
-
-      if(path_changed || timestamp_may_have_changed)
-      {
-        unload_texture(state, img);
-        img->bytes_used = 0;
-
-        // If this image is still being loaded, it should be re-triggered by the
-        // code handling the loaded image, since load_generation will differ.
-        ++img->load_generation;
-        img->load_state = LOAD_STATE_UNLOADED;
-      }
-
-      if(!img->random_number)
-      {
-        img->random_number = max(1, (u32)rand());
-      }
-
-      if(str_eq(img->path, prev_viewing_path))
-      {
-        new_viewing_img_idx = img_idx;
-      }
+      paths[path_count++] = strdup(arg);
     }
 
     if(state->inotify_fd != -1)
@@ -1682,16 +1663,169 @@ internal void refresh_input_paths(state_t* state)
     }
   }
 
-  free(paths);
-  for_count(i, state->total_img_count) { state->sorted_img_idxs[i] = i; }
-  qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
-  reset_filtered_images(state);
-  if(new_viewing_img_idx != -1)
+  i32 first_possible_unused_img_idx = 0;
+
+  for(i32 pass = 0;
+      pass <= 1;
+      ++pass)
   {
-    state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state, new_viewing_img_idx);
+    for(i32 path_idx = 0;
+        path_idx < path_count;
+        )
+    {
+      str_t new_path = wrap_str(paths[path_idx]);
+
+      i32 img_idx = -1;
+
+      // Try to match existing image entries by path.
+      if(pass == 0)
+      {
+        u32 hash = hash_str(new_path);
+        i32 slot = (i32)(hash % path_hash_size);
+        for(i32 offset = 0;
+            offset < path_hash_size;
+            ++offset)
+        {
+          i32 entry = path_hashes[(slot + offset) % path_hash_size];
+          if(entry == -1) { break; }
+          if(str_eq(new_path, state->img_entries[entry].path))
+          {
+            img_idx = entry;
+            break;
+          }
+        }
+      }
+
+      if(pass == 1)
+      {
+        // Try to fill up unused slots (in case files got deleted since last time).
+        for(i32 i = first_possible_unused_img_idx;
+            i < state->total_img_count;
+            ++i)
+        {
+          if(state->img_entries[i].flags & IMG_FLAG_UNUSED)
+          {
+            img_idx = i;
+            break;
+          }
+        }
+
+        if(img_idx == -1 && state->total_img_count < state->total_img_capacity)
+        {
+          img_idx = state->total_img_count++;
+        }
+
+        first_possible_unused_img_idx = img_idx + 1;
+      }
+
+      if(img_idx != -1)
+      {
+        img_entry_t* img = &state->img_entries[img_idx];
+        img->flags &= ~IMG_FLAG_UNUSED;
+        str_t old_path = img->path;
+        b32 path_changed = !str_eq(old_path, new_path);
+
+        if(path_changed)
+        {
+          img->path = new_path;
+          // TODO: Right now, this will leak the memory of the old paths.
+          //       Those must be freed up, without risking the loader threads
+          //       trying to read from that freed memory.
+          //       Also, changing the path while the loaders are running might be problematic.
+        }
+        else
+        {
+          if(new_path.data)
+          {
+            free(new_path.data);
+            zero_struct(new_path);
+          }
+        }
+
+        b32 timestamp_may_have_changed = true;
+        struct stat stats = {0};
+        if(stat((char*)img->path.data, &stats) == 0)
+        {
+          if(stats.st_mtim.tv_sec == img->modified_at_time.tv_sec &&
+              stats.st_mtim.tv_nsec == img->modified_at_time.tv_nsec)
+          {
+            timestamp_may_have_changed = false;
+          }
+          img->modified_at_time = stats.st_mtim;
+          img->filesize = stats.st_size;
+        }
+
+        if(path_changed || timestamp_may_have_changed)
+        {
+          unload_texture(state, img);
+          img->bytes_used = 0;
+
+          // If this image is still being loaded, it should be re-triggered by the
+          // code handling the loaded image, since load_generation will differ.
+          ++img->load_generation;
+          img->load_state = LOAD_STATE_UNLOADED;
+        }
+
+        if(!img->random_number)
+        {
+          img->random_number = max(1, (u32)rand());
+        }
+
+        state->sorted_img_idxs[state->sorted_img_count++] = img_idx;
+
+        // Remove this handled path so the next pass can ignore it.
+        paths[path_idx] = paths[path_count - 1];
+        --path_count;
+      }
+      else
+      {
+        ++path_idx;
+      }
+    }
+  }
+
+  if(path_count > 0)
+  {
+    fprintf(stderr, "Warning: %d paths left unhandled.\n", path_count);
+  }
+
+  free(paths);
+  free(path_hashes);
+
+  qsort_r(state->sorted_img_idxs, state->sorted_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
+
+  state->filtered_img_count = 0;
+  for_count(i, state->sorted_img_count)
+  {
+    i32 img_idx = state->sorted_img_idxs[i];
+    if(all_files_were_filtered || (state->img_entries[img_idx].flags & IMG_FLAG_FILTERED))
+    {
+      state->filtered_img_idxs[state->filtered_img_count] = img_idx;
+      if(img_idx == prev_viewing_img_idx) { state->viewing_filtered_img_idx = state->filtered_img_count; }
+      ++state->filtered_img_count;
+    }
+  }
+  if(first_run)
+  {
+    state->viewing_filtered_img_idx = 0;
+  }
+  else
+  {
+    state->viewing_filtered_img_idx = max(0, min(state->viewing_filtered_img_idx, state->filtered_img_count - 1));
+  }
+
+  for_count(i, state->total_img_count)
+  {
+    img_entry_t* img = &state->img_entries[i];
+    if(img->flags & IMG_FLAG_UNUSED) { img->flags &= ~IMG_FLAG_MARKED; }
+    img->flags &= ~IMG_FLAG_FILTERED; 
   }
 
   sem_post(&state->metadata_loader_semaphore);
+  state->all_metadata_loaded = false;
+
+  // u64 nsecs_end = get_nanoseconds();
+  // printf("refresh: %.6f s\n", 1e-9 * (r64)(nsecs_end - nsecs_start));
 }
 
 enum
@@ -2426,13 +2560,13 @@ int main(int argc, char** argv)
           }
           state->all_metadata_loaded = true;
 
-          qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
+          qsort_r(state->sorted_img_idxs, state->sorted_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
           reset_filtered_images(state);
         }
 
         if(open_single_directory_on.size)
         {
-          for_count(i, state->total_img_count)
+          for_count(i, state->sorted_img_count)
           {
             i32 img_idx = state->sorted_img_idxs[i];
             if(str_has_suffix(state->img_entries[img_idx].path, open_single_directory_on))
@@ -2545,7 +2679,6 @@ int main(int argc, char** argv)
         }
 
         state->shared.total_loader_count = state->loader_count;
-        state->shared.total_img_count = state->total_img_count;
         state->shared.img_entries = state->img_entries;
         state->shared.filtered_img_count = state->filtered_img_count;
         state->shared.filtered_img_idxs = state->filtered_img_idxs;
@@ -2629,6 +2762,7 @@ int main(int argc, char** argv)
           b32 signal_loaders = false;
           b32 search_changed = false;
           b32 need_to_sort = false;
+          b32 sort_triggered_by_incomplete_metadata = false;
 
           {
             shared_loader_data_t* shared = &state->shared;
@@ -2738,6 +2872,7 @@ int main(int argc, char** argv)
             if(sort_mode_needs_metadata(state->sort_mode))
             {
               need_to_sort = true;
+              sort_triggered_by_incomplete_metadata = true;
             }
           }
           state->all_metadata_loaded = (state->metadata_loaded_count >= state->total_img_count);
@@ -3476,7 +3611,7 @@ int main(int argc, char** argv)
                       {
                         state->sorting_modal = false;
 
-                        for_count(i, state->total_img_count) { state->sorted_img_idxs[i] = state->prev_sorted_img_idxs[i]; }
+                        for_count(i, state->sorted_img_count) { state->sorted_img_idxs[i] = state->prev_sorted_img_idxs[i]; }
                         for_count(i, state->filtered_img_count) { state->filtered_img_idxs[i] = state->prev_filtered_img_idxs[i]; }
                         state->viewing_filtered_img_idx = state->filtered_idx_viewed_before_sort;
                         scroll_thumbnail_into_view = true;
@@ -3566,7 +3701,7 @@ int main(int argc, char** argv)
                     {
                       state->sorting_modal = true;
 
-                      for_count(i, state->total_img_count) { state->prev_sorted_img_idxs[i] = state->sorted_img_idxs[i]; }
+                      for_count(i, state->sorted_img_count) { state->prev_sorted_img_idxs[i] = state->sorted_img_idxs[i]; }
                       for_count(i, state->filtered_img_count) { state->prev_filtered_img_idxs[i] = state->filtered_img_idxs[i]; }
                       state->filtered_idx_viewed_before_sort = state->viewing_filtered_img_idx;
                       state->prev_sort_mode = state->sort_mode;
@@ -3634,10 +3769,10 @@ int main(int argc, char** argv)
                           state->filtered_img_idxs[state->viewing_filtered_img_idx]);
                       state->viewing_filtered_img_idx = 0;
 
-                      if(state->filtered_img_count == state->total_img_count)
+                      if(state->filtered_img_count == state->sorted_img_count)
                       {
                         state->filtered_img_count = 0;
-                        for_count(sorted_idx, state->total_img_count)
+                        for_count(sorted_idx, state->sorted_img_count)
                         {
                           i32 img_idx = state->sorted_img_idxs[sorted_idx];
 
@@ -4403,10 +4538,20 @@ int main(int argc, char** argv)
               }
             }
 
-            qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
+            i32 prev_img_idx_viewed = state->filtered_img_idxs[state->viewing_filtered_img_idx];
+
+            qsort_r(state->sorted_img_idxs, state->sorted_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
             qsort_r(state->filtered_img_idxs, state->filtered_img_count, sizeof(state->filtered_img_idxs[0]), compare_img_entries, state);
 
-            state->viewing_filtered_img_idx = 0;
+            if(sort_triggered_by_incomplete_metadata)
+            {
+              state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state, prev_img_idx_viewed);
+            }
+            else
+            {
+              state->viewing_filtered_img_idx = 0;
+            }
+
             scroll_thumbnail_into_view = true;
             dirty = true;
             signal_loaders = true;
@@ -4705,7 +4850,7 @@ int main(int argc, char** argv)
               }
 #endif
 
-              for_count(sorted_idx, state->total_img_count)
+              for_count(sorted_idx, state->sorted_img_count)
               {
                 i32 img_idx = state->sorted_img_idxs[sorted_idx];
                 img_entry_t* img = &state->img_entries[img_idx];
@@ -5357,7 +5502,7 @@ _search_end_label:
                 draw_wrapped_text(state, fs, x_indented, x1, &x, &y, value); \
               }
 
-              if(state->filtered_img_count == state->total_img_count)
+              if(state->filtered_img_count == state->sorted_img_count)
               {
                 tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d",
                     state->viewing_filtered_img_idx + 1, state->filtered_img_count);
@@ -5365,7 +5510,7 @@ _search_end_label:
               else
               {
                 tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
-                    state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->total_img_count);
+                    state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->sorted_img_count);
               }
               SHOW_LABEL_VALUE("", tmp_str);
 

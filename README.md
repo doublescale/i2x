@@ -36,7 +36,6 @@ Here's a video showing a search over 35k images:
 - Image loading not security-hardened.  Only use this program on trusted files.
 - XInput2 handling might be glitchy.  If you encounter unexpected mouse inputs (particularly when scrolling), XInput2 can be disabled by setting this environment variable:  I2X_DISABLE_XINPUT2= ./i2x <paths>
 - Partial Unicode support.  No fallback fonts.
-- Refreshing loses filtered view. (WIP)
-- Crashes sometimes. (WIP)
+- Leaks memory and might crash sometimes. (WIP)
 
 WIP items might get fixed at some point.
