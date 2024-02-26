@@ -147,6 +147,7 @@ typedef struct img_entry_t
   struct timespec modified_at_time;
   u64 filesize;
 
+  u32 metadata_generation;
   str_t file_header_data;
   str_t parameter_strings[IMG_STR_COUNT];
   r32 parsed_r32s[PARSED_R32_COUNT];
@@ -859,9 +860,10 @@ internal void* metadata_loader_fun(void* raw_data)
         ++img_idx)
     {
       img_entry_t* img = &state->img_entries[img_idx];
+      u32 load_generation = img->load_generation;
       // printf("meta %d / %d\n", img_idx, state->total_img_count);
 
-      if(!(img->flags & IMG_FLAG_UNUSED))
+      if(!(img->flags & IMG_FLAG_UNUSED) && load_generation != img->metadata_generation)
       {
         if(img->file_header_data.size)
         {
@@ -1196,6 +1198,8 @@ internal void* metadata_loader_fun(void* raw_data)
             P(IMG_STR_CFG);
 #undef P
 #endif
+
+            img->metadata_generation = load_generation;
           }
         }
       }
@@ -3377,6 +3381,29 @@ int main(int argc, char** argv)
                       bflip(state->debug_font_atlas);
                     }
 
+                    else if(alt_held && keysym == XK_Page_Up)
+                    {
+                      state->viewing_filtered_img_idx -= state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      state->viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
+                      scroll_thumbnail_into_view = true;
+                    }
+                    else if(alt_held && keysym == XK_Page_Down)
+                    {
+                      state->viewing_filtered_img_idx += state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      state->viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
+                      scroll_thumbnail_into_view = true;
+                    }
+                    else if(keysym == XK_Page_Up)
+                    {
+                      state->thumbnail_scroll_rows -= (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      clamp_thumbnail_scroll_rows(state);
+                    }
+                    else if(keysym == XK_Page_Down)
+                    {
+                      state->thumbnail_scroll_rows += (r32)(i32)((r32)state->win_h / thumbnail_h);
+                      clamp_thumbnail_scroll_rows(state);
+                    }
+
                     else if(!state->sorting_modal && (ctrl_held && keysym == 'f' || !state->filtering_modal && keysym == '/'))
                     {
                       bflip(state->filtering_modal);
@@ -3630,28 +3657,6 @@ int main(int argc, char** argv)
                       state->viewing_filtered_img_idx = state->filtered_img_count - 1;
                       scroll_thumbnail_into_view = true;
                     }
-                    else if(alt_held && keysym == XK_Page_Up)
-                    {
-                      state->viewing_filtered_img_idx -= state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      state->viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
-                      scroll_thumbnail_into_view = true;
-                    }
-                    else if(alt_held && keysym == XK_Page_Down)
-                    {
-                      state->viewing_filtered_img_idx += state->thumbnail_columns * (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      state->viewing_filtered_img_idx = clamp(0, state->filtered_img_count - 1, state->viewing_filtered_img_idx);
-                      scroll_thumbnail_into_view = true;
-                    }
-                    else if(keysym == XK_Page_Up)
-                    {
-                      state->thumbnail_scroll_rows -= (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      clamp_thumbnail_scroll_rows(state);
-                    }
-                    else if(keysym == XK_Page_Down)
-                    {
-                      state->thumbnail_scroll_rows += (r32)(i32)((r32)state->win_h / thumbnail_h);
-                      clamp_thumbnail_scroll_rows(state);
-                    }
 
                     else if(state->sorting_modal)
                     {
@@ -3816,23 +3821,36 @@ int main(int argc, char** argv)
                     {
                       i32 prev_sorted_idx = find_sorted_idx_of_img_idx(state,
                           state->filtered_img_idxs[state->viewing_filtered_img_idx]);
-                      state->viewing_filtered_img_idx = 0;
 
                       if(state->filtered_img_count == state->sorted_img_count)
                       {
-                        state->filtered_img_count = 0;
-                        for_count(sorted_idx, state->sorted_img_count)
+                        b32 some_marked = false;
+                        for_count(i, state->total_img_count)
                         {
-                          i32 img_idx = state->sorted_img_idxs[sorted_idx];
-
-                          if(state->img_entries[img_idx].flags & IMG_FLAG_MARKED)
+                          if(state->img_entries[i].flags & IMG_FLAG_MARKED)
                           {
-                            if(prev_sorted_idx >= sorted_idx)
-                            {
-                              state->viewing_filtered_img_idx = state->filtered_img_count;
-                            }
+                            some_marked = true;
+                            break;
+                          }
+                        }
 
-                            state->filtered_img_idxs[state->filtered_img_count++] = img_idx;
+                        if(some_marked)
+                        {
+                          state->viewing_filtered_img_idx = 0;
+                          state->filtered_img_count = 0;
+                          for_count(sorted_idx, state->sorted_img_count)
+                          {
+                            i32 img_idx = state->sorted_img_idxs[sorted_idx];
+
+                            if(state->img_entries[img_idx].flags & IMG_FLAG_MARKED)
+                            {
+                              if(prev_sorted_idx >= sorted_idx)
+                              {
+                                state->viewing_filtered_img_idx = state->filtered_img_count;
+                              }
+
+                              state->filtered_img_idxs[state->filtered_img_count++] = img_idx;
+                            }
                           }
                         }
                       }
