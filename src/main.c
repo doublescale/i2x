@@ -218,6 +218,13 @@ internal str_t sort_mode_labels[] = {
   str("sco[r]e"),
 };
 
+typedef struct search_history_entry_t
+{
+  struct search_history_entry_t* prev;
+  struct search_history_entry_t* next;
+  str_t str;
+} search_history_entry_t;
+
 typedef struct
 {
   i32 win_w;
@@ -288,19 +295,19 @@ typedef struct
 
   b32 filtering_modal;
   u8 search_str_buffer[64 * 1024];
-  u8 search_history_buffer[4 * 1024 * 1024];
   str_t search_str;
   b32 search_str_adjusted;
-  str_t search_history_entries[64 * 1024];
-  FILE* search_history_file;
-  // i32 first_search_history_entry_idx;  // TODO: Make the history a ring-buffer.
-  i32 current_search_history_entry_idx;
-  i32 selected_search_history_entry_idx;
   i32 sorted_idx_viewed_before_search;
   i64 selection_start;
   i64 selection_end;
   i32 metadata_loaded_count;
   b32 all_metadata_loaded;
+
+  FILE* search_history_file;
+  u8 search_history_buffer[4 * 1024 * 1024];  // Make sure this is pointer-size-aligned.
+  search_history_entry_t* first_search_history_entry;
+  search_history_entry_t* last_search_history_entry;
+  search_history_entry_t* selected_search_history_entry;
 
   shared_loader_data_t shared;
   i32 loader_count;
@@ -1742,20 +1749,21 @@ internal void refresh_input_paths(state_t* state)
           }
         }
 
-        b32 timestamp_may_have_changed = true;
+        b32 file_may_have_changed = true;
         struct stat stats = {0};
         if(stat((char*)img->path.data, &stats) == 0)
         {
           if(stats.st_mtim.tv_sec == img->modified_at_time.tv_sec &&
-              stats.st_mtim.tv_nsec == img->modified_at_time.tv_nsec)
+              stats.st_mtim.tv_nsec == img->modified_at_time.tv_nsec &&
+              stats.st_size == img->filesize)
           {
-            timestamp_may_have_changed = false;
+            file_may_have_changed = false;
           }
           img->modified_at_time = stats.st_mtim;
           img->filesize = stats.st_size;
         }
 
-        if(path_changed || timestamp_may_have_changed)
+        if(path_changed || file_may_have_changed)
         {
           unload_texture(state, img);
           img->bytes_used = 0;
@@ -2095,6 +2103,78 @@ internal b32 sort_mode_needs_metadata(sort_mode_t mode)
     && mode != SORT_MODE_TIMESTAMP
     && mode != SORT_MODE_FILESIZE
     && mode != SORT_MODE_RANDOM;
+}
+
+internal b32 add_search_history_entry(state_t* state, str_t str)
+{
+  b32 got_added = false;
+
+  if(!state->last_search_history_entry || !str_eq(str, state->last_search_history_entry->str))
+  {
+    search_history_entry_t* entry = 0;
+    size_t entry_size = sizeof(search_history_entry_t) + str.size;
+    u8* buffer_end = state->search_history_buffer + sizeof(state->search_history_buffer);
+
+    if(!state->last_search_history_entry)
+    {
+      entry = state->first_search_history_entry = state->last_search_history_entry =
+        (search_history_entry_t*)state->search_history_buffer;
+      entry->prev = entry->next = 0;
+    }
+    else
+    {
+      str_t last_str = state->last_search_history_entry->str;
+      u8* new_base = (u8*)((u64)(last_str.data + last_str.size + 7) & ~7);
+      if(new_base + entry_size > buffer_end)
+      {
+        new_base = state->search_history_buffer;
+        // If we're rolling back to the start of the buffer,
+        // delete all the starting entries from the end of the buffer
+        // to make sure the start of the entry chain does not cross the end-boundary.
+        while(state->first_search_history_entry && state->first_search_history_entry > state->last_search_history_entry)
+        {
+          state->first_search_history_entry = state->first_search_history_entry->next;
+          state->first_search_history_entry->prev = 0;
+        }
+      }
+      while(state->first_search_history_entry
+          && new_base <= (u8*)state->first_search_history_entry
+          && (u8*)state->first_search_history_entry < new_base + entry_size)
+      {
+        state->first_search_history_entry = state->first_search_history_entry->next;
+      }
+      if(state->first_search_history_entry)
+      {
+        state->first_search_history_entry->prev = 0;
+        entry = (search_history_entry_t*)new_base;
+        entry->prev = state->last_search_history_entry;
+        state->last_search_history_entry->next = entry;
+        state->last_search_history_entry = entry;
+        entry->next = 0;
+      }
+      else
+      {
+        entry = state->first_search_history_entry = state->last_search_history_entry =
+          (search_history_entry_t*)state->search_history_buffer;
+        entry->prev = entry->next = 0;
+      }
+    }
+
+    if((u8*)entry + entry_size > buffer_end)
+    {
+      entry = 0;
+    }
+
+    if(entry)
+    {
+      entry->str.data = (u8*)entry + sizeof(*entry);
+      entry->str.size = str.size;
+      copy_bytes(str.size, str.data, entry->str.data);
+      got_added = true;
+    }
+  }
+
+  return got_added;
 }
 
 int main(int argc, char** argv)
@@ -2464,7 +2544,6 @@ int main(int argc, char** argv)
 
         refresh_input_paths(state);
 
-        state->search_history_entries[0].data = state->search_history_buffer;
         {
           char* search_history_envvar = getenv("I2X_SEARCH_HISTORY");
 #if !ALWAYS_PERSIST_SEARCH_HISTORY
@@ -2501,47 +2580,34 @@ int main(int argc, char** argv)
                 int read_start = max(0, file_size - (int)(sizeof(state->search_history_buffer) / 2));
                 int read_length = file_size - read_start;
                 fseek(state->search_history_file, read_start, SEEK_SET);
-                if(fread(state->search_history_buffer, 1, read_length, state->search_history_file) == read_length)
+                u8* contents = (u8*)malloc(read_length);
+                if(contents)
                 {
-                  u8* p = state->search_history_buffer;
-                  u8* history_end = state->search_history_buffer + read_length;
-
-                  if(read_start != 0)
+                  if(fread(contents, 1, read_length, state->search_history_file) == read_length)
                   {
-                    while(p < history_end && *p != '\n' && *p != '\r') { ++p; }
-                  }
+                    u8* p = contents;
+                    u8* contents_end = contents + read_length;
 
-                  while(p < history_end)
-                  {
-                    str_t entry = { p };
-                    while(p < history_end && *p != '\n' && *p != '\r') { ++p; }
-                    entry.size = p - entry.data;
-                    while(p < history_end && (*p == '\n' || *p == '\r')) { ++p; }
-
-                    if(entry.size > 0)
+                    if(read_start != 0)
                     {
-                      if(state->current_search_history_entry_idx < array_count(state->search_history_entries) - 1)
+                      while(p < contents_end && *p != '\n' && *p != '\r') { ++p; }
+                    }
+
+                    while(p < contents_end)
+                    {
+                      str_t str = { p };
+                      while(p < contents_end && *p != '\n' && *p != '\r') { ++p; }
+                      str.size = p - str.data;
+                      while(p < contents_end && (*p == '\n' || *p == '\r')) { ++p; }
+
+                      if(str.size > 0)
                       {
-                        if(state->current_search_history_entry_idx == 0 ||
-                            !str_eq(entry, state->search_history_entries[state->current_search_history_entry_idx - 1]))
-                        {
-                          state->search_history_entries[state->current_search_history_entry_idx] = entry;
-                          ++state->current_search_history_entry_idx;
-                        }
-                      }
-                      else
-                      {
-                        // TODO: Reuse first history entries again.
+                        add_search_history_entry(state, str);
                       }
                     }
                   }
 
-                  if(state->current_search_history_entry_idx > 0)
-                  {
-                    str_t last_entry = state->search_history_entries[state->current_search_history_entry_idx - 1];
-                    state->search_history_entries[state->current_search_history_entry_idx].data =
-                      last_entry.data + last_entry.size;
-                  }
+                  free(contents);
                 }
               }
             }
@@ -2551,6 +2617,7 @@ int main(int argc, char** argv)
             }
           }
         }
+        add_search_history_entry(state, str(""));
 
         if(sort_mode_needs_metadata(state->sort_mode))
         {
@@ -3321,7 +3388,7 @@ int main(int argc, char** argv)
                         state->prev_filtered_img_count = state->filtered_img_count;
                         state->sorted_idx_viewed_before_search = find_sorted_idx_of_img_idx(state,
                             state->filtered_img_idxs[state->viewing_filtered_img_idx]);
-                        state->selected_search_history_entry_idx = state->current_search_history_entry_idx;
+                        state->selected_search_history_entry = state->last_search_history_entry;
 
                         search_changed = true;
                         state->search_str_adjusted = false;
@@ -3337,9 +3404,12 @@ int main(int argc, char** argv)
                         state->filtered_img_count = state->prev_filtered_img_count;
                         for_count(i, state->filtered_img_count) { state->filtered_img_idxs[i] = state->prev_filtered_img_idxs[i]; }
 
-                        str_t last_history_entry = state->search_history_entries[state->current_search_history_entry_idx];
-                        copy_bytes(last_history_entry.size, last_history_entry.data, state->search_str.data);
-                        state->search_str.size = last_history_entry.size;
+                        if(state->last_search_history_entry)
+                        {
+                          str_t last_history_entry = state->last_search_history_entry->str;
+                          copy_bytes(last_history_entry.size, last_history_entry.data, state->search_str.data);
+                          state->search_str.size = last_history_entry.size;
+                        }
 
                         state->viewing_filtered_img_idx = find_filtered_idx_of_img_idx(state,
                             state->sorted_img_idxs[state->sorted_idx_viewed_before_search]);
@@ -3349,37 +3419,15 @@ int main(int argc, char** argv)
                       {
                         state->filtering_modal = false;
 
-                        str_t last_history_entry = state->search_history_entries[state->current_search_history_entry_idx];
-                        if(!str_eq(state->search_str, last_history_entry))
-                            // && (state->search_str.size == 0 ||
-                            //  state->current_search_history_entry_idx == 0 ||
-                            //  !str_eq(state->search_str,  // There may be an empty-string entry since the last duplicate.
-                            //    state->search_history_entries[state->current_search_history_entry_idx - 1])))
+                        if(add_search_history_entry(state, state->search_str) &&
+                            state->search_history_file && state->search_str.size > 0)
                         {
-                          if(state->current_search_history_entry_idx < array_count(state->search_history_entries) &&
-                              last_history_entry.data + last_history_entry.size + state->search_str.size <=
-                              state->search_history_buffer + sizeof(state->search_history_buffer))
+                          // Seek to end in case another i2x instance also appended.
+                          if(fseek(state->search_history_file, 0, SEEK_END) != -1)
                           {
-                            ++state->current_search_history_entry_idx;
-                            str_t* new_history_entry = &state->search_history_entries[state->current_search_history_entry_idx];
-                            new_history_entry->data = last_history_entry.data + last_history_entry.size;
-                            new_history_entry->size = state->search_str.size;
-                            copy_bytes(state->search_str.size, state->search_str.data, new_history_entry->data);
-                          }
-                          else
-                          {
-                            // TODO: Reuse first history entries again.
-                          }
-
-                          if(state->search_str.size > 0 && state->search_history_file)
-                          {
-                            // Seek to end in case another i2x instance also appended.
-                            if(fseek(state->search_history_file, 0, SEEK_END) != -1)
-                            {
-                              fwrite(state->search_str.data, 1, state->search_str.size, state->search_history_file);
-                              fwrite("\n", 1, 1, state->search_history_file);
-                              fflush(state->search_history_file);
-                            }
+                            fwrite(state->search_str.data, 1, state->search_str.size, state->search_history_file);
+                            fwrite("\n", 1, 1, state->search_history_file);
+                            fflush(state->search_history_file);
                           }
                         }
                       }
@@ -3489,7 +3537,7 @@ int main(int argc, char** argv)
                       else if(keysym == XK_Up || keysym == XK_Down)
                       {
                         // Search history.
-                        if(state->current_search_history_entry_idx > 0)
+                        if(state->selected_search_history_entry)
                         {
                           b32 going_up = (keysym == XK_Up);
                           str_t search_prefix = {0};
@@ -3499,20 +3547,21 @@ int main(int argc, char** argv)
                             search_prefix.size = state->selection_end;
                           }
 
-                          i32 step = (going_up ? -1 : 1);
-                          for(i32 entry_idx = state->selected_search_history_entry_idx + step;
-                              entry_idx != (going_up ? -1 : state->current_search_history_entry_idx + 1);
-                              entry_idx += step)
+                          for(search_history_entry_t* entry =
+                                going_up
+                                ? state->selected_search_history_entry->prev
+                                : state->selected_search_history_entry->next;
+                              entry;
+                              entry = going_up ? entry->prev : entry->next)
                           {
-                            str_t entry = state->search_history_entries[entry_idx];
-                            if(entry.size > 0)
+                            if(entry->str.size > 0)
                             {
-                              str_t entry_prefix = { entry.data, min(entry.size, search_prefix.size) };
-                              if(str_eq(entry_prefix, search_prefix) && !str_eq(entry, state->search_str))
+                              str_t entry_prefix = { entry->str.data, min(entry->str.size, search_prefix.size) };
+                              if(str_eq(entry_prefix, search_prefix) && !str_eq(entry->str, state->search_str))
                               {
-                                state->selected_search_history_entry_idx = entry_idx;
-                                copy_bytes(entry.size, entry.data, state->search_str.data);
-                                state->search_str.size = entry.size;
+                                state->selected_search_history_entry = entry;
+                                copy_bytes(entry->str.size, entry->str.data, state->search_str.data);
+                                state->search_str.size = entry->str.size;
                                 if(!state->search_str_adjusted)
                                 {
                                   state->selection_end = state->search_str.size;
@@ -5902,7 +5951,7 @@ _search_end_label:
                 SHOW_LABEL_VALUE("Toggle nearest-pixel filtering", "N");
                 SHOW_LABEL_VALUE("Toggle bright/dark mode", "B");
                 SHOW_LABEL_VALUE("Copy positive prompt (WIP)", "Shift + Ctrl + C (might not work if there are marked images)");
-                SHOW_LABEL_VALUE("Refresh images (WIP)", "Ctrl + R");
+                SHOW_LABEL_VALUE("Refresh images", "Ctrl + R");
               }
               else if(state->help_tab_idx == 1)
               {
