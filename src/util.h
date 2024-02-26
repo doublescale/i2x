@@ -52,6 +52,7 @@ typedef double r64;
 #endif
 
 #define malloc_array(count, type) ((type*)malloc((count) * sizeof(type)))
+#define malloc_array_zero(count, type) ((type*)zero_bytes((count) * sizeof(type), malloc((count) * sizeof(type))))
 #define malloc_struct(type) malloc_array(1, type)
 
 // Modulo, but positive.
@@ -100,7 +101,7 @@ internal b32 v3u8_eq(v3u8 a, v3u8 b)
   return a.x == b.x && a.y == b.y && a.z == b.z;
 }
 
-internal void zero_bytes(u64 size, void* data)
+internal void* zero_bytes(u64 size, void* data)
 {
   for(u64 i = 0;
       i < size;
@@ -108,6 +109,8 @@ internal void zero_bytes(u64 size, void* data)
   {
     ((u8*)data)[i] = 0;
   }
+
+  return data;
 }
 
 internal void copy_bytes(u64 size, void* from, void* to)

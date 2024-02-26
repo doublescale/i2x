@@ -95,7 +95,7 @@ typedef struct
 {
   i32 entry_idx;
 
-  u64 loaded_at_time;
+  u32 load_generation;
 
   i32 w;
   i32 h;
@@ -153,7 +153,7 @@ typedef struct img_entry_t
   i32 w;
   i32 h;
   u8* pixels;
-  u64 loaded_at_time;
+  u32 load_generation;
   GLuint texture_id;
   i64 bytes_used;
   u32 random_number;
@@ -289,7 +289,7 @@ typedef struct
   u8 search_history_buffer[4 * 1024 * 1024];
   str_t search_str;
   b32 search_str_adjusted;
-  str_t search_history_entries[1024];
+  str_t search_history_entries[64 * 1024];
   FILE* search_history_file;
   // i32 first_search_history_entry_idx;  // TODO: Make the history a ring-buffer.
   i32 current_search_history_entry_idx;
@@ -761,18 +761,9 @@ internal void* loader_fun(void* raw_data)
         break;
       }
 
+      u32 load_generation = img_entry->load_generation;
       if(__sync_bool_compare_and_swap(&img_entry->load_state, LOAD_STATE_UNLOADED, LOAD_STATE_LOADING))
       {
-        struct statx file_stats = {0};
-        u64 timestamp = 0;
-        if(statx(AT_FDCWD, (char*)img_entry->path.data, AT_STATX_SYNC_AS_STAT, STATX_MTIME | STATX_SIZE, &file_stats) != -1)
-        {
-          // printf("\nFile %.*s:\n", (int)img_entry->path.size, img_entry->path.data);
-          // printf("  size: %llu\n", file_stats.stx_size);
-          // printf("  modify time: %lli %u\n", file_stats.stx_mtime.tv_sec, file_stats.stx_mtime.tv_nsec);
-          timestamp = (((u64)file_stats.stx_mtime.tv_sec << 32) | (u64)file_stats.stx_mtime.tv_nsec);
-        }
-
         i64 loaded_img_id = __sync_fetch_and_add(&shared->next_loaded_img_id, 1);
         loaded_img_t* loaded_img = &shared->loaded_imgs[loaded_img_id % array_count(shared->loaded_imgs)];
 
@@ -781,58 +772,48 @@ internal void* loader_fun(void* raw_data)
           printf("WARNING: Loaded image slot %ld was not unloaded, but will be overwritten!\n", loaded_img_id);
         }
 
-        loaded_img->loaded_at_time = timestamp;
+        loaded_img->load_generation = load_generation;
         loaded_img->entry_idx = img_idx;
 
-        if(img_entry->pixels && img_entry->loaded_at_time >= timestamp)
+        // printf("Loader %d [%5d/%d] %s\n", thread_idx, img_idx, shared->total_img_count, img_entry->path.data);
+
+        loaded_img->bytes_used = 0;
+        i32 original_channel_count = 0;
+        loaded_img->pixels = stbi_load((char*)img_entry->path.data,  // XXX: This path string may have been freed!
+            &loaded_img->w, &loaded_img->h, &original_channel_count, 4);
+
+        if(!loaded_img->pixels)
         {
-          loaded_img->w = img_entry->w;
-          loaded_img->h = img_entry->h;
-          loaded_img->pixels = img_entry->pixels;
-          loaded_img->bytes_used = img_entry->bytes_used;
+          loaded_img->w = 0;
+          loaded_img->h = 0;
         }
         else
         {
-          // printf("Loader %d [%5d/%d] %s\n", thread_idx, img_idx, shared->total_img_count, img_entry->path.data);
-
-          loaded_img->bytes_used = 0;
-          i32 original_channel_count = 0;
-          loaded_img->pixels = stbi_load((char*)img_entry->path.data,
-              &loaded_img->w, &loaded_img->h, &original_channel_count, 4);
-
-          if(!loaded_img->pixels)
-          {
-            loaded_img->w = 0;
-            loaded_img->h = 0;
-          }
-          else
-          {
-            loaded_img->bytes_used = 4 * loaded_img->w * loaded_img->h;
-            __sync_fetch_and_add(&shared->total_bytes_used, loaded_img->bytes_used);
-            thread_bytes_used += loaded_img->bytes_used;
+          loaded_img->bytes_used = 4 * loaded_img->w * loaded_img->h;
+          __sync_fetch_and_add(&shared->total_bytes_used, loaded_img->bytes_used);
+          thread_bytes_used += loaded_img->bytes_used;
 
 #if 1
-            if(original_channel_count == 4)
+          if(original_channel_count == 4)
+          {
+            // Premultiply alpha.
+            // printf("Premultiplying alpha.\n");
+            for(u64 i = 0; i < (u64)loaded_img->w * (u64)loaded_img->h; ++i)
             {
-              // Premultiply alpha.
-              // printf("Premultiplying alpha.\n");
-              for(u64 i = 0; i < (u64)loaded_img->w * (u64)loaded_img->h; ++i)
+              if(loaded_img->pixels[4*i + 3] != 255)
               {
-                if(loaded_img->pixels[4*i + 3] != 255)
-                {
-                  r32 r = loaded_img->pixels[4*i + 0] / 255.0f;
-                  r32 g = loaded_img->pixels[4*i + 1] / 255.0f;
-                  r32 b = loaded_img->pixels[4*i + 2] / 255.0f;
-                  r32 a = loaded_img->pixels[4*i + 3] / 255.0f;
+                r32 r = loaded_img->pixels[4*i + 0] / 255.0f;
+                r32 g = loaded_img->pixels[4*i + 1] / 255.0f;
+                r32 b = loaded_img->pixels[4*i + 2] / 255.0f;
+                r32 a = loaded_img->pixels[4*i + 3] / 255.0f;
 
-                  loaded_img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
-                  loaded_img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
-                  loaded_img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
-                }
+                loaded_img->pixels[4*i + 0] = (u8)(255.0f * a * r + 0.5f);
+                loaded_img->pixels[4*i + 1] = (u8)(255.0f * a * g + 0.5f);
+                loaded_img->pixels[4*i + 2] = (u8)(255.0f * a * b + 0.5f);
               }
             }
-#endif
           }
+#endif
         }
 
         __sync_synchronize();
@@ -1638,27 +1619,48 @@ internal void refresh_input_paths(state_t* state)
       i32 img_idx = state->total_img_count++;
       img_entry_t* img = &state->img_entries[img_idx];
       str_t old_path = img->path;
-      img->path = wrap_str(paths[path_idx]);
-      if(!str_eq(img->path, old_path))
+      str_t new_path = wrap_str(paths[path_idx]);
+      b32 path_changed = !str_eq(old_path, new_path);
+
+      if(path_changed)
       {
-        img->loaded_at_time = 0;
-        img->bytes_used = 0;
-        unload_texture(state, img);
-        // TODO: Increment some sort of reload-generation ID
-        //        to distinguish outdated loaded data.
+        img->path = new_path;
+        // TODO: Right now, this will leak the memory of the old paths.
+        //       Those must be freed up, without risking the loader threads
+        //       trying to read from that freed memory.
+        //       Also, changing the path while the loaders are running might be problematic.
       }
       else
       {
-        img->load_state = LOAD_STATE_UNLOADED;
+        if(new_path.data)
+        {
+          free(new_path.data);
+          zero_struct(new_path);
+        }
       }
 
-      if(old_path.data) { free(old_path.data); }
-
+      b32 timestamp_may_have_changed = true;
       struct stat stats = {0};
-      if(stat(paths[path_idx], &stats) == 0)
+      if(stat((char*)img->path.data, &stats) == 0)
       {
-        img->filesize = stats.st_size;
+        if(stats.st_mtim.tv_sec == img->modified_at_time.tv_sec &&
+            stats.st_mtim.tv_nsec == img->modified_at_time.tv_nsec)
+        {
+          timestamp_may_have_changed = false;
+        }
         img->modified_at_time = stats.st_mtim;
+        img->filesize = stats.st_size;
+      }
+
+      if(path_changed || timestamp_may_have_changed)
+      {
+        unload_texture(state, img);
+        img->bytes_used = 0;
+
+        // If this image is still being loaded, it should be re-triggered by the
+        // code handling the loaded image, since load_generation will differ.
+        ++img->load_generation;
+        img->load_state = LOAD_STATE_UNLOADED;
       }
 
       if(!img->random_number)
@@ -1681,6 +1683,8 @@ internal void refresh_input_paths(state_t* state)
   }
 
   free(paths);
+  for_count(i, state->total_img_count) { state->sorted_img_idxs[i] = i; }
+  qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
   reset_filtered_images(state);
   if(new_viewing_img_idx != -1)
   {
@@ -2315,16 +2319,11 @@ int main(int argc, char** argv)
         }
 
         state->total_img_capacity = max(state->input_path_count, 128 * 1024);
-        state->img_entries = malloc_array(state->total_img_capacity, img_entry_t);
-        zero_bytes(state->total_img_capacity * sizeof(img_entry_t), state->img_entries);
-        state->sorted_img_idxs = malloc_array(state->total_img_capacity, i32);
-        for_count(i, state->total_img_capacity) { state->sorted_img_idxs[i] = i; }
-        state->prev_sorted_img_idxs = malloc_array(state->total_img_capacity, i32);
-        for_count(i, state->total_img_capacity) { state->prev_sorted_img_idxs[i] = i; }
-        state->filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
-        zero_bytes(state->total_img_capacity * sizeof(i32), state->filtered_img_idxs);
-        state->prev_filtered_img_idxs = malloc_array(state->total_img_capacity, i32);
-        zero_bytes(state->total_img_capacity * sizeof(i32), state->prev_filtered_img_idxs);
+        state->img_entries = malloc_array_zero(state->total_img_capacity, img_entry_t);
+        state->sorted_img_idxs = malloc_array_zero(state->total_img_capacity, i32);
+        state->prev_sorted_img_idxs = malloc_array_zero(state->total_img_capacity, i32);
+        state->filtered_img_idxs = malloc_array_zero(state->total_img_capacity, i32);
+        state->prev_filtered_img_idxs = malloc_array_zero(state->total_img_capacity, i32);
 
         sem_init(&state->metadata_loader_semaphore, 0, 0);
         pthread_create(&state->metadata_loader_thread, 0, metadata_loader_fun, state);
@@ -2419,16 +2418,17 @@ int main(int argc, char** argv)
           }
         }
 
-        if(sort_mode_needs_metadata(state->sort_mode) && !open_single_directory_on.size)
+        if(sort_mode_needs_metadata(state->sort_mode))
         {
           while(state->metadata_loaded_count < state->total_img_count)
           {
             usleep(100000);
           }
-        }
+          state->all_metadata_loaded = true;
 
-        qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
-        reset_filtered_images(state);
+          qsort_r(state->sorted_img_idxs, state->total_img_count, sizeof(state->sorted_img_idxs[0]), compare_img_entries, state);
+          reset_filtered_images(state);
+        }
 
         if(open_single_directory_on.size)
         {
@@ -2661,34 +2661,27 @@ int main(int argc, char** argv)
               // printf("Uploading loaded ID %ld (entry %d).\n", shared->next_finalized_img_id, loaded_img->entry_idx);
 
               img_entry_t* img_entry = &state->img_entries[loaded_img->entry_idx];
-              b32 pixels_changed = (img_entry->pixels != loaded_img->pixels);
-              if(img_entry->pixels && pixels_changed)
+              if(loaded_img->load_generation == img_entry->load_generation)
               {
                 unload_texture(state, img_entry);
-              }
-              img_entry->loaded_at_time = loaded_img->loaded_at_time;
-              img_entry->w = loaded_img->w;
-              img_entry->h = loaded_img->h;
-              img_entry->pixels = loaded_img->pixels;
-              img_entry->bytes_used = loaded_img->bytes_used;
-              img_entry->load_state = LOAD_STATE_LOADED_INTO_RAM;
-              __sync_synchronize();
-              loaded_img->load_state = LOAD_STATE_UNLOADED;
+                img_entry->w = loaded_img->w;
+                img_entry->h = loaded_img->h;
+                img_entry->pixels = loaded_img->pixels;
+                img_entry->bytes_used = loaded_img->bytes_used;
+                img_entry->load_state = LOAD_STATE_LOADED_INTO_RAM;
 
-              if(!img_entry->pixels)
-              {
-                img_entry->flags |= IMG_FLAG_FAILED_TO_LOAD;
-              }
-              else
-              {
-                img_entry->flags &= ~IMG_FLAG_FAILED_TO_LOAD;
-
-                if(pixels_changed)
+                if(!img_entry->pixels)
                 {
+                  img_entry->flags |= IMG_FLAG_FAILED_TO_LOAD;
+                }
+                else
+                {
+                  img_entry->flags &= ~IMG_FLAG_FAILED_TO_LOAD;
+
                   assert(!img_entry->lru_prev);
                   assert(!img_entry->lru_next);
 
-                  // Insert at front of LRU chain.
+                  // Insert at front of LRU chain so this image doesn't get immediately unloaded.
                   if(!state->lru_first)
                   {
                     state->lru_first = img_entry;
@@ -2702,6 +2695,18 @@ int main(int argc, char** argv)
                   }
                 }
               }
+              else
+              {
+                if(loaded_img->pixels)
+                {
+                  stbi_image_free(loaded_img->pixels);
+                  loaded_img->pixels = 0;
+                  __sync_fetch_and_sub(&state->shared.total_bytes_used, loaded_img->bytes_used);
+                }
+                img_entry->load_state = LOAD_STATE_UNLOADED;
+              }
+              __sync_synchronize();
+              loaded_img->load_state = LOAD_STATE_UNLOADED;
 
               ++uploaded_count;
               ++shared->next_finalized_img_id;
@@ -2771,9 +2776,7 @@ int main(int argc, char** argv)
               }
             }
 
-            if(got_notification
-                && state->filtered_img_count == state->total_img_count  // Avoid losing filtered view.
-              )
+            if(got_notification)
             {
               refresh_input_paths(state);
               signal_loaders = true;
@@ -4405,7 +4408,6 @@ int main(int argc, char** argv)
 
             state->viewing_filtered_img_idx = 0;
             scroll_thumbnail_into_view = true;
-            need_to_sort = false;
             dirty = true;
             signal_loaders = true;
           }
