@@ -297,6 +297,7 @@ typedef struct
   b32 filtering_modal;
   u8 search_str_buffer[64 * 1024];
   str_t search_str;
+  b32 search_changed;
   b32 search_str_adjusted;
   i32 sorted_idx_viewed_before_search;
   i64 selection_start;
@@ -2181,6 +2182,22 @@ internal b32 add_search_history_entry(state_t* state, str_t str)
   return got_added;
 }
 
+internal void start_search(state_t* state)
+{
+  state->filtering_modal = true;
+
+  state->selection_start = state->search_str.size;
+  state->selection_end   = state->search_str.size;
+  for_count(i, state->filtered_img_count) { state->prev_filtered_img_idxs[i] = state->filtered_img_idxs[i]; }
+  state->prev_filtered_img_count = state->filtered_img_count;
+  state->sorted_idx_viewed_before_search = find_sorted_idx_of_img_idx(state,
+      state->filtered_img_idxs[state->viewing_filtered_img_idx]);
+  state->selected_search_history_entry = state->last_search_history_entry;
+
+  state->search_changed = true;
+  state->search_str_adjusted = false;
+}
+
 int main(int argc, char** argv)
 {
 #if !RELEASE
@@ -2225,6 +2242,7 @@ int main(int argc, char** argv)
     printf("                     path, time, filesize, random, pixelcount*, prompt*, model*, score*.\n");
     printf("                     Can be suffixed by \"_desc\" for descending (default is ascending).\n");
     printf("                     *: Orderings which depend on metadata may delay startup.\n");
+    printf("I2X_INIT_SEARCH:     Starts up with the given search query active.\n");
     printf("I2X_SEARCH_HISTORY:  When set, persists the search history to disk.\n");
     printf("                     The string this is set to determines the path.\n");
     printf("                     When set to an empty string, defaults to:\n");
@@ -2648,6 +2666,17 @@ int main(int argc, char** argv)
           }
         }
 
+        state->search_str.data = state->search_str_buffer;
+        {
+          char* init_search_envvar = getenv("I2X_INIT_SEARCH");
+          if(init_search_envvar)
+          {
+            state->search_str.size = zstr_length(init_search_envvar);
+            copy_bytes(state->search_str.size, init_search_envvar, state->search_str.data);
+            start_search(state);
+          }
+        }
+
         state->font_texture_w = 512;
         state->font_texture_h = 512;
         state->font_char_w = 32;
@@ -2790,7 +2819,6 @@ int main(int argc, char** argv)
         state->thumbnail_columns = 2;
         i32 hovered_thumbnail_idx = -1;
         // state->show_info = 2;
-        state->search_str.data = state->search_str_buffer;
         state->info_panel_width_ratio = 0.2f;
 
         str_t help_tab_labels[] = {
@@ -2831,7 +2859,6 @@ int main(int argc, char** argv)
         {
           b32 dirty = false;
           b32 signal_loaders = false;
-          b32 search_changed = false;
           b32 need_to_sort = false;
           b32 sort_triggered_by_incomplete_metadata = false;
 
@@ -2938,7 +2965,7 @@ int main(int argc, char** argv)
           {
             // printf("Loading metadata %d/%d\n", state->metadata_loaded_count, state->total_img_count);
             dirty = true;
-            search_changed = true;
+            state->search_changed = true;
 
             if(sort_mode_needs_metadata(state->sort_mode))
             {
@@ -3404,23 +3431,6 @@ int main(int argc, char** argv)
                       clamp_thumbnail_scroll_rows(state);
                     }
 
-                    else if(!state->sorting_modal && (ctrl_held && keysym == 'f' || !state->filtering_modal && keysym == '/'))
-                    {
-                      bflip(state->filtering_modal);
-                      if(state->filtering_modal)
-                      {
-                        state->selection_start = state->search_str.size;
-                        state->selection_end   = state->search_str.size;
-                        for_count(i, state->filtered_img_count) { state->prev_filtered_img_idxs[i] = state->filtered_img_idxs[i]; }
-                        state->prev_filtered_img_count = state->filtered_img_count;
-                        state->sorted_idx_viewed_before_search = find_sorted_idx_of_img_idx(state,
-                            state->filtered_img_idxs[state->viewing_filtered_img_idx]);
-                        state->selected_search_history_entry = state->last_search_history_entry;
-
-                        search_changed = true;
-                        state->search_str_adjusted = false;
-                      }
-                    }
                     else if(!state->sorting_modal && state->filtering_modal)
                     {
                       if(0) {}
@@ -3476,7 +3486,7 @@ int main(int argc, char** argv)
                         {
                           str_replace_selection(0, &state->search_str,
                               &state->selection_start, &state->selection_end, str(""));
-                          search_changed = true;
+                          state->search_changed = true;
                           state->search_str_adjusted = true;
                         }
                         XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
@@ -3494,7 +3504,7 @@ int main(int argc, char** argv)
                         }
                         str_replace_selection(0, &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
-                        search_changed = true;
+                        state->search_changed = true;
                         state->search_str_adjusted = true;
                       }
                       else if(keysym == XK_Delete)
@@ -3506,7 +3516,7 @@ int main(int argc, char** argv)
                         }
                         str_replace_selection(0, &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
-                        search_changed = true;
+                        state->search_changed = true;
                         state->search_str_adjusted = true;
                       }
                       else if(keysym == XK_Left)
@@ -3594,7 +3604,7 @@ int main(int argc, char** argv)
                                   state->selection_end = state->search_str.size;
                                 }
                                 state->selection_start = state->selection_end;
-                                search_changed = true;
+                                state->search_changed = true;
                                 break;
                               }
                             }
@@ -3624,11 +3634,15 @@ int main(int argc, char** argv)
                           if(str_replace_selection(sizeof(state->search_str_buffer), &state->search_str,
                                 &state->selection_start, &state->selection_end, entered_str))
                           {
-                            search_changed = true;
+                            state->search_changed = true;
                             state->search_str_adjusted = true;
                           }
                         }
                       }
+                    }
+                    else if(!state->sorting_modal && (ctrl_held && keysym == 'f' || keysym == '/'))
+                    {
+                      start_search(state);
                     }
 
                     else if(keysym == XK_Up || keysym == 'k')
@@ -4157,7 +4171,7 @@ int main(int argc, char** argv)
                       str_replace_selection(sizeof(state->search_str_buffer),
                           &state->search_str, &state->selection_start, &state->selection_end,
                           str_from_start_and_size(data, item_count));
-                      search_changed = true;
+                      state->search_changed = true;
                     }
                     else
                     {
@@ -4625,7 +4639,7 @@ int main(int argc, char** argv)
           }
 
           // Search.
-          if(state->filtering_modal && search_changed)
+          if(state->filtering_modal && state->search_changed)
           {
             if(state->search_str.size == 0)
             {
@@ -5073,6 +5087,7 @@ _search_end_label:
 
             dirty = true;
             scroll_thumbnail_into_view = true;
+            state->search_changed = false;
           }
 
           if(dirty)
@@ -5614,7 +5629,8 @@ _search_end_label:
               }
 
               y -= fs;
-              if(state->metadata_loaded_count <= viewing_img_idx)
+              if(img->metadata_generation != img->load_generation &&
+                  state->metadata_loaded_count <= viewing_img_idx)
               {
                 SHOW_LABEL_VALUE("Loading metadata...", str(" "));
               }
