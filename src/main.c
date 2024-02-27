@@ -297,8 +297,8 @@ typedef struct
   b32 filtering_modal;
   u8 search_str_buffer[64 * 1024];
   str_t search_str;
-  b32 search_changed;
-  b32 search_str_adjusted;
+  b32 search_changed;  // This only counts edits.
+  b32 search_tweaked;  // This also counts moving the cursor.
   i32 sorted_idx_viewed_before_search;
   i64 selection_start;
   i64 selection_end;
@@ -2195,7 +2195,7 @@ internal void start_search(state_t* state)
   state->selected_search_history_entry = state->last_search_history_entry;
 
   state->search_changed = true;
-  state->search_str_adjusted = false;
+  state->search_tweaked = false;
 }
 
 int main(int argc, char** argv)
@@ -3487,7 +3487,7 @@ int main(int argc, char** argv)
                           str_replace_selection(0, &state->search_str,
                               &state->selection_start, &state->selection_end, str(""));
                           state->search_changed = true;
-                          state->search_str_adjusted = true;
+                          state->search_tweaked = true;
                         }
                         XSetSelectionOwner(display, atom_clipboard, window, CurrentTime);
                       }
@@ -3505,7 +3505,7 @@ int main(int argc, char** argv)
                         str_replace_selection(0, &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
                         state->search_changed = true;
-                        state->search_str_adjusted = true;
+                        state->search_tweaked = true;
                       }
                       else if(keysym == XK_Delete)
                       {
@@ -3517,7 +3517,7 @@ int main(int argc, char** argv)
                         str_replace_selection(0, &state->search_str,
                             &state->selection_start, &state->selection_end, str(""));
                         state->search_changed = true;
-                        state->search_str_adjusted = true;
+                        state->search_tweaked = true;
                       }
                       else if(keysym == XK_Left)
                       {
@@ -3534,7 +3534,7 @@ int main(int argc, char** argv)
                         {
                           state->selection_start = state->selection_end;
                         }
-                        state->search_str_adjusted = true;
+                        state->search_tweaked = true;
                       }
                       else if(keysym == XK_Right)
                       {
@@ -3551,7 +3551,7 @@ int main(int argc, char** argv)
                         {
                           state->selection_start = state->selection_end;
                         }
-                        state->search_str_adjusted = true;
+                        state->search_tweaked = true;
                       }
                       else if(keysym == XK_Home)
                       {
@@ -3560,7 +3560,7 @@ int main(int argc, char** argv)
                           state->selection_start = 0;
                         }
                         state->selection_end = 0;
-                        state->search_str_adjusted = true;
+                        state->search_tweaked = true;
                       }
                       else if(keysym == XK_End)
                       {
@@ -3569,7 +3569,7 @@ int main(int argc, char** argv)
                           state->selection_start = state->search_str.size;
                         }
                         state->selection_end = state->search_str.size;
-                        state->search_str_adjusted = true;
+                        state->search_tweaked = true;
                       }
                       else if(keysym == XK_Up || keysym == XK_Down)
                       {
@@ -3578,7 +3578,7 @@ int main(int argc, char** argv)
                         {
                           b32 going_up = (keysym == XK_Up);
                           str_t search_prefix = {0};
-                          if(state->search_str_adjusted)
+                          if(state->search_tweaked)
                           {
                             search_prefix.data = state->search_str.data;
                             search_prefix.size = state->selection_end;
@@ -3599,7 +3599,7 @@ int main(int argc, char** argv)
                                 state->selected_search_history_entry = entry;
                                 copy_bytes(entry->str.size, entry->str.data, state->search_str.data);
                                 state->search_str.size = entry->str.size;
-                                if(!state->search_str_adjusted)
+                                if(!state->search_tweaked)
                                 {
                                   state->selection_end = state->search_str.size;
                                 }
@@ -3635,7 +3635,7 @@ int main(int argc, char** argv)
                                 &state->selection_start, &state->selection_end, entered_str))
                           {
                             state->search_changed = true;
-                            state->search_str_adjusted = true;
+                            state->search_tweaked = true;
                           }
                         }
                       }
@@ -4649,7 +4649,7 @@ int main(int argc, char** argv)
             }
             else
             {
-              i64 nsecs_search_start = get_nanoseconds();
+              // i64 nsecs_search_start = get_nanoseconds();
               // 24ms before change for "the quick brown fox jumps over the lazy dog" on ~/downloads/ComfyUI/output, optimized.
               // 27.5ms after change, bitset for non-excluded matches.
               // 24ms again if bitset is sparse with excluded matches.
@@ -4703,6 +4703,7 @@ int main(int argc, char** argv)
               search_item_t* first_steps_item = 0;
               search_item_t* first_cfg_item = 0;
               search_item_t* first_score_item = 0;
+              search_item_t* first_age_h_item = 0;
 
               // TODO: Separate bloom filter for each search task.
               u64 bloom = 0;
@@ -4781,6 +4782,7 @@ int main(int argc, char** argv)
                         { str("steps"), &first_steps_item, true },
                         { str("cfg"), &first_cfg_item, true },
                         { str("score"), &first_score_item, true },
+                        { str("age_h"), &first_age_h_item, true },
                       };
 
                       b32 keyword_found = false;
@@ -4931,6 +4933,9 @@ int main(int argc, char** argv)
               }
 #endif
 
+              struct timespec ts_now;
+              clock_gettime(CLOCK_REALTIME, &ts_now);
+
               for_count(sorted_idx, state->sorted_img_count)
               {
                 i32 img_idx = state->sorted_img_idxs[sorted_idx];
@@ -5033,6 +5038,7 @@ _search_end_label:
                     { true, (r32)img->h, first_height_item },
                     { true, (r32)(img->w * img->h), first_pixelcount_item },
                     { true, img->h == 0 ? 0 : (r32)img->w / (r32)img->h, first_aspect_item },
+                    { true, (r32)(ts_now.tv_sec - img->modified_at_time.tv_sec) / 3600.0f, first_age_h_item },
                     { (img->parameter_strings[IMG_STR_SAMPLING_STEPS].size > 0), img->parsed_r32s[PARSED_R32_SAMPLING_STEPS], first_steps_item },
                     { (img->parameter_strings[IMG_STR_CFG].size > 0), img->parsed_r32s[PARSED_R32_CFG], first_cfg_item },
                     { (img->parameter_strings[IMG_STR_SCORE].size > 0), img->parsed_r32s[PARSED_R32_SCORE], first_score_item },
@@ -5041,7 +5047,6 @@ _search_end_label:
                       search_task_idx < array_count(search_tasks);
                       ++search_task_idx)
                   {
-                    r32 img_r32 = search_tasks[search_task_idx].img_r32;
                     search_item_t* first_item = search_tasks[search_task_idx].first_item;
                     if(first_item)
                     {
@@ -5051,6 +5056,7 @@ _search_end_label:
                       }
                       else
                       {
+                        r32 img_r32 = search_tasks[search_task_idx].img_r32;
                         for(search_item_t* item = first_item;
                             item;
                             item = item->next)
@@ -5080,8 +5086,8 @@ _search_end_label:
                 }
               }
 
-              i64 nsecs_search_end = get_nanoseconds();
-              r64 msecs = 1e-6 * (nsecs_search_end - nsecs_search_start);
+              // i64 nsecs_search_end = get_nanoseconds();
+              // r64 msecs = 1e-6 * (nsecs_search_end - nsecs_search_start);
               // printf("%.3f ms for \"%.*s\"\n", msecs, PF_STR(state->search_str));
             }
 
@@ -5881,7 +5887,7 @@ _search_end_label:
               r32 box_x0 = 0.5f * (state->win_w - box_width);
               r32 box_x1 = 0.5f * (state->win_w + box_width);
               r32 box_y0 = 0;
-              r32 box_y1 = min(state->win_h, 32 * fs);
+              r32 box_y1 = min(state->win_h, 34 * fs);
 
               glScissor(box_x0, box_y0, box_x1 - box_x0, box_y1 - box_y0);
 
@@ -6007,7 +6013,8 @@ _search_end_label:
                       "Additional parameters can be specified with these special prefixes:\n"
                       "  f:<file path>  m:<model name>  n:<negative prompt>\n"
                       "  width:<op><w>  height:<op><h>  pixelcount:<op><w*h>  aspect:<op><w/h>\n"
-                      "  steps:<op><sampling steps>  cfg:<op><CFG value>  score:<op><score>\n"
+                      "  age_h:<op><hours>\n"
+                      "  steps:<op><sampling steps>  cfg:<op><CFG>  score:<op><score>\n"
                       "\n"
                       "EXAMPLE:  m:sd -f:bad|tmp m:0.9\n"
                       "This will match images created with a model that includes both \"sd\" and \"0.9\" "
