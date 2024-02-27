@@ -5318,17 +5318,12 @@ _search_end_label:
 
               glColor3f(1.0f, 1.0f, 1.0f);
               hovered_thumbnail_idx = -1;
-#if 0
-              for(i32 filtered_idx = first_visible_thumbnail_idx;
-                  filtered_idx <= last_visible_thumbnail_idx;
-                  ++filtered_idx)
-#else
+
               // Traverse the thumbnails backwards to update the LRU chain
               // in a way that avoids flickering loading/unloading.
               for(i32 filtered_idx = last_visible_thumbnail_idx;
                   filtered_idx >= first_visible_thumbnail_idx;
                   --filtered_idx)
-#endif
               {
                 img_entry_t* thumb = get_filtered_img(state, filtered_idx);
                 still_loading |= upload_img_texture(state, thumb);
@@ -5356,15 +5351,38 @@ _search_end_label:
                 {
                   glBindTexture(GL_TEXTURE_2D, 0);
 
-                  r32 gray = (filtered_idx == state->viewing_filtered_img_idx) ? (bright_bg ? 0.3f : 0.7f) : 0.5f;
-                  glColor3f(gray, gray, gray);
+                  b32 viewing_this = (filtered_idx == state->viewing_filtered_img_idx);
+                  r32 gray = viewing_this ? (bright_bg ? 0.1f : 0.9f) : 0.5f;
 
-                  glBegin(GL_QUADS);
-                  glVertex2f(box_x0, box_y0);
-                  glVertex2f(box_x1, box_y0);
-                  glVertex2f(box_x1, box_y1);
-                  glVertex2f(box_x0, box_y1);
+                  // TODO: Clamp these adjusted coordinates to screen pixels
+                  //       to make it look nicer at small sizes.
+                  r32 corner = 0.2f * thumbnail_h;
+                  glColor3f(gray, gray, gray);
+                  glBegin(GL_TRIANGLE_FAN);
+                  glVertex2f(0.5f * (box_x0 + box_x1), 0.5f * (box_y0 + box_y1));
+                  glVertex2f(box_x0 + corner, box_y0);
+                  glVertex2f(box_x1 - corner, box_y0);
+                  glVertex2f(box_x1,          box_y0 + corner);
+                  glVertex2f(box_x1,          box_y1 - corner);
+                  glVertex2f(box_x1 - corner, box_y1);
+                  glVertex2f(box_x0 + corner, box_y1);
+                  glVertex2f(box_x0,          box_y1 - corner);
+                  glVertex2f(box_x0,          box_y0 + corner);
+                  glVertex2f(box_x0 + corner, box_y0);
                   glEnd();
+
+                  if(viewing_this)
+                  {
+                    r32 inset_x = 0.04f * thumbnail_w;
+                    r32 inset_y = 0.04f * thumbnail_h;
+                    glColor3f(1 - gray, 1 - gray, 1 - gray);
+                    glBegin(GL_QUADS);
+                    glVertex2f(box_x0 + inset_x, box_y0 + inset_y);
+                    glVertex2f(box_x1 - inset_x, box_y0 + inset_y);
+                    glVertex2f(box_x1 - inset_x, box_y1 - inset_y);
+                    glVertex2f(box_x0 + inset_x, box_y1 - inset_y);
+                    glEnd();
+                  }
                 }
 
                 GLuint texture_id = 0;
