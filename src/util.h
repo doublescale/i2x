@@ -74,6 +74,12 @@ internal i32 i32_wrap_upto(i32 x, i32 y)
 
 typedef struct
 {
+  r32 x;
+  r32 y;
+} v2;
+
+typedef struct
+{
   i32 x;
   i32 y;
 } v2i;
