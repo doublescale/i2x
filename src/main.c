@@ -206,7 +206,7 @@ enum
   SORT_MODE_FILESIZE,
   SORT_MODE_RANDOM,
   SORT_MODE_PIXELCOUNT,
-  SORT_MODE_POSITIVE_PROMPT,
+  SORT_MODE_PROMPT,
   SORT_MODE_MODEL,
   SORT_MODE_SCORE,
 
@@ -228,7 +228,7 @@ enum
 {
   GROUP_MODE_NONE = 0,
   GROUP_MODE_DAY,
-  GROUP_MODE_POSITIVE_PROMPT,
+  GROUP_MODE_PROMPT,
   GROUP_MODE_MODEL,
 
   GROUP_MODE_COUNT,
@@ -310,6 +310,7 @@ typedef struct
   b32 grouping_modal;
   b32 need_to_layout;
   group_mode_t group_mode;
+  group_mode_t prev_group_mode;
   r32 last_layout_fs;
   r32 last_layout_thumbnail_h;
   r32 last_layout_filtered_img_count;
@@ -321,7 +322,7 @@ typedef struct
   i32 prev_filtered_img_count;
 
   i32 viewing_filtered_img_idx;
-  i32 target_column;
+  i32 target_thumbnail_column;
 
   u8 clipboard_str_buffer[64 * 1024];
   str_t clipboard_str;
@@ -1551,9 +1552,13 @@ internal int compare_img_entries(const void* void_a, const void* void_b, void* v
       result = COMPARE_SCALARS(pixels_a, pixels_b);
     } break;
 
-    case SORT_MODE_POSITIVE_PROMPT:
+    case SORT_MODE_PROMPT:
     {
       result = str_compare(img_a->parameter_strings[IMG_STR_POSITIVE_PROMPT], img_b->parameter_strings[IMG_STR_POSITIVE_PROMPT]);
+      if(!result)
+      {
+        result = str_compare(img_a->parameter_strings[IMG_STR_NEGATIVE_PROMPT], img_b->parameter_strings[IMG_STR_NEGATIVE_PROMPT]);
+      }
     } break;
 
     case SORT_MODE_MODEL:
@@ -2250,35 +2255,6 @@ internal r32 get_font_size(state_t* state)
   return fs;
 }
 
-internal str_t get_grouping_str(state_t* state, img_entry_t* img)
-{
-  static u8* tmp[256];
-  str_t result = {0};
-
-  switch(state->group_mode)
-  {
-    case GROUP_MODE_NONE:
-    {
-    } break;
-
-    case GROUP_MODE_DAY:
-    {
-    } break;
-
-    case GROUP_MODE_POSITIVE_PROMPT:
-    {
-      result = img->parameter_strings[IMG_STR_POSITIVE_PROMPT];
-    } break;
-
-    case GROUP_MODE_MODEL:
-    {
-      result = img->parameter_strings[IMG_STR_MODEL];
-    } break;
-  }
-
-  return result;
-}
-
 internal b32 group_eq(state_t* state, img_entry_t* a, img_entry_t* b)
 {
   b32 result = true;
@@ -2291,12 +2267,22 @@ internal b32 group_eq(state_t* state, img_entry_t* a, img_entry_t* b)
 
     case GROUP_MODE_DAY:
     {
-      result = (a->modified_at_time.tv_sec / 3600 / 24 == b->modified_at_time.tv_sec / 3600 / 24);
+      struct tm ta = {0};
+      struct tm tb = {0};
+      localtime_r(&a->modified_at_time.tv_sec, &ta);
+      localtime_r(&b->modified_at_time.tv_sec, &tb);
+      result = true
+        && ta.tm_year == tb.tm_year
+        && ta.tm_mon  == tb.tm_mon
+        && ta.tm_mday == tb.tm_mday
+        ;
     } break;
 
-    case GROUP_MODE_POSITIVE_PROMPT:
+    case GROUP_MODE_PROMPT:
     {
-      result = str_eq(a->parameter_strings[IMG_STR_POSITIVE_PROMPT], b->parameter_strings[IMG_STR_POSITIVE_PROMPT]);
+      result =
+        str_eq(a->parameter_strings[IMG_STR_POSITIVE_PROMPT], b->parameter_strings[IMG_STR_POSITIVE_PROMPT]) &&
+        str_eq(a->parameter_strings[IMG_STR_NEGATIVE_PROMPT], b->parameter_strings[IMG_STR_NEGATIVE_PROMPT]);
     } break;
 
     case GROUP_MODE_MODEL:
@@ -2339,9 +2325,13 @@ internal void group_and_layout_thumbnails(state_t* state)
           col = 0;
           y -= thumbnail_h;
         }
-        if(get_grouping_str(state, img).size)
+        if(state->group_mode != GROUP_MODE_NONE)
         {
           y -= 1.5f * fs;
+        }
+        if(state->group_mode == GROUP_MODE_PROMPT && img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].size > 0)
+        {
+          y -= fs;
         }
         ++current_group;
       }
@@ -2664,8 +2654,8 @@ int main(int argc, char** argv)
           else if(str_eq_ignoring_case(str, str("random_desc"))) { state->sort_mode = SORT_MODE_RANDOM; state->sort_descending = true; }
           else if(str_eq_ignoring_case(str, str("pixelcount"))) { state->sort_mode = SORT_MODE_PIXELCOUNT; state->sort_descending = false; }
           else if(str_eq_ignoring_case(str, str("pixelcount_desc"))) { state->sort_mode = SORT_MODE_PIXELCOUNT; state->sort_descending = true; }
-          else if(str_eq_ignoring_case(str, str("prompt"))) { state->sort_mode = SORT_MODE_POSITIVE_PROMPT; state->sort_descending = false; }
-          else if(str_eq_ignoring_case(str, str("prompt_desc"))) { state->sort_mode = SORT_MODE_POSITIVE_PROMPT; state->sort_descending = true; }
+          else if(str_eq_ignoring_case(str, str("prompt"))) { state->sort_mode = SORT_MODE_PROMPT; state->sort_descending = false; }
+          else if(str_eq_ignoring_case(str, str("prompt_desc"))) { state->sort_mode = SORT_MODE_PROMPT; state->sort_descending = true; }
           else if(str_eq_ignoring_case(str, str("model"))) { state->sort_mode = SORT_MODE_MODEL; state->sort_descending = false; }
           else if(str_eq_ignoring_case(str, str("model_desc"))) { state->sort_mode = SORT_MODE_MODEL; state->sort_descending = true; }
           else if(str_eq_ignoring_case(str, str("score"))) { state->sort_mode = SORT_MODE_SCORE; state->sort_descending = false; }
@@ -3824,34 +3814,53 @@ int main(int argc, char** argv)
 
                     else if(keysym == XK_Up || keysym == 'k')
                     {
-                      // TODO: Stop if row changed.
-                      state->target_column = min(state->target_column, state->thumbnail_columns - 1);
-                      for(i32 filtered_idx = state->viewing_filtered_img_idx - 1;
-                          filtered_idx >= 0;
-                          --filtered_idx)
+                      if(state->viewing_filtered_img_idx >= 0)
                       {
-                        if(state->img_entries[state->filtered_img_idxs[filtered_idx]].thumbnail_column
-                            == state->target_column)
+                        r32 start_y = get_filtered_img(state, state->viewing_filtered_img_idx)->thumbnail_y;
+                        state->target_thumbnail_column = min(state->target_thumbnail_column, state->thumbnail_columns - 1);
+                        for(i32 filtered_idx = state->viewing_filtered_img_idx - 1;
+                            filtered_idx >= 0;
+                            --filtered_idx)
                         {
-                          state->viewing_filtered_img_idx = filtered_idx;
-                          break;
+                          img_entry_t* img = get_filtered_img(state, filtered_idx);
+                          if(img->thumbnail_column <= state->target_thumbnail_column && img->thumbnail_y != start_y)
+                          {
+                            state->viewing_filtered_img_idx = filtered_idx;
+                            break;
+                          }
                         }
                       }
                       state->scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_Down || keysym == 'j')
                     {
-                      // TODO: Stop if row changed.
-                      state->target_column = min(state->target_column, state->thumbnail_columns - 1);
-                      for(i32 filtered_idx = state->viewing_filtered_img_idx + 1;
-                          filtered_idx < state->filtered_img_count;
-                          ++filtered_idx)
+                      if(state->viewing_filtered_img_idx >= 0)
                       {
-                        if(state->img_entries[state->filtered_img_idxs[filtered_idx]].thumbnail_column
-                            == state->target_column)
+                        r32 start_y = get_filtered_img(state, state->viewing_filtered_img_idx)->thumbnail_y;
+                        state->target_thumbnail_column = min(state->target_thumbnail_column, state->thumbnail_columns - 1);
+                        i32 row_changes = 0;
+                        for(i32 filtered_idx = state->viewing_filtered_img_idx + 1;
+                            filtered_idx < state->filtered_img_count;
+                            ++filtered_idx)
                         {
-                          state->viewing_filtered_img_idx = filtered_idx;
-                          break;
+                          img_entry_t* img = get_filtered_img(state, filtered_idx);
+                          if(img->thumbnail_y != start_y)
+                          {
+                            ++row_changes;
+                            start_y = img->thumbnail_y;
+                          }
+                          if(row_changes == 1 &&
+                              (img->thumbnail_column >= state->target_thumbnail_column
+                               || filtered_idx == state->filtered_img_count - 1))
+                          {
+                            state->viewing_filtered_img_idx = filtered_idx;
+                            break;
+                          }
+                          if(row_changes >= 2)
+                          {
+                            state->viewing_filtered_img_idx = filtered_idx - 1;
+                            break;
+                          }
                         }
                       }
                       state->scroll_thumbnail_into_view = true;
@@ -3859,13 +3868,15 @@ int main(int argc, char** argv)
                     else if(keysym == XK_Home || (!shift_held && !ctrl_held && keysym == 'g'))
                     {
                       state->viewing_filtered_img_idx = 0;
-                      state->target_column = state->img_entries[state->viewing_filtered_img_idx].thumbnail_column;
+                      state->target_thumbnail_column =
+                        state->img_entries[state->filtered_img_idxs[state->viewing_filtered_img_idx]].thumbnail_column;
                       state->scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == XK_End || (shift_held && !ctrl_held && keysym == 'g'))
                     {
                       state->viewing_filtered_img_idx = max(0, state->filtered_img_count - 1);
-                      state->target_column = state->img_entries[state->viewing_filtered_img_idx].thumbnail_column;
+                      state->target_thumbnail_column =
+                        state->img_entries[state->filtered_img_idxs[state->viewing_filtered_img_idx]].thumbnail_column;
                       state->scroll_thumbnail_into_view = true;
                     }
 
@@ -3946,7 +3957,7 @@ int main(int argc, char** argv)
                       }
                       else if(keysym == 'p')
                       {
-                        state->sort_mode = SORT_MODE_POSITIVE_PROMPT;
+                        state->sort_mode = SORT_MODE_PROMPT;
                         state->sort_descending = shift_held;
                         need_to_sort = true;
                       }
@@ -3977,35 +3988,62 @@ int main(int argc, char** argv)
                     else if(state->grouping_modal)
                     {
                       if(0) {}
-                      else if(keysym == XK_Escape || keysym == XK_Return || keysym == XK_KP_Enter)
+                      else if(keysym == XK_Escape)
                       {
                         state->grouping_modal = false;
+                        state->group_mode = state->prev_group_mode;
+                        state->scroll_thumbnail_into_view = true;
+                      }
+                      else if(keysym == XK_Return || keysym == XK_KP_Enter)
+                      {
+                        state->grouping_modal = false;
+                      }
+                      else if(keysym == XK_Left)
+                      {
+                        if(state->group_mode > 0)
+                        {
+                          --state->group_mode;
+                        }
+                        else
+                        {
+                          state->group_mode = GROUP_MODE_COUNT - 1;
+                        }
+                        state->scroll_thumbnail_into_view = true;
+                      }
+                      else if(keysym == XK_Right)
+                      {
+                        ++state->group_mode;
+                        if(state->group_mode >= GROUP_MODE_COUNT)
+                        {
+                          state->group_mode = 0;
+                        }
+                        state->scroll_thumbnail_into_view = true;
                       }
                       else if(keysym == 'o')
                       {
                         state->group_mode = GROUP_MODE_NONE;
-                        state->need_to_layout = true;
+                        state->scroll_thumbnail_into_view = true;
                       }
                       else if(keysym == 'd')
                       {
                         state->group_mode = GROUP_MODE_DAY;
-                        state->need_to_layout = true;
+                        state->scroll_thumbnail_into_view = true;
                       }
                       else if(keysym == 'p')
                       {
-                        state->group_mode = GROUP_MODE_POSITIVE_PROMPT;
-                        state->need_to_layout = true;
+                        state->group_mode = GROUP_MODE_PROMPT;
+                        state->scroll_thumbnail_into_view = true;
                       }
                       else if(keysym == 'm')
                       {
                         state->group_mode = GROUP_MODE_MODEL;
-                        state->need_to_layout = true;
+                        state->scroll_thumbnail_into_view = true;
                       }
                     }
                     else if(ctrl_held && keysym == 'g')
                     {
                       state->grouping_modal = true;
-                      printf("grup!\n");
+                      state->prev_group_mode = state->group_mode;
                     }
 
                     else if(keysym == XK_Escape)
@@ -4020,8 +4058,8 @@ int main(int argc, char** argv)
                       if(state->viewing_filtered_img_idx > 0)
                       {
                         state->viewing_filtered_img_idx -= 1;
+                        state->target_thumbnail_column = get_filtered_img(state, state->viewing_filtered_img_idx)->thumbnail_column;
                       }
-                      state->target_column = state->img_entries[state->viewing_filtered_img_idx].thumbnail_column;
                       state->scroll_thumbnail_into_view = true;
                     }
                     else if(keysym == ' ' || keysym == XK_Right || keysym == 'l')
@@ -4029,8 +4067,8 @@ int main(int argc, char** argv)
                       if(state->viewing_filtered_img_idx < state->filtered_img_count - 1)
                       {
                         state->viewing_filtered_img_idx += 1;
+                        state->target_thumbnail_column = get_filtered_img(state, state->viewing_filtered_img_idx)->thumbnail_column;
                       }
-                      state->target_column = state->img_entries[state->viewing_filtered_img_idx].thumbnail_column;
                       state->scroll_thumbnail_into_view = true;
                     }
                     else if(ctrl_held && keysym == 'a')
@@ -4689,6 +4727,7 @@ int main(int argc, char** argv)
                 }
 
                 state->viewing_filtered_img_idx = hovered_thumbnail_idx;
+                state->target_thumbnail_column = get_filtered_img(state, state->viewing_filtered_img_idx)->thumbnail_column;
                 // Do not scroll the newly selected thumbnail into view!
                 // It would mess with the extra-row padding.
               }
@@ -5034,6 +5073,7 @@ int main(int argc, char** argv)
                       } search_keywords[] = {
                         { str("f"), &first_path_item },
                         { str("m"), &first_model_item },
+                        { str("p"), &first_positive_item },
                         { str("n"), &first_negative_item },
                         { str("width"), &first_width_item, true },
                         { str("height"), &first_height_item, true },
@@ -5416,11 +5456,20 @@ _search_end_label:
 
             if(state->scroll_thumbnail_into_view)
             {
-              state->scroll_thumbnail_into_view = false;
-              // i32 extra_rows = (i32)(0.3f * state->win_h / thumbnail_h);
+#if 1
+              r32 extra_rows = 0.25f * state->win_h / thumbnail_h;
+              r32 thumbnail_row = -viewed_img->thumbnail_y / thumbnail_h;
+              state->thumbnail_scroll_rows = min(thumbnail_row,
+                  clamp(
+                    thumbnail_row + 1 - state->win_h / thumbnail_h + extra_rows,
+                    thumbnail_row - extra_rows,
+                    state->thumbnail_scroll_rows));
+#else
               state->thumbnail_scroll_rows = (-viewed_img->thumbnail_y - 0.5f * state->win_h) / thumbnail_h + 0.5f;
+#endif
 
               clamp_thumbnail_scroll_rows(state);
+              state->scroll_thumbnail_into_view = false;
             }
 
             i32 first_visible_thumbnail_idx = max(0, state->filtered_img_count - 1);
@@ -5492,6 +5541,236 @@ _search_end_label:
 
             b32 still_loading = false;
 
+            // Draw main image.
+            {
+              still_loading |= upload_img_texture(state, viewed_img);
+
+              glColor3f(1.0f, 1.0f, 1.0f);
+              GLuint texture_id = viewed_img->texture_id;
+              r32 tex_w = viewed_img->w;
+              r32 tex_h = viewed_img->h;
+              if(viewed_img->flags & IMG_FLAG_FAILED_TO_LOAD)
+              {
+                texture_id = 0;
+              }
+              if(state->debug_font_atlas)
+              {
+                // FONT TEST
+                texture_id = state->font_texture_id;
+                tex_w = state->font_texture_w;
+                tex_h = state->font_texture_h;
+              }
+
+              if(texture_id)
+              {
+                if(state->alpha_blend)
+                {
+                  if(texture_id == state->font_texture_id)
+                  {
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                  }
+                  else
+                  {
+                    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                  }
+                  glEnable(GL_BLEND);
+                }
+                else
+                {
+                  glDisable(GL_BLEND);
+                }
+
+                glBindTexture(GL_TEXTURE_2D, texture_id);
+
+                r32 u0 = 0.0f;
+                r32 v0 = 0.0f;
+                r32 u1 = 1.0f;
+                r32 v1 = 1.0f;
+
+                glScissor(image_region_x0, image_region_y0, image_region_w, image_region_h);
+
+                r32 mag = 1.0f;
+                if(!state->zoom_from_original_size && tex_w != 0 && tex_h != 0)
+                {
+                  mag = min((r32)image_region_w / (r32)tex_w, (r32)image_region_h / (r32)tex_h);
+                }
+                r32 exp_zoom = exp2f(zoom);
+                mag *= exp_zoom;
+
+                if(absolute(mag - (i32)(mag + 0.5f)) <= 1e-3f)
+                {
+                  mag = (i32)(mag + 0.5f);
+                }
+
+                r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
+                r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
+
+                x0 += win_min_side * exp_zoom * offset_x;
+                y0 += win_min_side * exp_zoom * offset_y;
+
+                if(mag == (i32)mag)
+                {
+                  // Avoid interpolating pixels when viewing them 1:1.
+                  x0 = (r32)(i32)(x0 + 0.5f);
+                  y0 = (r32)(i32)(y0 + 0.5f);
+                }
+
+                r32 x1 = x0 + mag * tex_w;
+                r32 y1 = y0 + mag * tex_h;
+
+                if(border_sampling)
+                {
+                  r32 margin = max(1.0f, mag);
+
+                  u0 -= margin / (r32)(mag * tex_w);
+                  v0 -= margin / (r32)(mag * tex_h);
+                  u1 += margin / (r32)(mag * tex_w);
+                  v1 += margin / (r32)(mag * tex_h);
+
+                  x0 -= margin;
+                  y0 -= margin;
+                  x1 += margin;
+                  y1 += margin;
+                }
+
+                glBegin(GL_QUADS);
+                glTexCoord2f(u0, v1); glVertex2f(x0, y0);
+                glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+                glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+                glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+                glEnd();
+              }
+
+              if(state->show_info == 1)
+              {
+                glScissor(image_region_x0, 0, state->win_w - image_region_x0, info_height);
+                // glScissor(0, 0, state->win_w, state->win_h);
+                glColor3f(text_gray, text_gray, text_gray);
+
+                r32 x = image_region_x0 + 0.2f * fs;
+                r32 y = fs * (state->font_descent + 0.1f);
+                str_t str = viewed_img->parameter_strings[IMG_STR_POSITIVE_PROMPT];
+                draw_str(state, 0, fs, x, y, str);
+              }
+              if(state->show_info == 2)
+              {
+                glScissor(
+                    image_region_x0 + image_region_w, image_region_y0,
+                    effective_info_panel_width, state->win_h);
+                // glScissor(0, 0, state->win_w, state->win_h);
+
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_BLEND);
+                r32 edge_gray = 0.0f;
+                if(interaction_eq(hovered_interaction, info_panel_resize_interaction))
+                {
+                  edge_gray = bright_bg ? 0.0f : 1.0f;
+                }
+                else
+                {
+                  edge_gray = bright_bg ? 0.4f : 0.6f;
+                }
+                glColor3f(edge_gray, edge_gray, edge_gray);
+                glBegin(GL_QUADS);
+                glVertex2f(state->win_w - effective_info_panel_width,     0);
+                glVertex2f(state->win_w - effective_info_panel_width + 1, 0);
+                glVertex2f(state->win_w - effective_info_panel_width + 1, state->win_h);
+                glVertex2f(state->win_w - effective_info_panel_width,     state->win_h);
+                glEnd();
+
+                r32 x0 = state->win_w - effective_info_panel_width + 0.5f * fs;
+                r32 x1 = state->win_w - 0.2f * fs;
+                r32 y1 = state->win_h - fs * (state->font_ascent + 0.3f);
+                r32 x_indented = x0 + fs;
+
+                r32 x = x0;
+                r32 y = y1 + fs;
+
+                u8 tmp[256];
+                str_t tmp_str = { tmp };
+
+#define SHOW_LABEL_VALUE(label, value) \
+                if(value.size > 0) \
+                { \
+                  y -= fs; \
+                  x = x0; \
+                  glColor3f(label_gray, label_gray, label_gray); \
+                  x += draw_str(state, 0, fs, x, y, str(label)); \
+                  glColor3f(text_gray, text_gray, text_gray); \
+                  draw_wrapped_text(state, fs, x_indented, x1, &x, &y, value); \
+                }
+
+                if(state->filtered_img_count == state->sorted_img_count)
+                {
+                  tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d",
+                      state->viewing_filtered_img_idx + 1, state->filtered_img_count);
+                }
+                else
+                {
+                  tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
+                      state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->sorted_img_count);
+                }
+                SHOW_LABEL_VALUE("", tmp_str);
+
+                SHOW_LABEL_VALUE("File: ", viewed_img->path);
+                {
+                  struct tm t = {0};
+                  localtime_r(&viewed_img->modified_at_time.tv_sec, &t);
+                  tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%04d-%02d-%02d %02d:%02d:%02d",
+                      t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                      t.tm_hour, t.tm_min, t.tm_sec);
+                }
+                SHOW_LABEL_VALUE("Time: ", tmp_str);
+                if(viewed_img->filesize < 10000)
+                {
+                  tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%lu B", viewed_img->filesize);
+                }
+                else if(viewed_img->filesize < 10000000)
+                {
+                  tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%.0f kB", 1e-3 * (r64)viewed_img->filesize);
+                }
+                else
+                {
+                  tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%.0f MB", 1e-6 * (r64)viewed_img->filesize);
+                }
+                SHOW_LABEL_VALUE("Size: ", tmp_str);
+                if(viewed_img->w || viewed_img->h)
+                {
+                  tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%dx%d", viewed_img->w, viewed_img->h);
+                  SHOW_LABEL_VALUE("Resolution: ", tmp_str);
+                }
+                else
+                {
+                  y -= fs;
+                }
+
+                y -= fs;
+                if(viewed_img->metadata_generation != viewed_img->load_generation &&
+                    state->metadata_loaded_count <= viewing_img_idx)
+                {
+                  SHOW_LABEL_VALUE("Loading metadata...", str(" "));
+                }
+                else
+                {
+                  SHOW_LABEL_VALUE("Model: ", viewed_img->parameter_strings[IMG_STR_MODEL]);
+                  SHOW_LABEL_VALUE("Sampler: ", viewed_img->parameter_strings[IMG_STR_SAMPLER]);
+                  SHOW_LABEL_VALUE("Sampling steps: ", viewed_img->parameter_strings[IMG_STR_SAMPLING_STEPS]);
+                  SHOW_LABEL_VALUE("CFG: ", viewed_img->parameter_strings[IMG_STR_CFG]);
+                  SHOW_LABEL_VALUE("Batch size: ", viewed_img->parameter_strings[IMG_STR_BATCH_SIZE]);
+                  SHOW_LABEL_VALUE("Seed: ", viewed_img->parameter_strings[IMG_STR_SEED]);
+                  SHOW_LABEL_VALUE("Positive prompt: ", viewed_img->parameter_strings[IMG_STR_POSITIVE_PROMPT]);
+                  SHOW_LABEL_VALUE("Negative prompt: ", viewed_img->parameter_strings[IMG_STR_NEGATIVE_PROMPT]);
+                  SHOW_LABEL_VALUE("Score: ", viewed_img->parameter_strings[IMG_STR_SCORE]);
+
+#if 0
+                  y -= fs;
+                  SHOW_LABEL_VALUE("All parameters: ", viewed_img->parameter_strings[IMG_STR_GENERATION_PARAMETERS]);
+#endif
+                }
+#undef SHOW_LABEL_VALUE
+              }
+            }
+
             if(state->show_thumbnails)
             {
               glScissor(0, 0, effective_thumbnail_panel_width, state->win_h);
@@ -5543,8 +5822,6 @@ _search_end_label:
 
               glEnd();
 
-              glScissor(0, 0, max(0, effective_thumbnail_panel_width - scrollbar_width), state->win_h);
-
               if(state->alpha_blend)
               {
                 glEnable(GL_BLEND);
@@ -5555,6 +5832,8 @@ _search_end_label:
               }
 
               glColor3f(1.0f, 1.0f, 1.0f);
+
+              glScissor(0, 0, max(0, effective_thumbnail_panel_width - scrollbar_width), state->win_h);
               hovered_thumbnail_idx = -1;
 
               // Traverse the thumbnails backwards to update the LRU chain
@@ -5571,23 +5850,78 @@ _search_end_label:
                 r32 box_x1 = box_x0 + thumbnail_w;
                 r32 box_y0 = box_y1 - thumbnail_h;
 
-                if(filtered_idx == 0 || get_filtered_img(state, filtered_idx - 1)->thumbnail_group != img->thumbnail_group)
+                if(state->group_mode != GROUP_MODE_NONE &&
+                    (filtered_idx == 0 || get_filtered_img(state, filtered_idx - 1)->thumbnail_group != img->thumbnail_group))
                 {
-                  glBindTexture(GL_TEXTURE_2D, 0);
-                  r32 g = bright_bg ? 0.9f : 0.1f;
-                  glColor3f(g, g, g);
-                  glBegin(GL_QUADS);
-                  glVertex2f(box_x0, box_y1);
-                  glVertex2f(box_x1, box_y1);
-                  glVertex2f(box_x1, box_y1 + 1.5f * fs);
-                  glVertex2f(box_x0, box_y1 + 1.5f * fs);
-                  glEnd();
+                  u8 tmp[256];
+                  str_t labels[2] = {0};
+                  i32 label_count = 1;
+
+                  switch(state->group_mode)
+                  {
+                    case GROUP_MODE_DAY:
+                    {
+                      struct tm t = {0};
+                      localtime_r(&img->modified_at_time.tv_sec, &t);
+                      labels[0].data = tmp;
+                      labels[0].size = snprintf((char*)tmp, sizeof(tmp),
+                          "%04d-%02d-%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+                    } break;
+
+                    case GROUP_MODE_PROMPT:
+                    {
+                      labels[0] = img->parameter_strings[IMG_STR_POSITIVE_PROMPT];
+                      if(img->parameter_strings[IMG_STR_NEGATIVE_PROMPT].size > 0)
+                      {
+                        label_count = 2;
+                        labels[1].data = tmp;
+                        labels[1].size = snprintf((char*)tmp, sizeof(tmp),
+                            "- %.*s", PF_STR(img->parameter_strings[IMG_STR_NEGATIVE_PROMPT]));
+                      }
+                    } break;
+
+                    case GROUP_MODE_MODEL:
+                    {
+                      labels[0] = img->parameter_strings[IMG_STR_MODEL];
+                    } break;
+                  }
+
+                  r32 label_y0 = box_y1;
+                  r32 label_y1 = box_y1 + (label_count + 0.25f) * fs;
+
+                  if(prev_mouse_x < effective_thumbnail_panel_width - scrollbar_width
+                      && prev_mouse_y >= label_y0
+                      && prev_mouse_y < label_y1)
+                  {
+                    glDisable(GL_SCISSOR_TEST);
+
+                    r32 x1 = 0;
+                    for_count(i, label_count)
+                    {
+                      x1 = max(x1, draw_str(state, DRAW_STR_MEASURE_ONLY, fs, 0, 0, labels[i]) + 0.5f * fs);
+                    }
+
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    r32 g = bright_bg ? 0.9f : 0.1f;
+                    glColor3f(g, g, g);
+                    glBegin(GL_QUADS);
+                    glVertex2f(0, label_y0);
+                    glVertex2f(x1, label_y0);
+                    glVertex2f(x1, label_y1);
+                    glVertex2f(0, label_y1);
+                    glEnd();
+                  }
 
                   glColor3f(text_gray, text_gray, text_gray);
-                  draw_str(state, 0, fs,
-                      box_x0,
-                      box_y1 + fs * 1.5f * state->font_descent,
-                      get_grouping_str(state, img));
+                  for_count(i, label_count)
+                  {
+                    r32 y = label_y0 + fs * ((label_count - i - 1) + 1.5f * state->font_descent);
+                    // TODO: Wrap text if longer than window width.
+                    // TODO: Highlight changes between previous and next groups.
+                    draw_str(state, 0, fs, box_x0, y, labels[i]);
+                  }
+
+                  glEnable(GL_SCISSOR_TEST);
                 }
 
                 if(hovered_thumbnail_idx == -1 &&
@@ -5703,233 +6037,6 @@ _search_end_label:
                   draw_str(state, 0, tag_scale, x, y, str("M"));
                 }
               }
-            }
-
-            still_loading |= upload_img_texture(state, viewed_img);
-
-            GLuint texture_id = viewed_img->texture_id;
-            r32 tex_w = viewed_img->w;
-            r32 tex_h = viewed_img->h;
-            if(viewed_img->flags & IMG_FLAG_FAILED_TO_LOAD)
-            {
-              texture_id = 0;
-            }
-            if(state->debug_font_atlas)
-            {
-              // FONT TEST
-              texture_id = state->font_texture_id;
-              tex_w = state->font_texture_w;
-              tex_h = state->font_texture_h;
-            }
-
-            if(texture_id)
-            {
-              if(state->alpha_blend)
-              {
-                if(texture_id == state->font_texture_id)
-                {
-                  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                }
-                else
-                {
-                  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-                }
-                glEnable(GL_BLEND);
-              }
-              else
-              {
-                glDisable(GL_BLEND);
-              }
-
-              glBindTexture(GL_TEXTURE_2D, texture_id);
-
-              r32 u0 = 0.0f;
-              r32 v0 = 0.0f;
-              r32 u1 = 1.0f;
-              r32 v1 = 1.0f;
-
-              glScissor(image_region_x0, image_region_y0, image_region_w, image_region_h);
-
-              r32 mag = 1.0f;
-              if(!state->zoom_from_original_size && tex_w != 0 && tex_h != 0)
-              {
-                mag = min((r32)image_region_w / (r32)tex_w, (r32)image_region_h / (r32)tex_h);
-              }
-              r32 exp_zoom = exp2f(zoom);
-              mag *= exp_zoom;
-
-              if(absolute(mag - (i32)(mag + 0.5f)) <= 1e-3f)
-              {
-                mag = (i32)(mag + 0.5f);
-              }
-
-              r32 x0 = 0.5f * (image_region_w - mag * tex_w) + image_region_x0;
-              r32 y0 = 0.5f * (image_region_h - mag * tex_h) + image_region_y0;
-
-              x0 += win_min_side * exp_zoom * offset_x;
-              y0 += win_min_side * exp_zoom * offset_y;
-
-              if(mag == (i32)mag)
-              {
-                // Avoid interpolating pixels when viewing them 1:1.
-                x0 = (r32)(i32)(x0 + 0.5f);
-                y0 = (r32)(i32)(y0 + 0.5f);
-              }
-
-              r32 x1 = x0 + mag * tex_w;
-              r32 y1 = y0 + mag * tex_h;
-
-              if(border_sampling)
-              {
-                r32 margin = max(1.0f, mag);
-
-                u0 -= margin / (r32)(mag * tex_w);
-                v0 -= margin / (r32)(mag * tex_h);
-                u1 += margin / (r32)(mag * tex_w);
-                v1 += margin / (r32)(mag * tex_h);
-
-                x0 -= margin;
-                y0 -= margin;
-                x1 += margin;
-                y1 += margin;
-              }
-
-              glColor3f(1.0f, 1.0f, 1.0f);
-              glBegin(GL_QUADS);
-              glTexCoord2f(u0, v1); glVertex2f(x0, y0);
-              glTexCoord2f(u1, v1); glVertex2f(x1, y0);
-              glTexCoord2f(u1, v0); glVertex2f(x1, y1);
-              glTexCoord2f(u0, v0); glVertex2f(x0, y1);
-              glEnd();
-            }
-
-            if(state->show_info == 1)
-            {
-              glScissor(image_region_x0, 0, state->win_w - image_region_x0, info_height);
-              // glScissor(0, 0, state->win_w, state->win_h);
-              glColor3f(text_gray, text_gray, text_gray);
-
-              r32 x = image_region_x0 + 0.2f * fs;
-              r32 y = fs * (state->font_descent + 0.1f);
-              str_t str = viewed_img->parameter_strings[IMG_STR_POSITIVE_PROMPT];
-              draw_str(state, 0, fs, x, y, str);
-            }
-            if(state->show_info == 2)
-            {
-              glScissor(
-                  image_region_x0 + image_region_w, image_region_y0,
-                  effective_info_panel_width, state->win_h);
-              // glScissor(0, 0, state->win_w, state->win_h);
-
-              glBindTexture(GL_TEXTURE_2D, 0);
-              glDisable(GL_BLEND);
-              r32 edge_gray = 0.0f;
-              if(interaction_eq(hovered_interaction, info_panel_resize_interaction))
-              {
-                edge_gray = bright_bg ? 0.0f : 1.0f;
-              }
-              else
-              {
-                edge_gray = bright_bg ? 0.4f : 0.6f;
-              }
-              glColor3f(edge_gray, edge_gray, edge_gray);
-              glBegin(GL_QUADS);
-              glVertex2f(state->win_w - effective_info_panel_width,     0);
-              glVertex2f(state->win_w - effective_info_panel_width + 1, 0);
-              glVertex2f(state->win_w - effective_info_panel_width + 1, state->win_h);
-              glVertex2f(state->win_w - effective_info_panel_width,     state->win_h);
-              glEnd();
-
-              r32 x0 = state->win_w - effective_info_panel_width + 0.5f * fs;
-              r32 x1 = state->win_w - 0.2f * fs;
-              r32 y1 = state->win_h - fs * (state->font_ascent + 0.3f);
-              r32 x_indented = x0 + fs;
-
-              r32 x = x0;
-              r32 y = y1 + fs;
-
-              u8 tmp[256];
-              str_t tmp_str = { tmp };
-
-#define SHOW_LABEL_VALUE(label, value) \
-              if(value.size > 0) \
-              { \
-                y -= fs; \
-                x = x0; \
-                glColor3f(label_gray, label_gray, label_gray); \
-                x += draw_str(state, 0, fs, x, y, str(label)); \
-                glColor3f(text_gray, text_gray, text_gray); \
-                draw_wrapped_text(state, fs, x_indented, x1, &x, &y, value); \
-              }
-
-              if(state->filtered_img_count == state->sorted_img_count)
-              {
-                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d",
-                    state->viewing_filtered_img_idx + 1, state->filtered_img_count);
-              }
-              else
-              {
-                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%d/%d of %d total",
-                    state->viewing_filtered_img_idx + 1, state->filtered_img_count, state->sorted_img_count);
-              }
-              SHOW_LABEL_VALUE("", tmp_str);
-
-              SHOW_LABEL_VALUE("File: ", viewed_img->path);
-              {
-                struct tm t = {0};
-                localtime_r(&viewed_img->modified_at_time.tv_sec, &t);
-                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%04d-%02d-%02d %02d:%02d:%02d",
-                    t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-                    t.tm_hour, t.tm_min, t.tm_sec);
-              }
-              SHOW_LABEL_VALUE("Time: ", tmp_str);
-              if(viewed_img->filesize < 10000)
-              {
-                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%lu B", viewed_img->filesize);
-              }
-              else if(viewed_img->filesize < 10000000)
-              {
-                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%.0f kB", 1e-3 * (r64)viewed_img->filesize);
-              }
-              else
-              {
-                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%.0f MB", 1e-6 * (r64)viewed_img->filesize);
-              }
-              SHOW_LABEL_VALUE("Size: ", tmp_str);
-              if(viewed_img->w || viewed_img->h)
-              {
-                tmp_str.size = snprintf((char*)tmp, sizeof(tmp), "%dx%d", viewed_img->w, viewed_img->h);
-                SHOW_LABEL_VALUE("Resolution: ", tmp_str);
-              }
-              else
-              {
-                y -= fs;
-              }
-
-              y -= fs;
-              if(viewed_img->metadata_generation != viewed_img->load_generation &&
-                  state->metadata_loaded_count <= viewing_img_idx)
-              {
-                SHOW_LABEL_VALUE("Loading metadata...", str(" "));
-              }
-              else
-              {
-                SHOW_LABEL_VALUE("Model: ", viewed_img->parameter_strings[IMG_STR_MODEL]);
-                SHOW_LABEL_VALUE("Sampler: ", viewed_img->parameter_strings[IMG_STR_SAMPLER]);
-                SHOW_LABEL_VALUE("Sampling steps: ", viewed_img->parameter_strings[IMG_STR_SAMPLING_STEPS]);
-                SHOW_LABEL_VALUE("CFG: ", viewed_img->parameter_strings[IMG_STR_CFG]);
-                SHOW_LABEL_VALUE("Batch size: ", viewed_img->parameter_strings[IMG_STR_BATCH_SIZE]);
-                SHOW_LABEL_VALUE("Seed: ", viewed_img->parameter_strings[IMG_STR_SEED]);
-                SHOW_LABEL_VALUE("Positive prompt: ", viewed_img->parameter_strings[IMG_STR_POSITIVE_PROMPT]);
-                SHOW_LABEL_VALUE("Negative prompt: ", viewed_img->parameter_strings[IMG_STR_NEGATIVE_PROMPT]);
-                SHOW_LABEL_VALUE("Score: ", viewed_img->parameter_strings[IMG_STR_SCORE]);
-
-#if 0
-                y -= fs;
-                SHOW_LABEL_VALUE("All parameters: ", viewed_img->parameter_strings[IMG_STR_GENERATION_PARAMETERS]);
-#endif
-              }
-#undef SHOW_LABEL_VALUE
             }
 
             if(state->filtering_modal)
@@ -6310,6 +6417,7 @@ _search_end_label:
                 y -= ypad;
                 SHOW_LABEL_VALUE("Sort", "Shift + S");
                 SHOW_LABEL_VALUE("Search", "/, Ctrl + F");
+                SHOW_LABEL_VALUE("Group", "Ctrl + G");
                 SHOW_LABEL_VALUE("Mark images", "M, Ctrl + A, Ctrl/Shift + LMB on thumbnails");
                 SHOW_LABEL_VALUE("Mark image and go to next", "Shift + M");
                 SHOW_LABEL_VALUE("Copy current or marked images", "Ctrl + C");
