@@ -5886,6 +5886,7 @@ _search_end_label:
                     } break;
                   }
 
+                  r32 label_x0 = box_x0 + 0.15f * fs;
                   r32 label_y0 = box_y1;
                   r32 label_y1 = box_y1 + (label_count + 0.25f) * fs;
 
@@ -5918,7 +5919,7 @@ _search_end_label:
                     r32 y = label_y0 + fs * ((label_count - i - 1) + 1.5f * state->font_descent);
                     // TODO: Wrap text if longer than window width.
                     // TODO: Highlight changes between previous and next groups.
-                    draw_str(state, 0, fs, box_x0, y, labels[i]);
+                    draw_str(state, 0, fs, label_x0, y, labels[i]);
                   }
 
                   glEnable(GL_SCISSOR_TEST);
@@ -6017,7 +6018,7 @@ _search_end_label:
                 }
                 else
                 {
-                  str_t msg = (img->flags & IMG_FLAG_FAILED_TO_LOAD) ? str("Unsupported") : str("Loading...");
+                  str_t msg = (img->flags & IMG_FLAG_FAILED_TO_LOAD) ? str("Unsupported") : str("...");
                   r32 unscaled_msg_width = draw_str(state, DRAW_STR_MEASURE_ONLY, 1, 0, 0, msg);
                   r32 msg_scale = min(2 * fs, 0.9f * thumbnail_w / max(1.0f, unscaled_msg_width));
                   r32 x = 0.5f * (box_x0 + box_x1 - msg_scale * unscaled_msg_width);
