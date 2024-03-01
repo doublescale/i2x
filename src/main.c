@@ -4491,10 +4491,12 @@ int main(int argc, char** argv)
                     }
                     else if(request->target == atom_uri_list)
                     {
-                      for(i32 img_idx = 0;
-                          img_idx < state->total_img_count;
-                          ++img_idx)
+                      for(i32 sorted_idx = 0;
+                          sorted_idx < state->total_img_count;
+                          ++sorted_idx)
                       {
+                        i32 img_idx = state->sorted_img_idxs[sorted_idx];
+
                         char* path = 0;
                         if(any_marked)
                         {
