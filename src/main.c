@@ -4046,13 +4046,6 @@ int main(int argc, char** argv)
                       state->prev_group_mode = state->group_mode;
                     }
 
-                    else if(keysym == XK_Escape)
-                    {
-                      // TODO: Better to persist the marking-state.
-                      b32 any_marked = false;
-                      for_count(i, state->total_img_count) { any_marked = any_marked || (state->img_entries[i].flags & IMG_FLAG_MARKED); }
-                      if(!any_marked) { quitting = true; }
-                    }
                     else if(keysym == XK_BackSpace || keysym == XK_Left || keysym == 'h')
                     {
                       if(state->viewing_filtered_img_idx > 0)
