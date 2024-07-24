@@ -117,6 +117,7 @@ typedef u32 img_flags_t;
 enum
 {
   IMG_STR_GENERATION_PARAMETERS,
+  IMG_STR_ANNOTATION,
   IMG_STR_POSITIVE_PROMPT,
   IMG_STR_NEGATIVE_PROMPT,
   IMG_STR_SEED,
@@ -148,6 +149,7 @@ typedef struct img_entry_t
   u64 filesize;
 
   u32 metadata_generation;
+  str_t annotation_path;
   str_t file_header_data;
   str_t parameter_strings[IMG_STR_COUNT];
   r32 parsed_r32s[PARSED_R32_COUNT];
@@ -899,6 +901,13 @@ internal void* metadata_loader_fun(void* raw_data)
 
       if(!(img->flags & IMG_FLAG_UNUSED) && load_generation != img->metadata_generation)
       {
+        if(img->parameter_strings[IMG_STR_ANNOTATION].size)
+        {
+          // This was allocated and read from a separate file.
+          free(img->parameter_strings[IMG_STR_ANNOTATION].data);
+          zero_struct(img->parameter_strings[IMG_STR_ANNOTATION]);
+        }
+
         if(img->file_header_data.size)
         {
           zero_struct(img->parameter_strings);
@@ -1220,8 +1229,8 @@ internal void* metadata_loader_fun(void* raw_data)
 
 #if 0
             printf("\n%.*s\n", PF_STR(img->path));
-#define P(x) printf("  " #x ": %.*s\n", (int)img->parameter_strings[x].size, img->parameter_strings[x].data);
-            // P(IMG_STR_GENERATION_PARAMETERS);
+#define P(x) printf("  " #x ": (%d) %.*s\n", (int)img->parameter_strings[x].size, PF_STR(img->parameter_strings[x]));
+            P(IMG_STR_GENERATION_PARAMETERS);
             P(IMG_STR_POSITIVE_PROMPT);
             P(IMG_STR_NEGATIVE_PROMPT);
             P(IMG_STR_SEED);
@@ -1234,6 +1243,15 @@ internal void* metadata_loader_fun(void* raw_data)
 #endif
 
             img->metadata_generation = load_generation;
+          }
+
+          if(img->annotation_path.size
+              && !img->parameter_strings[IMG_STR_POSITIVE_PROMPT].size
+            )
+          {
+            img->parameter_strings[IMG_STR_POSITIVE_PROMPT] =
+              img->parameter_strings[IMG_STR_ANNOTATION] =
+              read_file((char*)img->annotation_path.data);
           }
         }
       }
@@ -1834,7 +1852,10 @@ internal void refresh_input_paths(state_t* state)
           img->random_number = max(1, (u32)rand());
         }
 
-        state->sorted_img_idxs[state->sorted_img_count++] = img_idx;
+        if(!str_has_suffix(img->path, str(".txt")))
+        {
+          state->sorted_img_idxs[state->sorted_img_count++] = img_idx;
+        }
 
         // Remove this handled path so the next pass can ignore it.
         paths[path_idx] = paths[path_count - 1];
@@ -1845,6 +1866,48 @@ internal void refresh_input_paths(state_t* state)
         ++path_idx;
       }
     }
+  }
+
+  // Associate separate annotation .txt files.
+  // TODO: Use a hashmap for this too.
+  for(i32 img_idx = 0;
+      img_idx < state->total_img_count;
+      ++img_idx)
+  {
+    img_entry_t* entry = &state->img_entries[img_idx];
+    str_t path = entry->path;
+
+    str_t annotation_path = {};
+    annotation_path.data = malloc_array(path.size + 4, u8);
+    i32 dot_idx = path.size;
+    for_count(i, path.size)
+    {
+      if(path.data[i] == '.')
+      {
+        dot_idx = i;
+      }
+      annotation_path.data[i] = path.data[i];
+    }
+    for(i32 i = 0;
+        i < 4;
+        ++i)
+    {
+      annotation_path.data[dot_idx + i] = ".txt"[i];
+    }
+    annotation_path.size = dot_idx + 4;
+
+    for(i32 other_idx = 0;
+        other_idx < state->total_img_count;
+        ++other_idx)
+    {
+      if(other_idx != img_idx && str_eq(annotation_path, state->img_entries[other_idx].path))
+      {
+        entry->annotation_path = state->img_entries[other_idx].path;
+        break;
+      }
+    }
+
+    free(annotation_path.data);
   }
 
   if(path_count > 0)
@@ -6022,15 +6085,25 @@ _search_end_label:
                   draw_str(state, 0, msg_scale, x, y, msg);
                 }
 
+                r32 tag_scale = min(2 * fs, 0.4f * min(thumbnail_w, thumbnail_h));
                 if(img->flags & IMG_FLAG_MARKED)
                 {
-                  r32 tag_scale = min(2 * fs, 0.4f * min(thumbnail_w, thumbnail_h));
                   r32 x = lerp(box_x0, box_x1, 0.05f);
                   r32 y = lerp(box_y0, box_y1, 0.95f) - tag_scale * state->font_ascent;
                   glColor3f(0, 0, 0);
                   draw_str(state, 0, tag_scale, x + 0.05f * tag_scale, y - 0.05f * tag_scale, str("M"));
                   glColor3f(0, 1, 0);
                   draw_str(state, 0, tag_scale, x, y, str("M"));
+                }
+                if(img->parameter_strings[IMG_STR_ANNOTATION].size)
+                {
+                  str_t s = str("A");
+                  r32 x = lerp(box_x0, box_x1, 0.95f) - draw_str(state, DRAW_STR_MEASURE_ONLY, tag_scale, 0, 0, s);
+                  r32 y = lerp(box_y0, box_y1, 0.95f) - tag_scale * state->font_ascent;
+                  glColor3f(0, 0, 0);
+                  draw_str(state, 0, tag_scale, x + 0.05f * tag_scale, y - 0.05f * tag_scale, s);
+                  glColor3f(0, 0.5f, 1);
+                  draw_str(state, 0, tag_scale, x, y, s);
                 }
               }
             }
