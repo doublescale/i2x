@@ -1656,6 +1656,44 @@ internal u32 hash_str(str_t str)
   return result;
 }
 
+internal void add_hash_entry(i32* hashes, u32 hash_size, str_t str, i32 value)
+{
+  u32 hash = hash_str(str);
+  i32 slot = (i32)(hash % hash_size);
+  for(i32 offset = 0;
+      offset < hash_size;
+      ++offset)
+  {
+    i32* entry = &hashes[(slot + offset) % hash_size];
+    if(*entry == -1)
+    {
+      *entry = value;
+      break;
+    }
+  }
+}
+
+internal i32 get_hash_entry(state_t* state, i32* hashes, u32 hash_size, str_t str)
+{
+  i32 result = -1;
+  u32 hash = hash_str(str);
+  i32 slot = (i32)(hash % hash_size);
+  for(i32 offset = 0;
+      offset < hash_size;
+      ++offset)
+  {
+    i32 entry = hashes[(slot + offset) % hash_size];
+    if(entry == -1) { break; }
+    if(str_eq(str, state->img_entries[entry].path))
+    {
+      result = entry;
+      break;
+    }
+  }
+
+  return result;
+}
+
 internal void refresh_input_paths(state_t* state)
 {
   // u64 nsecs_start = get_nanoseconds();
@@ -1681,20 +1719,7 @@ internal void refresh_input_paths(state_t* state)
     img_entry_t* img = &state->img_entries[img_idx];
     if(!(img->flags & IMG_FLAG_UNUSED))
     {
-      u32 hash = hash_str(img->path);
-      i32 slot = (i32)(hash % path_hash_size);
-      for(i32 offset = 0;
-          offset < path_hash_size;
-          ++offset)
-      {
-        i32* entry = &path_hashes[(slot + offset) % path_hash_size];
-        if(*entry == -1)
-        {
-          *entry = img_idx;
-          break;
-        }
-      }
-
+      add_hash_entry(path_hashes, path_hash_size, img->path, img_idx);
       state->img_entries[img_idx].flags |= IMG_FLAG_UNUSED;
     }
   }
@@ -1760,20 +1785,7 @@ internal void refresh_input_paths(state_t* state)
       // Try to match existing image entries by path.
       if(pass == 0)
       {
-        u32 hash = hash_str(new_path);
-        i32 slot = (i32)(hash % path_hash_size);
-        for(i32 offset = 0;
-            offset < path_hash_size;
-            ++offset)
-        {
-          i32 entry = path_hashes[(slot + offset) % path_hash_size];
-          if(entry == -1) { break; }
-          if(str_eq(new_path, state->img_entries[entry].path))
-          {
-            img_idx = entry;
-            break;
-          }
-        }
+        img_idx = get_hash_entry(state, path_hashes, path_hash_size, new_path);
       }
 
       if(pass == 1)
@@ -1795,7 +1807,12 @@ internal void refresh_input_paths(state_t* state)
           img_idx = state->total_img_count++;
         }
 
-        first_possible_unused_img_idx = img_idx + 1;
+        if(img_idx != -1)
+        {
+          add_hash_entry(path_hashes, path_hash_size, new_path, img_idx);
+
+          first_possible_unused_img_idx = img_idx + 1;
+        }
       }
 
       if(img_idx != -1)
@@ -1869,7 +1886,6 @@ internal void refresh_input_paths(state_t* state)
   }
 
   // Associate separate annotation .txt files.
-  // TODO: Use a hashmap for this too.
   for(i32 img_idx = 0;
       img_idx < state->total_img_count;
       ++img_idx)
@@ -1896,15 +1912,10 @@ internal void refresh_input_paths(state_t* state)
     }
     annotation_path.size = dot_idx + 4;
 
-    for(i32 other_idx = 0;
-        other_idx < state->total_img_count;
-        ++other_idx)
+    i32 annotation_idx = get_hash_entry(state, path_hashes, path_hash_size, annotation_path);
+    if(annotation_idx != -1)
     {
-      if(other_idx != img_idx && str_eq(annotation_path, state->img_entries[other_idx].path))
-      {
-        entry->annotation_path = state->img_entries[other_idx].path;
-        break;
-      }
+      entry->annotation_path = state->img_entries[annotation_idx].path;
     }
 
     free(annotation_path.data);
