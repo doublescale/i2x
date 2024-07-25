@@ -2423,6 +2423,11 @@ internal void group_and_layout_thumbnails(state_t* state)
       img->thumbnail_y = y;
       img->thumbnail_group = current_group;
       prev_img = img;
+
+      if(filtered_idx == state->viewing_filtered_img_idx)
+      {
+        state->target_thumbnail_column = col;
+      }
     }
 
     // u64 nsecs_end = get_nanoseconds();
