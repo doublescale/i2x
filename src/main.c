@@ -1064,11 +1064,13 @@ internal void* metadata_loader_fun(void* raw_data)
                           str_t v = parse_next_json_str_destructively(&p, value_end);
                           img->parameter_strings[IMG_STR_SAMPLER] = v;
                         }
-                        else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\""))
+                        else if(advance_if_prefix_matches(&p, value_end, "\"ckpt_name\"")
+                            || (!img->parameter_strings[IMG_STR_MODEL].size && advance_if_prefix_matches(&p, value_end, "\"unet_name\"")))
                         {
                           str_t v = parse_next_json_str_destructively(&p, value_end);
                           v = str_remove_suffix(v, str(".ckpt"));
                           v = str_remove_suffix(v, str(".safetensors"));
+                          v = str_remove_suffix(v, str(".sft"));
                           img->parameter_strings[IMG_STR_MODEL] = v;
                         }
                         else if(advance_if_prefix_matches(&p, value_end, "\"batch_size\""))
